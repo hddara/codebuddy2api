@@ -21,6 +21,25 @@
     "themeLight": "浅色",
     "themeDark": "深色",
     "topbarHint": "语言通过 Cookie 持久化，无需使用带 locale 的路径。",
+    "settingsMenu": {
+      "account": "账号",
+      "appearance": "外观",
+      "changePassword": "修改密码",
+      "clearUsageCache": "清空用量缓存",
+      "language": "语言",
+      "maintenance": "快捷维护",
+      "open": "偏好与外观",
+      "passkeys": "Passkey 管理",
+      "usageCacheClearFailed": "清空用量缓存失败。",
+      "usageCacheCleared": "用量缓存已清空。"
+    },
+    "userMenu": {
+      "myUsage": "我的用量",
+      "noSession": "本机模式（未启用登录）",
+      "roleAdmin": "管理员",
+      "roleMember": "成员",
+      "roleOwner": "所有者"
+    },
     "tabs": {
       "dashboard": "仪表板",
       "usage": "用量统计",

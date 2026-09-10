@@ -222,21 +222,48 @@ textarea {
   background: var(--lobe-color-fill-secondary) !important;
 }
 
-.admin-header-select {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--color-secondary);
-}
-
 .admin-header-controls {
   flex: 0 0 auto;
   margin-left: auto;
   min-width: 0;
 }
 
-.admin-header-select > *:last-child {
-  min-width: 116px;
+.admin-header-user {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  cursor: pointer;
+  display: inline-flex;
+  gap: 8px;
+  padding: 3px 8px 3px 3px;
+}
+
+.admin-header-user:hover {
+  background: var(--lobe-color-fill-secondary);
+}
+
+.admin-header-user-meta {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+  text-align: left;
+}
+
+.admin-header-user-name {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.admin-header-user-role {
+  color: var(--color-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.admin-header-settings {
+  box-shadow: none !important;
 }
 
 .admin-header-mobile-menu {
@@ -267,10 +294,6 @@ textarea {
     display: block;
     flex: 0 0 auto;
   }
-}
-
-.console-logout {
-  box-shadow: none !important;
 }
 
 .console-main {

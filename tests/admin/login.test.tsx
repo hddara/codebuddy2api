@@ -14,6 +14,16 @@ vi.mock('@simplewebauthn/browser', () => ({
   startAuthentication: vi.fn(),
 }));
 
+// The login header renders the shared personal-settings menu, which uses the
+// app router for navigation and refreshing.
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({
+    push: vi.fn(),
+    refresh: vi.fn(),
+    replace: vi.fn(),
+  }),
+}));
+
 const { browserSupportsWebAuthnAutofill, startAuthentication } =
   await import('@simplewebauthn/browser');
 

@@ -16,6 +16,16 @@ export type TabKey =
   | 'debug'
   | 'settings';
 
+export type AdminRole = 'admin' | 'member' | 'owner';
+
+export interface AdminProfile {
+  avatarUrl: string | null;
+  displayName: string;
+  id: string;
+  role: AdminRole;
+  username: string;
+}
+
 export interface AdminSettingsSnapshot {
   labels: Record<string, string>;
   values: Record<string, string | number | null>;

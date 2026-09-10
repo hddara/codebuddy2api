@@ -21,6 +21,25 @@
     "themeLight": "Light",
     "themeDark": "Dark",
     "topbarHint": "Language is stored in a cookie, so stable routes do not need locale prefixes.",
+    "settingsMenu": {
+      "account": "Account",
+      "appearance": "Appearance",
+      "changePassword": "Change password",
+      "clearUsageCache": "Clear usage cache",
+      "language": "Language",
+      "maintenance": "Maintenance",
+      "open": "Preferences",
+      "passkeys": "Manage passkeys",
+      "usageCacheClearFailed": "Unable to clear the usage cache.",
+      "usageCacheCleared": "Usage cache cleared."
+    },
+    "userMenu": {
+      "myUsage": "My usage",
+      "noSession": "Local mode (sign-in disabled)",
+      "roleAdmin": "Admin",
+      "roleMember": "Member",
+      "roleOwner": "Owner"
+    },
     "tabs": {
       "dashboard": "Dashboard",
       "usage": "Usage",

@@ -21,6 +21,25 @@
     "themeLight": "ライト",
     "themeDark": "ダーク",
     "topbarHint": "言語は Cookie に保存されるため、locale プレフィックス付きのパスは不要です。",
+    "settingsMenu": {
+      "account": "アカウント",
+      "appearance": "外観",
+      "changePassword": "パスワード変更",
+      "clearUsageCache": "使用量キャッシュを消去",
+      "language": "言語",
+      "maintenance": "メンテナンス",
+      "open": "環境と外観",
+      "passkeys": "Passkey の管理",
+      "usageCacheClearFailed": "使用量キャッシュを消去できませんでした。",
+      "usageCacheCleared": "使用量キャッシュを消去しました。"
+    },
+    "userMenu": {
+      "myUsage": "自分の使用量",
+      "noSession": "ローカルモード（ログイン無効）",
+      "roleAdmin": "管理者",
+      "roleMember": "メンバー",
+      "roleOwner": "オーナー"
+    },
     "tabs": {
       "dashboard": "ダッシュボード",
       "usage": "使用量",

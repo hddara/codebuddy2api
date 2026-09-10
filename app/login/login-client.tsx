@@ -12,6 +12,7 @@ import { useCallback, useEffect, useRef, useState, useTransition } from 'react';
 
 import { themeAtom } from '@/app/page-state';
 import { AdminHeader } from '@/app/header';
+import { UserSettingsMenu } from '@/app/user-settings-menu';
 import type { AdminLoginMessages } from '@/lib/i18n/messages';
 import {
   type LocalePreference,
@@ -275,10 +276,14 @@ const LoginClient = ({
       <AdminHeader
         brand="CodeBuddy2API"
         className="login-header"
-        localePreference={localePreference}
-        onLocaleChange={changeLocale}
-        onThemeChange={changeTheme}
-        theme={theme}
+        settingsArea={
+          <UserSettingsMenu
+            localePreference={localePreference}
+            onLocaleChange={changeLocale}
+            onThemeChange={changeTheme}
+            theme={theme}
+          />
+        }
       />
       <Block
         as="section"

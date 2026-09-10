@@ -4,7 +4,7 @@ import { redirect } from 'next/navigation';
 import type { ReactNode } from 'react';
 
 import AdminPageLayout from '@/app/page-shell';
-import type { TabKey } from '@/app/page-data';
+import type { AdminProfile, TabKey } from '@/app/page-data';
 import { getInitialData } from '@/app/page-loader';
 import { getAdminSessionSummary } from '@/lib/server/admin/session';
 import {
@@ -52,6 +52,16 @@ export const AdminPage = async ({
       ? (headerStore.get('accept-language') ?? undefined)
       : localePreference,
   );
+  // Phase 1 keeps a single administrator account; the multi-user system will
+  // replace this source while keeping the AdminProfile shape unchanged.
+  const accountName = session.username?.trim() || 'admin';
+  const profile: AdminProfile = {
+    avatarUrl: null,
+    displayName: accountName,
+    id: sessionAuthenticated ? accountName : 'local',
+    role: 'owner',
+    username: accountName,
+  };
 
   return (
     <AdminPageLayout
@@ -61,6 +71,7 @@ export const AdminPage = async ({
         usagePreferences: session.usagePreferences,
       })}
       initialLocalePreference={localePreference}
+      profile={profile}
       showLogout={sessionAuthenticated}
       initialTab={initialTab}
       initialTheme={parseThemeMode(cookieStore.get(themeCookieName)?.value)}

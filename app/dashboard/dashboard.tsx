@@ -40,6 +40,11 @@ export const defaultDashboardState: DashboardState = {
 
 export const dashboardStateAtom = atom<DashboardState>(defaultDashboardState);
 
+// Bumped by other tabs (credentials mutations) when dashboard data becomes
+// stale. The dashboard controller reloads whenever the signal changes, so no
+// other tab needs a reference to the dashboard loader.
+export const dashboardRefreshSignalAtom = atom(0);
+
 export const createDashboardState = (
   initialData: Extract<AdminConsoleInitialData, { tab: 'dashboard' }>,
 ): DashboardState => ({
