@@ -109,10 +109,39 @@ export interface UsageAnalyticsResponse {
 
 const USAGE_NAMESPACE = 'usage';
 const USAGE_STORE_KEY = 'history';
-const MAX_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
+/**
+ * Usage events are the only source for quota balances, so the retention window
+ * has to cover a whole quota period (a month is up to 31 days) or balance
+ * checks would silently under-count and hand out free quota. Override with
+ * `CODEBUDDY_USAGE_RETENTION_DAYS`; values below one month are still honored
+ * but the affected balances report themselves as degraded.
+ */
+const DEFAULT_USAGE_RETENTION_DAYS = 35;
+/**
+ * The file backend keeps the whole history in a single JSON document that is
+ * rewritten on every flush, so it keeps the pre-quota window and its balances
+ * degrade instead of growing the document fivefold.
+ */
+const FILE_USAGE_RETENTION_DAYS = 7;
+const USAGE_RETENTION_DAYS_ENV = 'CODEBUDDY_USAGE_RETENTION_DAYS';
+const getUsageRetentionMs = (): number => {
+  const raw = process.env[USAGE_RETENTION_DAYS_ENV]?.trim();
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed * DAY_MS;
+  }
+
+  const defaultDays =
+    getStorageBackendMeta().backend === 'file'
+      ? FILE_USAGE_RETENTION_DAYS
+      : DEFAULT_USAGE_RETENTION_DAYS;
+
+  return defaultDays * DAY_MS;
+};
 const FLUSH_INTERVAL_MS = 1000;
 const MAX_PENDING_EVENTS = 100;
 const RETENTION_PRUNE_INTERVAL_MS = HOUR_MS;
@@ -254,6 +283,8 @@ const trimExpiredEvents = (
   events: UsageEventRecord[],
   nowMs: number,
 ): UsageEventRecord[] => {
+  const retentionMs = getUsageRetentionMs();
+
   return events.filter((event) => {
     const timestampMs = Date.parse(event.timestamp);
 
@@ -261,14 +292,14 @@ const trimExpiredEvents = (
       return false;
     }
 
-    return nowMs - timestampMs <= MAX_RETENTION_MS;
+    return nowMs - timestampMs <= retentionMs;
   });
 };
 
 const readUsageStore = async (): Promise<UsageStore> => {
   if (getStorageBackendMeta().backend !== 'file') {
     const events = await listStorageUsageEvents(
-      new Date(Date.now() - MAX_RETENTION_MS),
+      new Date(Date.now() - getUsageRetentionMs()),
     );
     return {
       events: events
@@ -329,7 +360,7 @@ const flushPendingUsageEvents = async (): Promise<void> => {
           })),
         );
         if (nowMs - lastUsageRetentionPruneAt >= RETENTION_PRUNE_INTERVAL_MS) {
-          await trimStorageUsageEvents(new Date(nowMs - MAX_RETENTION_MS));
+          await trimStorageUsageEvents(new Date(nowMs - getUsageRetentionMs()));
           lastUsageRetentionPruneAt = nowMs;
         }
         if (pendingUsageEvents.length) {
@@ -829,4 +860,77 @@ export const getUsageAnalytics = async ({
 
 export const resetUsageHistory = async (): Promise<void> => {
   await clearUsageHistory();
+};
+
+export interface UsageOwnerTotals {
+  callCount: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+const createEmptyOwnerTotals = (): UsageOwnerTotals => ({
+  callCount: 0,
+  cacheCreationTokens: 0,
+  cacheReadTokens: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  totalTokens: 0,
+});
+
+/** Start of the window that is still fully backed by retained events. */
+export const getUsageRetentionStartMs = (
+  nowMs: number = Date.now(),
+): number => {
+  return nowMs - getUsageRetentionMs();
+};
+
+/**
+ * Sums the usage recorded for the given access keys inside `[startMs, endMs)`.
+ * Backs the quota balance, which must not pay for the analytics page machinery.
+ */
+export const getUsageTotalsForAccessKeys = async ({
+  accessKeyIds,
+  endMs,
+  startMs,
+}: {
+  accessKeyIds: string[];
+  endMs: number;
+  startMs: number;
+}): Promise<UsageOwnerTotals> => {
+  const wanted = new Set(accessKeyIds.filter((id) => id.length > 0));
+
+  if (!wanted.size) {
+    return createEmptyOwnerTotals();
+  }
+
+  // Pending events are still in memory; flushing keeps the balance in step with
+  // what the analytics page would report.
+  await flushPendingUsageEvents();
+
+  const store = await readUsageStore();
+  const totals = createEmptyOwnerTotals();
+
+  store.events.forEach((event) => {
+    if (!event.accessKeyId || !wanted.has(event.accessKeyId)) {
+      return;
+    }
+
+    const eventMs = Date.parse(event.timestamp);
+
+    if (!Number.isFinite(eventMs) || eventMs < startMs || eventMs >= endMs) {
+      return;
+    }
+
+    totals.callCount += event.callCount;
+    totals.cacheCreationTokens += event.cacheCreationTokens;
+    totals.cacheReadTokens += event.cacheReadTokens;
+    totals.inputTokens += event.inputTokens;
+    totals.outputTokens += event.outputTokens;
+    totals.totalTokens += event.totalTokens;
+  });
+
+  return totals;
 };

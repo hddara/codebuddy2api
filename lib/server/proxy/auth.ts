@@ -6,6 +6,60 @@ import {
   hasAccessKeys,
   type AccessKeyRecord,
 } from '../domain/access-keys';
+import { getAccessKeyQuotaViolation } from '../domain/quotas';
+
+const QUOTA_ENFORCEMENT_ENV = 'CODEBUDDY_QUOTA_ENFORCEMENT';
+
+/**
+ * Quotas reject by default. `CODEBUDDY_QUOTA_ENFORCEMENT=warn` keeps evaluating
+ * the balance but only logs, which is the escape hatch the design reserved for
+ * a rollout where usage still has to be observed before it is enforced.
+ */
+const isQuotaEnforcementEnabled = (): boolean => {
+  return process.env[QUOTA_ENFORCEMENT_ENV]?.trim().toLowerCase() !== 'warn';
+};
+
+const getQuotaExceededResponse = async (
+  accessKey: AccessKeyRecord,
+  protocol: 'anthropic' | 'openai',
+): Promise<Response | null> => {
+  const violation = await getAccessKeyQuotaViolation(accessKey);
+
+  if (!violation) {
+    return null;
+  }
+
+  if (!isQuotaEnforcementEnabled()) {
+    console.warn(
+      `[CodeBuddy2API] Quota exceeded but enforcement is off: ${violation.message}`,
+    );
+
+    return null;
+  }
+
+  if (protocol === 'anthropic') {
+    return Response.json(
+      {
+        type: 'error',
+        error: {
+          type: 'rate_limit_error',
+          message: violation.message,
+        },
+      },
+      { status: 429 },
+    );
+  }
+
+  return Response.json(
+    {
+      error: {
+        message: violation.message,
+        type: 'insufficient_quota',
+      },
+    },
+    { status: 429 },
+  );
+};
 
 const extractBearerToken = (request: NextRequest): string | null => {
   const header = request.headers.get('authorization')?.trim();
@@ -31,6 +85,10 @@ const extractAccessKeyToken = (request: NextRequest): string | null => {
   return extractBearerToken(request) ?? extractApiKeyToken(request);
 };
 
+const isDisabledAccessKey = (record: AccessKeyRecord | null): boolean => {
+  return record?.status === 'disabled';
+};
+
 const getAccessKeyStoreErrorResponse = async (): Promise<Response | null> => {
   if (!(await getAccessKeyStoreError())) {
     return null;
@@ -40,7 +98,7 @@ const getAccessKeyStoreErrorResponse = async (): Promise<Response | null> => {
     {
       error: {
         message:
-          'Access key storage is unreadable. Fix access-keys.json first.',
+          'Access key storage is unreadable. Fix the applications storage first.',
       },
     },
     { status: 503 },
@@ -92,14 +150,23 @@ export const getClientAuthErrorResponse = (
       );
     }
 
-    if (!(await findAccessKeyBySecret(token))) {
+    const accessKey = await findAccessKeyBySecret(token);
+
+    if (!accessKey) {
       return Response.json(
         { error: { message: 'Invalid access key' } },
         { status: 403 },
       );
     }
 
-    return null;
+    if (isDisabledAccessKey(accessKey)) {
+      return Response.json(
+        { error: { message: 'Access key is disabled' } },
+        { status: 403 },
+      );
+    }
+
+    return getQuotaExceededResponse(accessKey, 'openai');
   })();
 };
 
@@ -126,14 +193,23 @@ export const getAdminAuthErrorResponse = (
       );
     }
 
-    if (!(await findAccessKeyBySecret(token))) {
+    const accessKey = await findAccessKeyBySecret(token);
+
+    if (!accessKey) {
       return Response.json(
         { error: { message: 'Invalid access key' } },
         { status: 403 },
       );
     }
 
-    return null;
+    if (isDisabledAccessKey(accessKey)) {
+      return Response.json(
+        { error: { message: 'Access key is disabled' } },
+        { status: 403 },
+      );
+    }
+
+    return getQuotaExceededResponse(accessKey, 'openai');
   })();
 };
 
@@ -181,7 +257,9 @@ export const getAnthropicAuthErrorResponse = (
       );
     }
 
-    if (!(await findAccessKeyBySecret(token))) {
+    const accessKey = await findAccessKeyBySecret(token);
+
+    if (!accessKey) {
       return Response.json(
         {
           type: 'error',
@@ -191,6 +269,19 @@ export const getAnthropicAuthErrorResponse = (
       );
     }
 
-    return null;
+    if (isDisabledAccessKey(accessKey)) {
+      return Response.json(
+        {
+          type: 'error',
+          error: {
+            type: 'authentication_error',
+            message: 'API key is disabled',
+          },
+        },
+        { status: 403 },
+      );
+    }
+
+    return getQuotaExceededResponse(accessKey, 'anthropic');
   })();
 };

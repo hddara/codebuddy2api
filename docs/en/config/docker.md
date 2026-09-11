@@ -38,15 +38,17 @@ After migration, set `CODEBUDDY_STORAGE_IMPORT_LEGACY_FILES=false` and remove th
 
 ## Environment variables
 
-| Variable                                | Purpose                                                          | Example / default                                |
-| --------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------ |
-| `CODEBUDDY_STORAGE_BACKEND`             | Storage backend                                                  | `file`, `sqlite`, or `pg`                        |
-| `CODEBUDDY_STORAGE_SQLITE_PATH`         | SQLite file path                                                 | `.codebuddy_data/storage.sqlite`                 |
-| `CODEBUDDY_STORAGE_ENCRYPTION_KEY`      | Encrypts sensitive database data; required for database backends | Long random string                               |
-| `CODEBUDDY_STORAGE_IMPORT_LEGACY_FILES` | Imports legacy files                                             | Set to `false` for a new deployment              |
-| `DATABASE_URL`                          | PostgreSQL connection string                                     | `postgres://user:password@db:5432/codebuddy2api` |
-| `CODEBUDDY_API_ENDPOINT`                | Upstream CodeBuddy API URL                                       | `https://copilot.tencent.com`                    |
-| `CODEBUDDY_AUTH_MODE`                   | Upstream authentication mode                                     | `auto` / `token`                                 |
-| `CODEBUDDY_INTERNET_ENVIRONMENT`        | Network environment                                              | `internal` / `ioa` / `public`                    |
-| `CODEBUDDY_LOG_LEVEL`                   | Server log level                                                 | `INFO`                                           |
-| `CODEBUDDY_ADMIN_PASSKEY_RP_ID`         | Admin passkey hostname                                           | `example.com`                                    |
+| Variable                                | Purpose                                                          | Example / default                                           |
+| --------------------------------------- | ---------------------------------------------------------------- | ----------------------------------------------------------- |
+| `CODEBUDDY_STORAGE_BACKEND`             | Storage backend                                                  | `file`, `sqlite`, or `pg`                                   |
+| `CODEBUDDY_STORAGE_SQLITE_PATH`         | SQLite file path                                                 | `.codebuddy_data/storage.sqlite`                            |
+| `CODEBUDDY_STORAGE_ENCRYPTION_KEY`      | Encrypts sensitive database data; required for database backends | Long random string                                          |
+| `CODEBUDDY_STORAGE_IMPORT_LEGACY_FILES` | Imports legacy files                                             | Set to `false` for a new deployment                         |
+| `DATABASE_URL`                          | PostgreSQL connection string                                     | `postgres://user:password@db:5432/codebuddy2api`            |
+| `CODEBUDDY_API_ENDPOINT`                | Upstream CodeBuddy API URL                                       | `https://copilot.tencent.com`                               |
+| `CODEBUDDY_AUTH_MODE`                   | Upstream authentication mode                                     | `auto` / `token`                                            |
+| `CODEBUDDY_INTERNET_ENVIRONMENT`        | Network environment                                              | `internal` / `ioa` / `public`                               |
+| `CODEBUDDY_LOG_LEVEL`                   | Server log level                                                 | `INFO`                                                      |
+| `CODEBUDDY_ADMIN_PASSKEY_RP_ID`         | Admin passkey hostname                                           | `example.com`                                               |
+| `CODEBUDDY_USAGE_RETENTION_DAYS`        | Usage event retention (quota balance window)                     | `35` (`7` on the file backend), must cover one quota period |
+| `CODEBUDDY_QUOTA_ENFORCEMENT`           | Over-quota behaviour                                             | `reject` (default) / `warn` logs only                       |

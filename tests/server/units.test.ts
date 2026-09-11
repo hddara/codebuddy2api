@@ -9,12 +9,18 @@ import {
   findAccessKeyById,
   findAccessKeyBySecret,
   getAccessKeySecret,
+  getAccessKeyStoreError,
   hasAccessKeys,
   listAccessKeys,
   listStoredAccessKeys,
   removeCredentialReferencesFromAccessKeys,
   updateAccessKey,
 } from '@/lib/server/domain/access-keys';
+import { createApplication } from '@/lib/server/domain/applications';
+import {
+  resetQuotaRuntimeState,
+  setQuotaRecord,
+} from '@/lib/server/domain/quotas';
 import {
   getAdminAuthErrorResponse,
   getAuthErrorResponse,
@@ -142,6 +148,7 @@ describe('server units', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     vi.spyOn(process, 'cwd').mockReturnValue(tempRootDir);
     delete process.env.CODEBUDDY_CONFIG_PATH;
+    delete process.env.CODEBUDDY_QUOTA_ENFORCEMENT;
     process.env.CODEBUDDY_AUTH_MODE = 'auto';
     process.env.CODEBUDDY_API_KEY = '';
     fs.rmSync(tempAccessKeysPath, { force: true });
@@ -326,6 +333,118 @@ describe('server units', () => {
     ).toBeNull();
   });
 
+  it('rejects disabled applications on every auth guard', async () => {
+    const credential = await addCredential({
+      bearer_token: 'token-disabled',
+      user_id: 'disabled@example.com',
+    });
+    const created = await createApplication({
+      credentialFilenames: [credential.filename],
+      name: 'Disabled App',
+      status: 'disabled',
+    });
+
+    const clientError = await getClientAuthErrorResponse(
+      makeNextRequest('http://localhost/test', {
+        headers: { authorization: `Bearer ${created.secret}` },
+      }),
+    );
+    expect(clientError?.status).toBe(403);
+    await expect(clientError?.json()).resolves.toEqual({
+      error: { message: 'Access key is disabled' },
+    });
+    expect(
+      (
+        await getAdminAuthErrorResponse(
+          makeNextRequest('http://localhost/admin', {
+            headers: { authorization: `Bearer ${created.secret}` },
+          }),
+        )
+      )?.status,
+    ).toBe(403);
+    expect(
+      (
+        await getAnthropicAuthErrorResponse(
+          makeNextRequest('http://localhost/v1/messages', {
+            headers: { 'x-api-key': created.secret },
+          }),
+        )
+      )?.status,
+    ).toBe(403);
+  });
+
+  it('rejects over-quota requests on every auth guard', async () => {
+    const credential = await addCredential({
+      bearer_token: 'token-quota',
+      user_id: 'quota@example.com',
+    });
+    const created = await createApplication({
+      credentialFilenames: [credential.filename],
+      name: 'Quota App',
+    });
+
+    await recordUsageEvent({
+      accessKeyId: created.application.id,
+      accessKeyName: created.application.name,
+      credentialFilename: credential.filename,
+      model: 'claude-sonnet-4',
+      route: '/v1/chat/completions',
+      usage: { total_tokens: 12 },
+    });
+    await setQuotaRecord({
+      maxCalls: 1,
+      ownerId: created.application.id,
+      ownerType: 'app',
+      period: 'monthly',
+    });
+    resetQuotaRuntimeState();
+
+    const clientError = await getClientAuthErrorResponse(
+      makeNextRequest('http://localhost/test', {
+        headers: { authorization: `Bearer ${created.secret}` },
+      }),
+    );
+    expect(clientError?.status).toBe(429);
+    await expect(clientError?.json()).resolves.toMatchObject({
+      error: { type: 'insufficient_quota' },
+    });
+
+    const anthropicError = await getAnthropicAuthErrorResponse(
+      makeNextRequest('http://localhost/v1/messages', {
+        headers: { 'x-api-key': created.secret },
+      }),
+    );
+    expect(anthropicError?.status).toBe(429);
+    await expect(anthropicError?.json()).resolves.toMatchObject({
+      type: 'error',
+      error: { type: 'rate_limit_error' },
+    });
+
+    expect(
+      (
+        await getAdminAuthErrorResponse(
+          makeNextRequest('http://localhost/admin', {
+            headers: { authorization: `Bearer ${created.secret}` },
+          }),
+        )
+      )?.status,
+    ).toBe(429);
+
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    process.env.CODEBUDDY_QUOTA_ENFORCEMENT = 'warn';
+    expect(
+      await getClientAuthErrorResponse(
+        makeNextRequest('http://localhost/test', {
+          headers: { authorization: `Bearer ${created.secret}` },
+        }),
+      ),
+    ).toBeNull();
+    expect(console.warn).toHaveBeenCalled();
+
+    delete process.env.CODEBUDDY_QUOTA_ENFORCEMENT;
+    resetQuotaRuntimeState();
+  });
+
   it('covers auth behavior when access key storage is unreadable', async () => {
     fs.mkdirSync(tempDataDir, { recursive: true });
     fs.writeFileSync(path.join(tempDataDir, 'access-keys.json'), '{');
@@ -347,7 +466,7 @@ describe('server units', () => {
     expect(await clientError?.json()).toEqual({
       error: {
         message:
-          'Access key storage is unreadable. Fix access-keys.json first.',
+          'Access key storage is unreadable. Fix the applications storage first.',
       },
     });
 
@@ -989,9 +1108,17 @@ describe('server units', () => {
     expect(await listStoredAccessKeys()).toHaveLength(1);
     expect((await listAccessKeys()).access_keys).toHaveLength(1);
 
-    fs.writeFileSync(path.join(tempDataDir, 'access-keys.json'), '{');
-    expect(await listStoredAccessKeys()).toEqual([]);
-    expect(await hasAccessKeys()).toBe(false);
+    const brokenApplicationPath = path.join(
+      tempDataDir,
+      'applications',
+      'broken.json',
+    );
+
+    fs.writeFileSync(brokenApplicationPath, '{');
+    expect(await listStoredAccessKeys()).toEqual([
+      expect.objectContaining({ id: 'valid-id' }),
+    ]);
+    expect(await getAccessKeyStoreError()).toContain('applications/broken');
     expect(
       (
         await getClientAuthErrorResponse(
@@ -1002,7 +1129,7 @@ describe('server units', () => {
       )?.status,
     ).toBe(503);
 
-    fs.writeFileSync(path.join(tempDataDir, 'access-keys.json'), '');
+    fs.writeFileSync(brokenApplicationPath, '');
     expect(
       (
         await getClientAuthErrorResponse(
@@ -1013,7 +1140,10 @@ describe('server units', () => {
       )?.status,
     ).toBe(503);
 
-    fs.writeFileSync(path.join(tempDataDir, 'access-keys.json'), 'null');
+    fs.writeFileSync(
+      brokenApplicationPath,
+      JSON.stringify({ id: 42, name: 'broken' }),
+    );
     expect(
       (
         await getClientAuthErrorResponse(
@@ -1023,6 +1153,10 @@ describe('server units', () => {
         )
       )?.status,
     ).toBe(503);
+
+    fs.rmSync(brokenApplicationPath, { force: true });
+    expect(await getAccessKeyStoreError()).toBeNull();
+    expect(await hasAccessKeys()).toBe(true);
   });
 
   it('covers access key validation, normalization, and deletion', async () => {
@@ -1040,7 +1174,7 @@ describe('server units', () => {
         credentialFilenames: [firstCredential.filename],
         name: '   ',
       }),
-    ).rejects.toThrow('Access key name is required');
+    ).rejects.toThrow('Application name is required');
     const emptyKey = await createAccessKey({
       credentialFilenames: ['   '],
       name: 'Missing Credentials',
@@ -1068,7 +1202,7 @@ describe('server units', () => {
         credentialFilenames: [firstCredential.filename],
         name: '   ',
       }),
-    ).rejects.toThrow('Access key name is required');
+    ).rejects.toThrow('Application name is required');
     await expect(
       updateAccessKey(created.access_key.id, {
         credentialFilenames: [],
@@ -1080,7 +1214,7 @@ describe('server units', () => {
         credentialFilenames: [firstCredential.filename],
         name: 'Unknown Key',
       }),
-    ).rejects.toThrow('Access key not found');
+    ).rejects.toThrow('Application not found');
 
     const updated = await updateAccessKey(created.access_key.id, {
       credentialFilenames: [secondCredential.filename],

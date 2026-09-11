@@ -191,6 +191,12 @@ describe('admin auth passkeys', () => {
       authenticated: true,
       passkeyCount: 1,
       passwordConfigured: true,
+      user: expect.objectContaining({
+        displayName: 'admin',
+        role: 'owner',
+        status: 'active',
+        username: 'admin',
+      }),
       username: 'admin',
       usagePreferences: null,
     });

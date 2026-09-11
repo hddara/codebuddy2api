@@ -22,6 +22,15 @@ export interface StorageJsonReadResult<T> {
   value: T | null;
 }
 
+export interface StorageJsonListResult<T> {
+  documents: Array<JsonDocument<T>>;
+  /**
+   * Set when at least one document could not be read. Unreadable documents are
+   * skipped, so callers that must fail closed have to inspect this field.
+   */
+  error: string | null;
+}
+
 interface StorageBackend {
   appendDebugLogs?(entries: StorageEvent[]): Promise<void>;
   appendUsageEvents?(entries: StorageEvent[]): Promise<void>;
@@ -30,7 +39,7 @@ interface StorageBackend {
   deleteJson(namespace: string, key: string): Promise<void>;
   getJson<T>(namespace: string, key: string): Promise<T | null>;
   initialize(): Promise<void>;
-  listJson<T>(namespace: string): Promise<Array<JsonDocument<T>>>;
+  listJson<T>(namespace: string): Promise<StorageJsonListResult<T>>;
   listDebugLogs?(limit: number): Promise<StorageEvent[]>;
   listUsageEvents?(since: Date): Promise<StorageEvent[]>;
   putJson<T>(namespace: string, key: string, value: T): Promise<void>;
@@ -238,6 +247,71 @@ const isSafeCredentialFilename = (filename: string): boolean => {
   );
 };
 
+// Namespaces whose documents live in their own directory, one `<key>.json`
+// file per document. These are the namespaces that can be enumerated.
+const getNamespaceDirectory = (namespace: string): string | null => {
+  if (namespace === 'applications') {
+    return path.join(getFileStorageDir(), 'applications');
+  }
+
+  if (namespace === 'users') {
+    return path.join(getFileStorageDir(), 'users');
+  }
+
+  if (namespace === 'user-sessions') {
+    return path.join(getFileStorageDir(), 'user-sessions');
+  }
+
+  if (namespace === 'quotas') {
+    return path.join(getFileStorageDir(), 'quotas');
+  }
+
+  return null;
+};
+
+const listJsonDocumentsInDirectory = <T>(
+  namespace: string,
+): StorageJsonListResult<T> => {
+  const directory = getNamespaceDirectory(namespace);
+
+  if (!directory || !fs.existsSync(directory)) {
+    return { documents: [], error: null };
+  }
+
+  const documents: Array<JsonDocument<T>> = [];
+  let error: string | null = null;
+
+  for (const filename of fs.readdirSync(directory)) {
+    if (!filename.endsWith('.json')) {
+      continue;
+    }
+
+    const key = filename.slice(0, -'.json'.length);
+
+    if (!isSafeCredentialFilename(key)) {
+      continue;
+    }
+
+    const result = readJsonFileDetailed<T>(getDocumentPath(namespace, key));
+
+    if (result.error) {
+      error = error ?? `${namespace}/${key}: ${result.error}`;
+      continue;
+    }
+
+    if (result.value !== null) {
+      documents.push({ key, value: result.value });
+    }
+  }
+
+  return { documents, error };
+};
+
+// Whitelist of document locations for the file backend. Every namespace/key
+// pair must be registered here; the database backends store documents by
+// namespace/key generically, but the file backend maps them onto real paths.
+// NOTE: the key must always be a single safe path segment, so keys must never
+// be derived from raw user input without validation.
 const getDocumentPath = (namespace: string, key: string): string => {
   if (namespace === 'config' && key === 'runtime') {
     return getConfigPath();
@@ -261,6 +335,16 @@ const getDocumentPath = (namespace: string, key: string): string => {
 
   if (namespace === 'admin-auth' && key === 'state') {
     return path.join(getFileStorageDir(), 'admin-auth.json');
+  }
+
+  const namespaceDirectory = getNamespaceDirectory(namespace);
+
+  if (namespaceDirectory) {
+    if (!isSafeCredentialFilename(key)) {
+      throw new Error(`${namespace} key must not contain path separators`);
+    }
+
+    return path.join(namespaceDirectory, `${key}.json`);
   }
 
   if (
@@ -439,7 +523,13 @@ class FileStorageBackend implements StorageBackend {
     return readFileStorageDocument<T>(namespace, key).value;
   }
 
-  public async listJson<T>(namespace: string): Promise<Array<JsonDocument<T>>> {
+  public async listJson<T>(
+    namespace: string,
+  ): Promise<StorageJsonListResult<T>> {
+    if (getNamespaceDirectory(namespace)) {
+      return listJsonDocumentsInDirectory<T>(namespace);
+    }
+
     if (namespace !== 'credentials') {
       throw new Error(
         `Unsupported list namespace for file backend: ${namespace}`,
@@ -447,16 +537,22 @@ class FileStorageBackend implements StorageBackend {
     }
 
     const documents: Array<JsonDocument<T>> = [];
+    let error: string | null = null;
 
-    listCredentialFiles().forEach((key) => {
-      const value = readJsonFile<T>(getDocumentPath(namespace, key));
+    for (const key of listCredentialFiles()) {
+      const result = readJsonFileDetailed<T>(getDocumentPath(namespace, key));
 
-      if (value !== null) {
-        documents.push({ key, value });
+      if (result.error) {
+        error = error ?? `${namespace}/${key}: ${result.error}`;
+        continue;
       }
-    });
 
-    return documents;
+      if (result.value !== null) {
+        documents.push({ key, value: result.value });
+      }
+    }
+
+    return { documents, error };
   }
 
   public async putJson<T>(
@@ -539,18 +635,23 @@ class DatabaseStorageBackend implements StorageBackend {
     return JSON.parse(row.payload) as T;
   }
 
-  public async listJson<T>(namespace: string): Promise<Array<JsonDocument<T>>> {
+  public async listJson<T>(
+    namespace: string,
+  ): Promise<StorageJsonListResult<T>> {
     const rows = await this.adapter.listDocuments(namespace);
 
-    return rows.map((row) => ({
-      key: row.key,
-      value:
-        row.encryptedPayload && row.encryptionMode
-          ? decryptPayload<T>(row.encryptedPayload, row.encryptionMode)
-          : typeof row.payload === 'string'
-            ? (JSON.parse(row.payload) as T)
-            : (row.payload as T),
-    }));
+    return {
+      documents: rows.map((row) => ({
+        key: row.key,
+        value:
+          row.encryptedPayload && row.encryptionMode
+            ? decryptPayload<T>(row.encryptedPayload, row.encryptionMode)
+            : typeof row.payload === 'string'
+              ? (JSON.parse(row.payload) as T)
+              : (row.payload as T),
+      })),
+      error: null,
+    };
   }
 
   public async putJson<T>(
@@ -559,8 +660,11 @@ class DatabaseStorageBackend implements StorageBackend {
     value: T,
   ): Promise<void> {
     const sensitive =
+      namespace === 'applications' ||
       namespace === 'credentials' ||
       namespace === 'responses' ||
+      namespace === 'users' ||
+      namespace === 'user-sessions' ||
       (namespace === 'access-keys' && key === 'store');
 
     if (sensitive) {
@@ -755,7 +859,28 @@ export const listStorageJson = async <T>(
   namespace: string,
 ): Promise<Array<JsonDocument<T>>> => {
   await ensureStorageReady();
-  return getRuntime().backend.listJson<T>(namespace);
+  const result = await getRuntime().backend.listJson<T>(namespace);
+
+  return result.documents;
+};
+
+/** Variant of `listStorageJson` that also reports unreadable documents. */
+export const listStorageJsonResult = async <T>(
+  namespace: string,
+): Promise<StorageJsonListResult<T>> => {
+  await ensureStorageReady();
+
+  try {
+    return await getRuntime().backend.listJson<T>(namespace);
+  } catch (error) {
+    return {
+      documents: [],
+      error:
+        error instanceof Error
+          ? error.message
+          : 'Failed to list storage documents',
+    };
+  }
 };
 
 export const writeStorageJson = async <T>(

@@ -1,9 +1,4 @@
-import {
-  createHash,
-  randomBytes,
-  scryptSync,
-  timingSafeEqual,
-} from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 import type { NextRequest } from 'next/server';
 import {
@@ -20,25 +15,37 @@ import { readStorageJsonResult, writeStorageJson } from '../storage';
 
 import { getActiveConfig } from '../domain/config';
 import type { UsageRange } from '../domain/usage';
+import {
+  type CreateUserInput,
+  type PublicUser,
+  type UserRecord,
+  authenticateUser,
+  createUser,
+  getUser,
+  getUserByUsername,
+  hasOwner,
+  toPublicUser,
+  updateUser,
+} from '../domain/users';
+import {
+  PASSWORD_MIN_LENGTH,
+  type StoredPasswordRecord,
+  createPasswordHash,
+  normalizeUsername,
+  verifyPasswordHash,
+} from './password';
 
 const ADMIN_AUTH_NAMESPACE = 'admin-auth';
 const ADMIN_AUTH_KEY = 'state';
 const ADMIN_SESSION_COOKIE = 'codebuddy_admin_session';
 const ADMIN_SESSION_TTL_SECONDS = 60 * 60 * 8;
 const WEBAUTHN_CHALLENGE_TTL_MS = 5 * 60 * 1000;
-const PASSWORD_MIN_LENGTH = 8;
 const ADMIN_RP_NAME = 'CodeBuddy2API Admin';
 const ADMIN_USER_ID = 'codebuddy-admin';
 const DEFAULT_ADMIN_USER_NAME = 'admin';
 let adminAuthMutationQueue: Promise<void> = Promise.resolve();
 
 type RequestLike = Request | NextRequest;
-
-interface StoredPasswordRecord {
-  hash: string;
-  salt: string;
-  updatedAt: string;
-}
 
 interface StoredSessionRecord {
   createdAt: string;
@@ -47,6 +54,11 @@ interface StoredSessionRecord {
   lastUsedAt: string;
   tokenHash: string;
   usagePreferences?: AdminUsagePreferences;
+  /**
+   * Owning user. Sessions written before the user model existed do not carry
+   * it; `getValidSessionRecord` backfills it from the built-in admin account.
+   */
+  userId?: string;
 }
 
 export interface AdminUsagePreferences {
@@ -54,6 +66,18 @@ export interface AdminUsagePreferences {
   autoRefreshSeconds: number;
   credential: string[];
   range: UsageRange;
+}
+
+export interface AdminSessionSummary {
+  accountConfigured: boolean;
+  authEnabled: boolean;
+  authenticated: boolean;
+  passkeyCount: number;
+  passwordConfigured: boolean;
+  /** Owning user, or null when the session is not linked to a user record. */
+  user: PublicUser | null;
+  username: string;
+  usagePreferences: AdminUsagePreferences | null;
 }
 
 interface StoredPasskeyRecord {
@@ -166,45 +190,6 @@ const saveAdminAuthState = async (state: AdminAuthState): Promise<void> => {
   await writeStorageJson(ADMIN_AUTH_NAMESPACE, ADMIN_AUTH_KEY, state);
 };
 
-const createPasswordHash = (password: string, salt?: string) => {
-  const resolvedSalt = salt ?? randomBytes(16).toString('hex');
-  const hash = scryptSync(password, resolvedSalt, 64).toString('hex');
-
-  return {
-    hash,
-    salt: resolvedSalt,
-  };
-};
-
-const normalizeUsername = (username: string): string | null => {
-  const normalized = username.trim();
-
-  if (normalized.length < 3 || normalized.length > 64) {
-    return null;
-  }
-
-  return normalized;
-};
-
-const verifyPasswordHash = (
-  password: string,
-  stored: StoredPasswordRecord | null,
-): boolean => {
-  if (!stored) {
-    return false;
-  }
-
-  const candidate = createPasswordHash(password, stored.salt);
-  const storedBuffer = Buffer.from(stored.hash, 'hex');
-  const candidateBuffer = Buffer.from(candidate.hash, 'hex');
-
-  if (storedBuffer.length !== candidateBuffer.length) {
-    return false;
-  }
-
-  return timingSafeEqual(storedBuffer, candidateBuffer);
-};
-
 const hashSessionToken = (token: string): string => {
   return createHash('sha256').update(token).digest('hex');
 };
@@ -295,6 +280,56 @@ const mutateAdminAuthState = async <T>(
     await saveAdminAuthState(state);
     return result;
   });
+};
+
+type OwnerCredential = { hash: string; salt: string } | { password: string };
+
+const toOwnerCredential = (
+  password: StoredPasswordRecord | null,
+): OwnerCredential | null => {
+  return password ? { hash: password.hash, salt: password.salt } : null;
+};
+
+/**
+ * Returns the owner user backing the built-in admin account, creating it from
+ * the given credential when no owner exists yet. This is what migrates
+ * installations that predate the user model.
+ */
+const ensureOwnerUser = async (
+  username: string,
+  credential: OwnerCredential | null,
+): Promise<UserRecord | null> => {
+  const existing = await getUserByUsername(username);
+
+  if (existing) {
+    return existing;
+  }
+
+  if (await hasOwner()) {
+    return null;
+  }
+
+  const input: CreateUserInput = { role: 'owner', username };
+
+  if (credential) {
+    if ('password' in credential) {
+      input.password = credential.password;
+    } else {
+      input.passwordHash = { hash: credential.hash, salt: credential.salt };
+    }
+  }
+
+  try {
+    return await createUser(input);
+  } catch (error) {
+    const raced = await getUserByUsername(username);
+
+    if (raced) {
+      return raced;
+    }
+
+    throw error;
+  }
 };
 
 const createAdminSession = () => {
@@ -404,16 +439,29 @@ const getValidSessionRecord = (
   }
 
   const tokenHash = hashSessionToken(token);
-  return mutateAdminAuthState((state) => {
-    let matched: StoredSessionRecord | null = null;
-    matched =
+  return mutateAdminAuthState(async (state) => {
+    const matched =
       state.sessions.find((entry) => {
         return entry.tokenHash === tokenHash;
       }) ?? null;
 
-    if (matched) {
-      matched.lastUsedAt = new Date().toISOString();
+    if (!matched) {
+      return null;
     }
+
+    matched.lastUsedAt = new Date().toISOString();
+
+    if (!matched.userId) {
+      const owner = await ensureOwnerUser(
+        state.username,
+        toOwnerCredential(state.password),
+      );
+
+      if (owner) {
+        matched.userId = owner.userId;
+      }
+    }
+
     return matched;
   });
 };
@@ -593,9 +641,12 @@ export const isAdminSessionAuthenticated = async (
   return (await getValidSessionRecord(request)) !== null;
 };
 
-export const getAdminSessionSummary = async (request: RequestLike) => {
+export const getAdminSessionSummary = async (
+  request: RequestLike,
+): Promise<AdminSessionSummary> => {
   const state = pruneExpiredState(await loadAdminAuthStateAsync());
   const session = await getValidSessionRecord(request);
+  const sessionOwner = session?.userId ? await getUser(session.userId) : null;
 
   return {
     accountConfigured:
@@ -604,6 +655,7 @@ export const getAdminSessionSummary = async (request: RequestLike) => {
     authenticated: session !== null,
     passkeyCount: state.passkeys.length,
     passwordConfigured: Boolean(state.password),
+    user: sessionOwner ? toPublicUser(sessionOwner) : null,
     username: state.username,
     usagePreferences: normalizeUsagePreferences(session?.usagePreferences),
   };
@@ -719,11 +771,16 @@ export const setupAdminPassword = async (
   const nextPassword = createPasswordHash(normalized);
   const { session, token } = createAdminSession();
 
-  const configured = await mutateAdminAuthState((state) => {
+  const configured = await mutateAdminAuthState(async (state) => {
     if (state.enabled) {
       return false;
     }
 
+    const owner = await ensureOwnerUser(normalizedUsername, {
+      password: normalized,
+    });
+
+    session.userId = owner?.userId;
     state.enabled = true;
     state.password = {
       hash: nextPassword.hash,
@@ -763,6 +820,38 @@ export const setupAdminPassword = async (
   );
 };
 
+/**
+ * Resolves the user behind a console login. Users in the user store
+ * authenticate first; the built-in admin account then falls back to its own
+ * credential so installations predating the user model can still sign in.
+ */
+const resolveLoginUser = async (
+  state: AdminAuthState,
+  username: string,
+  password: string,
+): Promise<UserRecord | null> => {
+  const user = await authenticateUser(username, password);
+
+  if (user) {
+    return user;
+  }
+
+  const stored = state.password;
+
+  if (
+    !stored ||
+    username !== state.username ||
+    !verifyPasswordHash(password, stored)
+  ) {
+    return null;
+  }
+
+  return ensureOwnerUser(state.username, {
+    hash: stored.hash,
+    salt: stored.salt,
+  });
+};
+
 export const loginWithAdminPassword = async (
   request: RequestLike,
   usernameOrPassword: string,
@@ -784,10 +873,9 @@ export const loginWithAdminPassword = async (
     );
   }
 
-  if (
-    username.trim() !== state.username ||
-    !verifyPasswordHash(resolvedPassword, state.password)
-  ) {
+  const user = await resolveLoginUser(state, username.trim(), resolvedPassword);
+
+  if (!user) {
     return Response.json(
       {
         error: {
@@ -799,6 +887,7 @@ export const loginWithAdminPassword = async (
   }
 
   const { session, token } = createAdminSession();
+  session.userId = user.userId;
 
   await mutateAdminAuthState((current) => {
     current.sessions.push(session);
@@ -865,6 +954,20 @@ export const changeAdminPassword = async (
     );
   }
 
+  const session = await getValidSessionRecord(request);
+  const linkedUserId = session?.userId ?? null;
+
+  if (normalizedUsername && linkedUserId) {
+    const collision = await getUserByUsername(normalizedUsername);
+
+    if (collision && collision.userId !== linkedUserId) {
+      return Response.json(
+        { error: { message: 'Username is already taken' } },
+        { status: 409 },
+      );
+    }
+  }
+
   const sessionTokenHash = hashSessionToken(sessionToken);
   const nextPasswordHash = createPasswordHash(normalizedNextPassword);
   const updated = await mutateAdminAuthState((state) => {
@@ -894,6 +997,16 @@ export const changeAdminPassword = async (
       { error: { message: 'Current password is invalid' } },
       { status: 401 },
     );
+  }
+
+  // Keep the linked user record authoritative for console logins.
+  const owner = linkedUserId ? await getUser(linkedUserId) : null;
+
+  if (owner) {
+    await updateUser(owner.userId, {
+      password: normalizedNextPassword,
+      username: normalizedUsername ?? undefined,
+    });
   }
 
   return Response.json({ success: true });
@@ -1190,7 +1303,15 @@ export const finishAdminPasskeyAuthentication = async (
     );
   }
 
+  const owner = await ensureOwnerUser(
+    state.username,
+    toOwnerCredential(state.password),
+  );
   const { session, token } = createAdminSession();
+
+  if (owner) {
+    session.userId = owner.userId;
+  }
 
   await mutateAdminAuthState((current) => {
     current.sessions.push(session);

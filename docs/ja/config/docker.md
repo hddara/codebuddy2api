@@ -38,15 +38,17 @@ docker run -d --name codebuddy2api --restart unless-stopped -p 8001:8001 \
 
 ## 環境変数
 
-| 変数                                    | 用途                                               | 例 / 既定値                                      |
-| --------------------------------------- | -------------------------------------------------- | ------------------------------------------------ |
-| `CODEBUDDY_STORAGE_BACKEND`             | ストレージバックエンド                             | `file`、`sqlite`、`pg`                           |
-| `CODEBUDDY_STORAGE_SQLITE_PATH`         | SQLite ファイルパス                                | `.codebuddy_data/storage.sqlite`                 |
-| `CODEBUDDY_STORAGE_ENCRYPTION_KEY`      | DB 内の機密データを暗号化。DB バックエンドでは必須 | 長いランダム文字列                               |
-| `CODEBUDDY_STORAGE_IMPORT_LEGACY_FILES` | 旧ファイルを取り込むか                             | 新規構築では `false`                             |
-| `DATABASE_URL`                          | PostgreSQL 接続文字列                              | `postgres://user:password@db:5432/codebuddy2api` |
-| `CODEBUDDY_API_ENDPOINT`                | 上流 CodeBuddy API URL                             | `https://copilot.tencent.com`                    |
-| `CODEBUDDY_AUTH_MODE`                   | 上流認証モード                                     | `auto` / `token`                                 |
-| `CODEBUDDY_INTERNET_ENVIRONMENT`        | ネットワーク環境                                   | `internal` / `ioa` / `public`                    |
-| `CODEBUDDY_LOG_LEVEL`                   | サーバーログレベル                                 | `INFO`                                           |
-| `CODEBUDDY_ADMIN_PASSKEY_RP_ID`         | 管理者 Passkey の hostname                         | `example.com`                                    |
+| 変数                                    | 用途                                               | 例 / 既定値                                             |
+| --------------------------------------- | -------------------------------------------------- | ------------------------------------------------------- |
+| `CODEBUDDY_STORAGE_BACKEND`             | ストレージバックエンド                             | `file`、`sqlite`、`pg`                                  |
+| `CODEBUDDY_STORAGE_SQLITE_PATH`         | SQLite ファイルパス                                | `.codebuddy_data/storage.sqlite`                        |
+| `CODEBUDDY_STORAGE_ENCRYPTION_KEY`      | DB 内の機密データを暗号化。DB バックエンドでは必須 | 長いランダム文字列                                      |
+| `CODEBUDDY_STORAGE_IMPORT_LEGACY_FILES` | 旧ファイルを取り込むか                             | 新規構築では `false`                                    |
+| `DATABASE_URL`                          | PostgreSQL 接続文字列                              | `postgres://user:password@db:5432/codebuddy2api`        |
+| `CODEBUDDY_API_ENDPOINT`                | 上流 CodeBuddy API URL                             | `https://copilot.tencent.com`                           |
+| `CODEBUDDY_AUTH_MODE`                   | 上流認証モード                                     | `auto` / `token`                                        |
+| `CODEBUDDY_INTERNET_ENVIRONMENT`        | ネットワーク環境                                   | `internal` / `ioa` / `public`                           |
+| `CODEBUDDY_LOG_LEVEL`                   | サーバーログレベル                                 | `INFO`                                                  |
+| `CODEBUDDY_ADMIN_PASSKEY_RP_ID`         | 管理者 Passkey の hostname                         | `example.com`                                           |
+| `CODEBUDDY_USAGE_RETENTION_DAYS`        | 使用量イベントの保持日数（クォータ集計期間）       | `35`（file バックエンドは `7`）、クォータ期間以上が必要 |
+| `CODEBUDDY_QUOTA_ENFORCEMENT`           | クォータ超過時の挙動                               | `reject`（既定）/ `warn` はログのみ                     |

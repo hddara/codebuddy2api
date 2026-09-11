@@ -50,3 +50,5 @@ SQLite 文件默认位于容器内的 `/app/.codebuddy_data/storage.sqlite`。�
 | `CODEBUDDY_INTERNET_ENVIRONMENT`        | 网络环境                               | `internal` / `ioa` / `public`                    |
 | `CODEBUDDY_LOG_LEVEL`                   | 日志级别                               | `INFO`                                           |
 | `CODEBUDDY_ADMIN_PASSKEY_RP_ID`         | 管理员 Passkey 使用的 hostname         | `example.com`                                    |
+| `CODEBUDDY_USAGE_RETENTION_DAYS`        | 用量事件保留天数（余额统计窗口）       | `35`（file 后端为 `7`），需覆盖一个配额周期      |
+| `CODEBUDDY_QUOTA_ENFORCEMENT`           | 超额行为                               | `reject`（默认拒绝）/ `warn` 仅记录日志          |
