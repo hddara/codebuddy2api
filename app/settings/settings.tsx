@@ -169,7 +169,7 @@ const parseSupportedModels = (value: string): string[] => {
     .filter(Boolean);
 };
 
-const CredentialModels = () => {
+export const CredentialModels = () => {
   const common = useTranslations('Admin.common');
   const credentialsText = useTranslations('Admin.credentials');
   const [loading, setLoading] = useState(true);
@@ -348,8 +348,55 @@ const CredentialModels = () => {
   );
 };
 
-const Settings = () => {
+export const SettingsServicePanel = () => {
   const { onChange, onSave, settings } = useSettings();
+  const translations = useTranslations('Admin');
+
+  return (
+    <Block direction="vertical" gap={16} padding={24} variant="outlined">
+      <Flexbox align="center" gap={8} horizontal>
+        <Server size={18} strokeWidth={2} />
+        <h3 className="section-title">{translations('settingsPanel.title')}</h3>
+      </Flexbox>
+      <div id="settingsForm">
+        {settings.loading ? (
+          <div className="py-8 text-center text-secondary">
+            <LoaderCircle />
+            <div>{translations('settingsPanel.loading')}</div>
+          </div>
+        ) : (
+          Object.entries(settings.labels).map(([settingKey, label]) => (
+            <SettingField
+              key={settingKey}
+              label={label}
+              onChange={(value) => onChange(settingKey, value)}
+              placeholder={
+                settingKey === 'CODEBUDDY_ADMIN_PASSKEY_RP_ID'
+                  ? translations('settingsPanel.passkeyRpIdPlaceholder')
+                  : undefined
+              }
+              settingKey={settingKey}
+              value={String(settings.values[settingKey] ?? '')}
+            />
+          ))
+        )}
+      </div>
+      <Flexbox horizontal>
+        <Button
+          disabled={settings.saving}
+          icon={Save}
+          loading={settings.saving}
+          onClick={onSave}
+          type="primary"
+        >
+          {translations('common.save')}
+        </Button>
+      </Flexbox>
+    </Block>
+  );
+};
+
+export const SettingsMaintenancePanel = () => {
   const translations = useTranslations('Admin');
   const [clearingUsage, setClearingUsage] = useState(false);
 
@@ -370,72 +417,37 @@ const Settings = () => {
   };
 
   return (
+    <Block direction="vertical" gap={16} padding={24} variant="outlined">
+      <Flexbox align="center" gap={8} horizontal>
+        <Trash2 size={18} strokeWidth={2} />
+        <h3 className="section-title">
+          {translations('settingsPanel.usageCacheTitle')}
+        </h3>
+      </Flexbox>
+      <p className="text-secondary">
+        {translations('settingsPanel.usageCacheDescription')}
+      </p>
+      <Flexbox horizontal>
+        <Button
+          danger
+          disabled={clearingUsage}
+          icon={Trash2}
+          loading={clearingUsage}
+          onClick={() => void clearUsageEvents()}
+        >
+          {translations('settingsPanel.clearUsageEvents')}
+        </Button>
+      </Flexbox>
+    </Block>
+  );
+};
+
+const Settings = () => {
+  return (
     <div className="block" id="settings">
-      <Block direction="vertical" gap={16} padding={24} variant="outlined">
-        <Flexbox align="center" gap={8} horizontal>
-          <Server size={18} strokeWidth={2} />
-          <h3 className="section-title">
-            {translations('settingsPanel.title')}
-          </h3>
-        </Flexbox>
-        <div id="settingsForm">
-          {settings.loading ? (
-            <div className="py-8 text-center text-secondary">
-              <LoaderCircle />
-              <div>{translations('settingsPanel.loading')}</div>
-            </div>
-          ) : (
-            Object.entries(settings.labels).map(([settingKey, label]) => (
-              <SettingField
-                key={settingKey}
-                label={label}
-                onChange={(value) => onChange(settingKey, value)}
-                placeholder={
-                  settingKey === 'CODEBUDDY_ADMIN_PASSKEY_RP_ID'
-                    ? translations('settingsPanel.passkeyRpIdPlaceholder')
-                    : undefined
-                }
-                settingKey={settingKey}
-                value={String(settings.values[settingKey] ?? '')}
-              />
-            ))
-          )}
-        </div>
-        <Flexbox horizontal>
-          <Button
-            disabled={settings.saving}
-            icon={Save}
-            loading={settings.saving}
-            onClick={onSave}
-            type="primary"
-          >
-            {translations('common.save')}
-          </Button>
-        </Flexbox>
-      </Block>
+      <SettingsServicePanel />
       <CredentialModels />
-      <Block direction="vertical" gap={16} padding={24} variant="outlined">
-        <Flexbox align="center" gap={8} horizontal>
-          <Trash2 size={18} strokeWidth={2} />
-          <h3 className="section-title">
-            {translations('settingsPanel.usageCacheTitle')}
-          </h3>
-        </Flexbox>
-        <p className="text-secondary">
-          {translations('settingsPanel.usageCacheDescription')}
-        </p>
-        <Flexbox horizontal>
-          <Button
-            danger
-            disabled={clearingUsage}
-            icon={Trash2}
-            loading={clearingUsage}
-            onClick={() => void clearUsageEvents()}
-          >
-            {translations('settingsPanel.clearUsageEvents')}
-          </Button>
-        </Flexbox>
-      </Block>
+      <SettingsMaintenancePanel />
       <Security />
     </div>
   );

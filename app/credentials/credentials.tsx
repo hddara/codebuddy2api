@@ -66,6 +66,11 @@ export interface RevealedAccessKeySecret {
   secret: string;
 }
 
+export interface AccessKeyQuota {
+  maxTokens: number | null;
+  usedTokens: number;
+}
+
 export interface CurrentCredentialInfo {
   status: string;
   available_credential_count?: number;
@@ -102,6 +107,8 @@ export interface CredentialFormState {
 export interface AccessKeyFormState {
   credentialFilenames: string[];
   editingId: string | null;
+  /** Empty string keeps the stored token limit untouched. */
+  maxTokens: string;
   name: string;
 }
 
@@ -109,6 +116,7 @@ export interface CredentialsState {
   accessKeyActionId: string | null;
   accessKeyCreating: boolean;
   accessKeyForm: AccessKeyFormState;
+  accessKeyQuotas: Record<string, AccessKeyQuota>;
   accessKeys: AccessKeySummary[];
   accessKeysLoading: boolean;
   actionIndex: number | null;
@@ -139,7 +147,13 @@ export const authStateAtom = atom<AuthState>(defaultAuthState);
 export const defaultCredentialsState: CredentialsState = {
   accessKeyActionId: null,
   accessKeyCreating: false,
-  accessKeyForm: { credentialFilenames: [], editingId: null, name: '' },
+  accessKeyForm: {
+    credentialFilenames: [],
+    editingId: null,
+    maxTokens: '',
+    name: '',
+  },
+  accessKeyQuotas: {},
   accessKeys: [],
   accessKeysLoading: true,
   actionIndex: null,
@@ -185,6 +199,7 @@ export const createCredentialsState = (
 export interface CredentialsTabController {
   auth: AuthState;
   credentials: CredentialsState;
+  onUpdateAccessKeyMaxTokens: (value: string) => void;
   onAddAccessKey: () => void;
   onAddCredential: () => void;
   onAuthAction: () => void;
@@ -258,6 +273,7 @@ const Credentials = () => {
     onSubmitCallbackUrl,
     onToggleCallbackMode,
     onToggleCredentialSelection,
+    onUpdateAccessKeyMaxTokens,
     onUpdateAccessKeyName,
   } = controller;
   const validCredentials = credentials.items.filter((item) => !item.is_expired);
@@ -545,12 +561,14 @@ const Credentials = () => {
             actionId={credentials.accessKeyActionId}
             form={credentials.accessKeyForm}
             isCreating
+            quota={null}
             revealedSecret={credentials.revealedSecret}
             validCredentials={validCredentials}
             onCancel={onResetAccessKeyForm}
             onResetAccessKeyForm={onResetAccessKeyForm}
             onSaveAccessKey={onSaveAccessKey}
             onToggleCredentialSelection={onToggleCredentialSelection}
+            onUpdateAccessKeyMaxTokens={onUpdateAccessKeyMaxTokens}
             onUpdateAccessKeyName={onUpdateAccessKeyName}
           />
         ) : null}
@@ -568,6 +586,7 @@ const Credentials = () => {
                   actionId={credentials.accessKeyActionId}
                   form={credentials.accessKeyForm}
                   key={accessKey.id}
+                  quota={credentials.accessKeyQuotas[accessKey.id] ?? null}
                   revealedSecret={credentials.revealedSecret}
                   validCredentials={validCredentials}
                   onDelete={() => onDeleteAccessKey(accessKey.id)}
@@ -576,6 +595,7 @@ const Credentials = () => {
                   onRevealSecret={() => onRevealAccessKeySecret(accessKey.id)}
                   onSaveAccessKey={onSaveAccessKey}
                   onToggleCredentialSelection={onToggleCredentialSelection}
+                  onUpdateAccessKeyMaxTokens={onUpdateAccessKeyMaxTokens}
                   onUpdateAccessKeyName={onUpdateAccessKeyName}
                 />
               ))}

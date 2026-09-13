@@ -3,8 +3,14 @@ import {
   listStorageJson,
   writeStorageJson,
 } from '../storage';
-import { type ApplicationRecord, listApplicationRecords } from './applications';
+import {
+  type ApplicationRecord,
+  findApplicationById,
+  listApplicationRecords,
+} from './applications';
+import { getBillingViolation } from './billing';
 import { getUsageRetentionStartMs, getUsageTotalsForAccessKeys } from './usage';
+import { getUser, listUsers } from './users';
 
 export const QUOTAS_NAMESPACE = 'quotas';
 
@@ -91,12 +97,27 @@ export const resetQuotaRuntimeState = (): void => {
   balanceCache.clear();
 };
 
-const isQuotaOwnerType = (value: unknown): value is QuotaOwnerType => {
+export const isQuotaOwnerType = (value: unknown): value is QuotaOwnerType => {
   return value === 'app' || value === 'user';
 };
 
-const isQuotaPeriod = (value: unknown): value is QuotaPeriod => {
+export const isQuotaPeriod = (value: unknown): value is QuotaPeriod => {
   return value === 'daily' || value === 'monthly' || value === 'total';
+};
+
+/**
+ * True when the referenced owner exists. Quotas for unknown ids are rejected so
+ * a typo cannot silently create an unenforced document.
+ */
+export const quotaOwnerExists = async (
+  ownerType: QuotaOwnerType,
+  ownerId: string,
+): Promise<boolean> => {
+  if (ownerType === 'app') {
+    return (await findApplicationById(ownerId)) !== null;
+  }
+
+  return (await getUser(ownerId)) !== null;
 };
 
 const toLimit = (value: unknown): number | null => {
@@ -280,7 +301,7 @@ export const getQuotaPeriodWindow = (
  * Access keys whose usage counts towards the owner. A user owns the sum of
  * their applications; an application owns only itself.
  */
-const resolveOwnerAccessKeyIds = async (
+export const resolveOwnerAccessKeyIds = async (
   ownerType: QuotaOwnerType,
   ownerId: string,
 ): Promise<string[]> => {
@@ -336,6 +357,48 @@ export const getBalance = async ({
     usedCalls: totals.callCount,
     usedTokens: totals.totalTokens,
   };
+};
+
+export interface QuotaOwnerBalance extends QuotaBalance {
+  /** Application name or user display name, for the admin quota list. */
+  name: string;
+}
+
+/**
+ * Balance of every application and every user, which is what the admin quota
+ * page lists. Owners without a quota document are included so their current
+ * usage stays visible.
+ */
+export const listQuotaBalances = async (
+  period: QuotaPeriod = DEFAULT_QUOTA_PERIOD,
+): Promise<QuotaOwnerBalance[]> => {
+  const [applications, users] = await Promise.all([
+    listApplicationRecords(),
+    listUsers(),
+  ]);
+  const owners = [
+    ...applications.map((record) => ({
+      name: record.name,
+      ownerId: record.id,
+      ownerType: 'app' as const,
+    })),
+    ...users.map((user) => ({
+      name: user.displayName,
+      ownerId: user.userId,
+      ownerType: 'user' as const,
+    })),
+  ];
+
+  return Promise.all(
+    owners.map(async (owner) => ({
+      ...(await getBalance({
+        ownerId: owner.ownerId,
+        ownerType: owner.ownerType,
+        period,
+      })),
+      name: owner.name,
+    })),
+  );
 };
 
 const getCachedBalance = async ({
@@ -439,6 +502,21 @@ export const getAccessKeyQuotaViolation = async (
 
     if (!accessKey.ownerUserId) {
       return null;
+    }
+
+    // Prepaid billing (plan, then balance) comes first: it is the product
+    // model, while the user quota above remains as a legacy safeguard.
+    const billingViolation = await getBillingViolation(accessKey.ownerUserId);
+
+    if (billingViolation) {
+      return {
+        limit: 'tokens',
+        max: billingViolation.max,
+        message: billingViolation.message,
+        ownerType: 'user',
+        period: DEFAULT_QUOTA_PERIOD,
+        used: billingViolation.used,
+      };
     }
 
     return await findViolation(

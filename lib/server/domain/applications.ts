@@ -310,6 +310,47 @@ export const toApplicationSummary = (
   };
 };
 
+/**
+ * Shape handed to a member for an application they own. Reading the plaintext
+ * secret of their own applications is an explicit product decision, so this
+ * variant carries `secret` instead of `maskedSecret`.
+ */
+export interface OwnedApplicationSummary extends Omit<
+  ApplicationSummary,
+  'maskedSecret'
+> {
+  secret: string;
+}
+
+export const toOwnedApplicationSummary = (
+  record: ApplicationRecord,
+): OwnedApplicationSummary => {
+  return {
+    createdAt: record.createdAt,
+    credentialFilenames: [...record.credentialFilenames],
+    description: record.description,
+    id: record.id,
+    name: record.name,
+    ownerUserId: record.ownerUserId,
+    secret: record.secret,
+    status: record.status,
+    updatedAt: record.updatedAt,
+  };
+};
+
+/**
+ * Credentials one application may use. An empty binding means "no restriction":
+ * the request follows the system credential selection instead of being denied.
+ * Keys owned by members rely on this, because members cannot pick credentials.
+ */
+export const getAllowedCredentialFilenames = (
+  record: Pick<ApplicationRecord, 'credentialFilenames'> | null | undefined,
+): string[] | undefined => {
+  return record?.credentialFilenames.length
+    ? record.credentialFilenames
+    : undefined;
+};
+
 const generateSecret = (): string => {
   return `cb2_${crypto.randomBytes(32).toString('base64url')}`;
 };

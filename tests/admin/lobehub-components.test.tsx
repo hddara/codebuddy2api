@@ -85,6 +85,7 @@ describe('dashboard view', () => {
             totalCredentials: 3,
             validCredentials: 2,
           },
+          showCredentials: true,
         }}
       >
         <Dashboard />

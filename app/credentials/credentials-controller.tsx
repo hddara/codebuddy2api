@@ -44,6 +44,7 @@ export const CredentialsTabController = ({
   const {
     loadCredentialModels,
     loadCredentials,
+    refreshAccessKeyQuotas,
     refreshAccessKeys,
     refreshCredentialList,
   } = useCredentialLoaders();
@@ -290,7 +291,8 @@ export const CredentialsTabController = ({
   };
 
   const saveAccessKey = async () => {
-    const { credentialFilenames, editingId, name } = credentials.accessKeyForm;
+    const { credentialFilenames, editingId, maxTokens, name } =
+      credentials.accessKeyForm;
 
     setCredentials((current) => ({
       ...current,
@@ -339,6 +341,7 @@ export const CredentialsTabController = ({
       accessKeyForm: {
         credentialFilenames: [],
         editingId: null,
+        maxTokens: '',
         name: '',
       },
       revealedSecret:
@@ -350,6 +353,41 @@ export const CredentialsTabController = ({
             }
           : current.revealedSecret,
     }));
+
+    // The token limit is a quota document owned by the API key.
+    const quotaOwnerId = result.data?.access_key?.id ?? editingId;
+    const tokenLimit = maxTokens.trim();
+
+    if (quotaOwnerId && tokenLimit) {
+      const parsed = Number(tokenLimit);
+
+      if (!Number.isInteger(parsed) || parsed < 0) {
+        showConsoleNotification(
+          'error',
+          translations('credentials.accessKeyTokenFailed'),
+        );
+      } else {
+        const quotaResult = await requestJson<{ success?: boolean }>(
+          `/admin-api/quotas/app/${encodeURIComponent(quotaOwnerId)}`,
+          {
+            body: JSON.stringify({ maxTokens: parsed }),
+            headers: { 'Content-Type': 'application/json' },
+            method: 'PUT',
+          },
+        );
+
+        if (!quotaResult.ok) {
+          showConsoleNotification(
+            'error',
+            getErrorMessage(
+              quotaResult.data,
+              translations('credentials.accessKeyTokenFailed'),
+            ),
+          );
+        }
+      }
+    }
+
     showConsoleNotification(
       'success',
       editingId ? consoleMessages.apiKeyUpdated : consoleMessages.apiKeyCreated,
@@ -454,14 +492,16 @@ export const CredentialsTabController = ({
   };
 
   useEffect(() => {
-    if (!hasInitialData) {
+    if (hasInitialData) {
+      void refreshAccessKeyQuotas();
+    } else {
       void loadCredentials();
     }
 
     return () => {
       clearAuthTimer();
     };
-  }, [hasInitialData, loadCredentials]);
+  }, [hasInitialData, loadCredentials, refreshAccessKeyQuotas]);
 
   return (
     <CredentialsProvider
@@ -475,6 +515,7 @@ export const CredentialsTabController = ({
             accessKeyForm: {
               credentialFilenames: [],
               editingId: null,
+              maxTokens: '',
               name: '',
             },
           }));
@@ -561,22 +602,30 @@ export const CredentialsTabController = ({
           void deleteAccessKey(id);
         },
         onEditAccessKey: (accessKey) => {
-          setCredentials((current) => ({
-            ...current,
-            accessKeyCreating: false,
-            accessKeyForm: {
-              credentialFilenames: accessKey.credentialFilenames.filter(
-                (filename) =>
-                  current.items.some(
-                    (credential) =>
-                      !credential.is_expired &&
-                      credential.filename === filename,
-                  ),
-              ),
-              editingId: accessKey.id,
-              name: accessKey.name,
-            },
-          }));
+          setCredentials((current) => {
+            const quota = current.accessKeyQuotas[accessKey.id];
+
+            return {
+              ...current,
+              accessKeyCreating: false,
+              accessKeyForm: {
+                credentialFilenames: accessKey.credentialFilenames.filter(
+                  (filename) =>
+                    current.items.some(
+                      (credential) =>
+                        !credential.is_expired &&
+                        credential.filename === filename,
+                    ),
+                ),
+                editingId: accessKey.id,
+                maxTokens:
+                  quota?.maxTokens === null || quota === undefined
+                    ? ''
+                    : String(quota.maxTokens),
+                name: accessKey.name,
+              },
+            };
+          });
         },
         onOpenAuthUrl: () => {
           if (!auth.authUrl) {
@@ -641,6 +690,15 @@ export const CredentialsTabController = ({
             };
           });
         },
+        onUpdateAccessKeyMaxTokens: (value) => {
+          setCredentials((current) => ({
+            ...current,
+            accessKeyForm: {
+              ...current.accessKeyForm,
+              maxTokens: value,
+            },
+          }));
+        },
         onUpdateAccessKeyName: (value) => {
           setCredentials((current) => ({
             ...current,
@@ -657,6 +715,7 @@ export const CredentialsTabController = ({
             accessKeyForm: {
               credentialFilenames: [],
               editingId: null,
+              maxTokens: '',
               name: '',
             },
           }));

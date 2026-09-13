@@ -11,7 +11,35 @@ import {
   type CurrentCredentialResponse,
   requestJson,
 } from '@/app/console-request';
-import { credentialsStateAtom } from '@/app/credentials/credentials';
+import {
+  type AccessKeyQuota,
+  credentialsStateAtom,
+} from '@/app/credentials/credentials';
+
+interface QuotaBalanceResponse {
+  balances?: Array<{
+    maxTokens: number | null;
+    ownerId: string;
+    ownerType: string;
+    usedTokens: number;
+  }>;
+}
+
+/** Token limits are stored per API key (`ownerType: 'app'`). */
+const fetchAccessKeyQuotas = async (): Promise<
+  Record<string, AccessKeyQuota>
+> => {
+  const result = await requestJson<QuotaBalanceResponse>('/admin-api/quotas');
+
+  return Object.fromEntries(
+    (result.data?.balances ?? [])
+      .filter((balance) => balance.ownerType === 'app')
+      .map((balance) => [
+        balance.ownerId,
+        { maxTokens: balance.maxTokens, usedTokens: balance.usedTokens },
+      ]),
+  );
+};
 
 export const useCredentialLoaders = () => {
   const setCredentials = useSetAtom(credentialsStateAtom);
@@ -25,15 +53,20 @@ export const useCredentialLoaders = () => {
       loading: true,
     }));
 
-    const [listResult, currentResult, accessKeyResult] = await Promise.all([
-      requestJson<CredentialsResponse>('/admin-api/credentials'),
-      requestJson<CurrentCredentialResponse>('/admin-api/credentials/current'),
-      requestJson<AccessKeysResponse>('/admin-api/access-keys'),
-    ]);
+    const [listResult, currentResult, accessKeyResult, accessKeyQuotas] =
+      await Promise.all([
+        requestJson<CredentialsResponse>('/admin-api/credentials'),
+        requestJson<CurrentCredentialResponse>(
+          '/admin-api/credentials/current',
+        ),
+        requestJson<AccessKeysResponse>('/admin-api/access-keys'),
+        fetchAccessKeyQuotas(),
+      ]);
 
     setCredentials((current) => ({
       ...current,
       accessKeyActionId: null,
+      accessKeyQuotas,
       accessKeys: accessKeyResult.data?.access_keys ?? [],
       accessKeysLoading: false,
       actionIndex: null,
@@ -76,15 +109,27 @@ export const useCredentialLoaders = () => {
     });
   }, [setApiTest, setCredentials]);
 
+  /**
+   * The credentials tab can be rendered with server-side initial data, which
+   * never runs `loadCredentials`; quotas still have to be fetched on mount.
+   */
+  const refreshAccessKeyQuotas = useCallback(async () => {
+    const accessKeyQuotas = await fetchAccessKeyQuotas();
+
+    setCredentials((current) => ({ ...current, accessKeyQuotas }));
+  }, [setCredentials]);
+
   const refreshAccessKeys = useCallback(async () => {
     setCredentials((current) => ({ ...current, accessKeysLoading: true }));
-    const result = await requestJson<AccessKeysResponse>(
-      '/admin-api/access-keys',
-    );
+    const [result, accessKeyQuotas] = await Promise.all([
+      requestJson<AccessKeysResponse>('/admin-api/access-keys'),
+      fetchAccessKeyQuotas(),
+    ]);
 
     setCredentials((current) => ({
       ...current,
       accessKeyActionId: current.accessKeyActionId ?? null,
+      accessKeyQuotas,
       accessKeys: result.data?.access_keys ?? [],
       accessKeysLoading: false,
     }));
@@ -177,6 +222,7 @@ export const useCredentialLoaders = () => {
   return {
     loadCredentialModels,
     loadCredentials,
+    refreshAccessKeyQuotas,
     refreshAccessKeys,
     refreshCredentialList,
   };

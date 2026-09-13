@@ -1,23 +1,34 @@
 'use client';
 
-import { type ReactNode, useCallback, useEffect, useMemo } from 'react';
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
 import { createStore, Provider, useAtom } from 'jotai';
 import { useHydrateAtoms } from 'jotai/utils';
 import { useTranslations } from 'next-intl';
 import { useRouter } from 'next/navigation';
 import type { Route } from 'next';
 import { ToastHost, toast } from '@lobehub/ui/base-ui';
+import { Alert, Modal } from 'antd';
 import {
-  Bug,
   ChartLine,
   CircleUserRound,
+  Gauge,
   KeyRound,
   LayoutDashboard,
-  Send,
-  Settings2,
+  MessagesSquare,
+  Users,
 } from 'lucide-react';
 
-import type { AdminConsoleInitialData, AdminProfile } from '@/app/page-data';
+import type {
+  AdminConsoleInitialData,
+  AdminProfile,
+  AdminRole,
+} from '@/app/page-data';
 import {
   createDashboardState,
   dashboardStateAtom,
@@ -25,6 +36,7 @@ import {
 import { ApiTestTabController } from '@/app/api-test/api-test-controller';
 import { CredentialsTabController } from '@/app/credentials/credentials-controller';
 import { DashboardTabController } from '@/app/dashboard/dashboard-controller';
+import Debug from '@/app/debug/debug';
 import { createDebugState, debugStateAtom } from '@/app/debug/debug';
 import { DebugTabController } from '@/app/debug/debug-controller';
 import {
@@ -34,7 +46,10 @@ import {
 import { SettingsTabController } from '@/app/settings/settings-controller';
 import { createUsageState, usageStateAtom } from '@/app/usage/usage';
 import { UsageTabController } from '@/app/usage/usage-controller';
-import { apiTestStateAtom, createApiTestState } from '@/app/api-test/api-test';
+import ApiTest, {
+  apiTestStateAtom,
+  createApiTestState,
+} from '@/app/api-test/api-test';
 import {
   authStateAtom,
   createCredentialsState,
@@ -44,8 +59,16 @@ import {
 import { type TabKey } from '@/app/page-data';
 import { themeAtom, type ThemeMode } from '@/app/page-state';
 import { AdminHeader } from '@/app/header';
+import { isTabVisibleForRole } from '@/app/console-navigation';
+import { ProfileTabController } from '@/app/profile/profile-controller';
+import { QuotasTabController } from '@/app/quotas/quotas-controller';
+import { SessionsTabController } from '@/app/sessions/sessions-controller';
+import { UsersTabController } from '@/app/users/users-controller';
 import { UserMenu } from '@/app/user-menu';
-import { UserSettingsMenu } from '@/app/user-settings-menu';
+import {
+  SettingsDialog,
+  type SettingsSection,
+} from '@/app/settings/settings-dialog';
 import { themeChangeEventName } from '@/lib/theme';
 import { type LocalePreference } from '@/lib/i18n/routing';
 import {
@@ -57,13 +80,15 @@ const tabs: Array<{
   icon: typeof LayoutDashboard;
   key: TabKey;
   labelKey:
-    | 'apiTest'
     | 'credentials'
     | 'dashboard'
     | 'accountStatus'
-    | 'debug'
     | 'settings'
-    | 'usage';
+    | 'usage'
+    | 'users'
+    | 'quotas'
+    | 'sessions';
+  roles?: AdminRole[];
 }> = [
   {
     icon: LayoutDashboard,
@@ -74,20 +99,47 @@ const tabs: Array<{
     icon: CircleUserRound,
     key: 'account-status',
     labelKey: 'accountStatus',
+    roles: ['owner', 'admin'],
   },
   {
     icon: KeyRound,
     key: 'credentials',
     labelKey: 'credentials',
+    roles: ['owner', 'admin'],
+  },
+  {
+    icon: Users,
+    key: 'users',
+    labelKey: 'users',
+    roles: ['owner', 'admin'],
+  },
+  {
+    icon: Gauge,
+    key: 'quotas',
+    labelKey: 'quotas',
+    roles: ['owner', 'admin'],
   },
   { icon: ChartLine, key: 'usage', labelKey: 'usage' },
-  { icon: Send, key: 'api-test', labelKey: 'apiTest' },
-  { icon: Bug, key: 'debug', labelKey: 'debug' },
   {
-    icon: Settings2,
-    key: 'settings',
-    labelKey: 'settings',
+    icon: MessagesSquare,
+    key: 'sessions',
+    labelKey: 'sessions',
   },
+];
+
+/**
+ * Tabs that only administrators may open. They are either hidden from the
+ * navigation or reachable through the header menu, but a deep link must not
+ * render them for a member either.
+ */
+const adminOnlyTabs: TabKey[] = [
+  'account-status',
+  'api-test',
+  'credentials',
+  'debug',
+  'quotas',
+  'settings',
+  'users',
 ];
 
 interface AdminPageLayoutProps {
@@ -144,8 +196,18 @@ const AdminPageLayoutContent = ({
   ]);
 
   const [theme, setTheme] = useAtom(themeAtom);
+  const [toolDialog, setToolDialog] = useState<'api-test' | 'debug' | null>(
+    null,
+  );
+  const [settingsSection, setSettingsSection] =
+    useState<SettingsSection | null>(null);
   const activeTab = initialTab;
   const translations = useTranslations('Admin');
+  const visibleTabs = tabs.filter((tab) =>
+    isTabVisibleForRole(tab, profile.role),
+  );
+  const allowedToUseActiveTab =
+    profile.role !== 'member' || !adminOnlyTabs.includes(activeTab);
   const showNotification = useCallback(
     (type: 'success' | 'error' | 'warning' | 'info', message: string) => {
       toast[type]({ description: message, duration: 3000 });
@@ -210,7 +272,7 @@ const AdminPageLayoutContent = ({
         <AdminHeader
           activeNavigationKey={activeTab}
           className="console-header"
-          navigationItems={tabs.map(({ icon, key, labelKey }) => ({
+          navigationItems={visibleTabs.map(({ icon, key, labelKey }) => ({
             icon,
             key,
             label: translations(`tabs.${labelKey}`),
@@ -218,56 +280,108 @@ const AdminPageLayoutContent = ({
               router.push(`/${key}` as Route);
             },
           }))}
-          settingsArea={
-            <UserSettingsMenu
-              localePreference={initialLocalePreference}
-              onLocaleChange={changeLocale}
-              onThemeChange={setTheme}
-              theme={theme}
-            />
-          }
           userArea={
             <UserMenu
+              canUseAdminTools={profile.role !== 'member'}
+              localePreference={initialLocalePreference}
+              onLocaleChange={changeLocale}
               onLogout={() => void logout()}
+              onOpenApiTest={() => setToolDialog('api-test')}
+              onOpenDebug={() => setToolDialog('debug')}
+              onOpenSettings={setSettingsSection}
+              onThemeChange={setTheme}
               profile={profile}
               showLogout={showLogout}
+              theme={theme}
             />
           }
         />
         <main className="console-main">
-          {activeTab === 'dashboard' ? (
-            <DashboardTabController hasInitialData={Boolean(initialData)}>
-              {children}
-            </DashboardTabController>
-          ) : null}
-          {activeTab === 'credentials' ? (
-            <CredentialsTabController hasInitialData={Boolean(initialData)}>
-              {children}
-            </CredentialsTabController>
-          ) : null}
-          {activeTab === 'account-status' ? children : null}
-          {activeTab === 'usage' ? (
-            <UsageTabController hasInitialData={Boolean(initialData)}>
-              {children}
-            </UsageTabController>
-          ) : null}
-          {activeTab === 'api-test' ? (
-            <ApiTestTabController initialData={initialData}>
-              {children}
-            </ApiTestTabController>
-          ) : null}
-          {activeTab === 'debug' ? (
-            <DebugTabController hasInitialData={Boolean(initialData)}>
-              {children}
-            </DebugTabController>
-          ) : null}
-          {activeTab === 'settings' ? (
-            <SettingsTabController hasInitialData={Boolean(initialData)}>
-              {children}
-            </SettingsTabController>
-          ) : null}
+          {allowedToUseActiveTab ? (
+            <>
+              {activeTab === 'dashboard' ? (
+                <DashboardTabController
+                  canViewCredentials={profile.role !== 'member'}
+                  hasInitialData={Boolean(initialData)}
+                >
+                  {children}
+                </DashboardTabController>
+              ) : null}
+              {activeTab === 'credentials' ? (
+                <CredentialsTabController hasInitialData={Boolean(initialData)}>
+                  {children}
+                </CredentialsTabController>
+              ) : null}
+              {activeTab === 'account-status' ? children : null}
+              {activeTab === 'usage' ? (
+                <UsageTabController hasInitialData={Boolean(initialData)}>
+                  {children}
+                </UsageTabController>
+              ) : null}
+              {activeTab === 'api-test' ? (
+                <ApiTestTabController initialData={initialData}>
+                  {children}
+                </ApiTestTabController>
+              ) : null}
+              {activeTab === 'debug' ? (
+                <DebugTabController hasInitialData={Boolean(initialData)}>
+                  {children}
+                </DebugTabController>
+              ) : null}
+              {activeTab === 'settings' ? (
+                <SettingsTabController hasInitialData={Boolean(initialData)}>
+                  {children}
+                </SettingsTabController>
+              ) : null}
+              {activeTab === 'users' ? (
+                <UsersTabController>{children}</UsersTabController>
+              ) : null}
+              {activeTab === 'quotas' ? (
+                <QuotasTabController>{children}</QuotasTabController>
+              ) : null}
+              {activeTab === 'profile' ? (
+                <ProfileTabController>{children}</ProfileTabController>
+              ) : null}
+              {activeTab === 'sessions' ? (
+                <SessionsTabController canClear={profile.role === 'owner'}>
+                  {children}
+                </SessionsTabController>
+              ) : null}
+            </>
+          ) : (
+            <Alert showIcon title={translations('noPermission')} type="error" />
+          )}
         </main>
       </div>
+      <SettingsDialog
+        onClose={() => setSettingsSection(null)}
+        onSectionChange={setSettingsSection}
+        section={settingsSection}
+      />
+      <Modal
+        destroyOnHidden
+        footer={null}
+        onCancel={() => setToolDialog(null)}
+        open={toolDialog !== null}
+        styles={{ body: { maxHeight: '70vh', overflow: 'auto' } }}
+        title={
+          toolDialog === 'debug'
+            ? translations('tabs.debug')
+            : translations('tabs.apiTest')
+        }
+        width={960}
+      >
+        {toolDialog === 'api-test' ? (
+          <ApiTestTabController>
+            <ApiTest />
+          </ApiTestTabController>
+        ) : null}
+        {toolDialog === 'debug' ? (
+          <DebugTabController hasInitialData={false}>
+            <Debug />
+          </DebugTabController>
+        ) : null}
+      </Modal>
       <ToastHost duration={3000} position="top-right" />
     </>
   );

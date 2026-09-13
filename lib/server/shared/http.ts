@@ -51,3 +51,25 @@ export const createErrorResponse = (
     { status },
   );
 };
+
+/**
+ * Error shape used by the admin API routes that were added with the user
+ * model. It matches `requireRole` and `getAdminSessionErrorResponse` so clients
+ * only ever parse a single error format.
+ */
+export const createApiErrorResponse = (
+  status: number,
+  code: string,
+  message: string,
+): Response => {
+  return Response.json({ error: { code, message } }, { status });
+};
+
+/** Parses a JSON body, returning null when the payload is missing or invalid. */
+export const readJsonBody = async <T>(request: Request): Promise<T | null> => {
+  try {
+    return (await request.json()) as T;
+  } catch {
+    return null;
+  }
+};

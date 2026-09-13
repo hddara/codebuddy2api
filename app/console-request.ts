@@ -151,15 +151,38 @@ export const requestJson = async <T>(
   }
 };
 
+/** Error code of the `{error: {code, message}}` shape used by the admin API. */
+export const getErrorCode = (payload: unknown): string | null => {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+
+  const error = (payload as Record<string, unknown>).error;
+
+  if (!error || typeof error !== 'object') {
+    return null;
+  }
+
+  const code = (error as Record<string, unknown>).code;
+
+  return typeof code === 'string' && code.trim() ? code : null;
+};
+
 export const getErrorMessage = (payload: unknown, fallback: string) => {
   if (!payload || typeof payload !== 'object') {
     return fallback;
   }
 
+  const record = payload as Record<string, unknown>;
+  const error = record.error;
   const message =
-    (payload as Record<string, unknown>).message ??
-    (payload as Record<string, unknown>).error_description ??
-    (payload as Record<string, unknown>).error;
+    record.message ??
+    record.error_description ??
+    (typeof error === 'string'
+      ? error
+      : error && typeof error === 'object'
+        ? (error as Record<string, unknown>).message
+        : undefined);
 
   return typeof message === 'string' && message.trim() ? message : fallback;
 };

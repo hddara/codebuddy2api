@@ -52,14 +52,16 @@ export const AdminPage = async ({
       ? (headerStore.get('accept-language') ?? undefined)
       : localePreference,
   );
-  // Phase 1 keeps a single administrator account; the multi-user system will
-  // replace this source while keeping the AdminProfile shape unchanged.
-  const accountName = session.username?.trim() || 'admin';
+  // The session carries the owning user; anonymous visits fall back to the
+  // configured administrator name so the login shell keeps its profile.
+  const sessionUser = session.user;
+  const accountName =
+    sessionUser?.username ?? session.username?.trim() ?? 'admin';
   const profile: AdminProfile = {
     avatarUrl: null,
-    displayName: accountName,
-    id: sessionAuthenticated ? accountName : 'local',
-    role: 'owner',
+    displayName: sessionUser?.displayName ?? accountName,
+    id: sessionUser?.userId ?? (sessionAuthenticated ? accountName : 'local'),
+    role: sessionUser?.role ?? 'owner',
     username: accountName,
   };
 
@@ -67,6 +69,7 @@ export const AdminPage = async ({
     <AdminPageLayout
       initialData={await getInitialData({
         locale,
+        role: session.user?.role,
         tab: initialTab,
         usagePreferences: session.usagePreferences,
       })}

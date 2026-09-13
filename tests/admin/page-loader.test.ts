@@ -123,7 +123,8 @@ describe('tab-scoped initial data', () => {
     async (tab, expectedLoaders) => {
       const initialData = await getInitialData({ locale: 'en-US', tab });
 
-      expect(initialData.tab).toBe(tab);
+      expect(initialData).toBeDefined();
+      expect(initialData?.tab).toBe(tab);
       const forbiddenKeys = [
         'accessKeys',
         'apiEndpoint',
@@ -135,7 +136,7 @@ describe('tab-scoped initial data', () => {
         'stats',
         'usage',
       ].filter((key) => !(tab === 'account-status' && key === 'credentials'));
-      expect(Object.keys(initialData).sort()).not.toEqual(
+      expect(Object.keys(initialData ?? {}).sort()).not.toEqual(
         expect.arrayContaining(forbiddenKeys),
       );
 
@@ -143,6 +144,17 @@ describe('tab-scoped initial data', () => {
         expect(loader, name).toHaveBeenCalledTimes(
           (expectedLoaders as readonly string[]).includes(name) ? 1 : 0,
         );
+      }
+    },
+  );
+
+  it.each(['users', 'quotas', 'profile', 'sessions'] as const)(
+    'defers %s data to the client',
+    async (tab) => {
+      expect(await getInitialData({ locale: 'en-US', tab })).toBeUndefined();
+
+      for (const [name, loader] of Object.entries(domainLoaders)) {
+        expect(loader, name).not.toHaveBeenCalled();
       }
     },
   );

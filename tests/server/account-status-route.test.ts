@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('@/lib/server/admin/session', () => ({
-  getAdminSessionErrorResponse: vi.fn(),
+vi.mock('@/lib/server/admin/rbac', () => ({
+  getAdminRoleErrorResponse: vi.fn(),
 }));
 vi.mock('@/lib/server/domain/account-status', () => ({
   checkinAccount: vi.fn(),
@@ -10,8 +10,7 @@ vi.mock('@/lib/server/domain/account-status', () => ({
   getAccountStatusCredentials: vi.fn(),
 }));
 
-const { getAdminSessionErrorResponse } =
-  await import('@/lib/server/admin/session');
+const { getAdminRoleErrorResponse } = await import('@/lib/server/admin/rbac');
 const {
   checkinAccount,
   checkinAccounts,
@@ -34,7 +33,7 @@ const request = (body?: unknown): Request =>
 describe('account status admin route', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(getAdminSessionErrorResponse).mockResolvedValue(null);
+    vi.mocked(getAdminRoleErrorResponse).mockResolvedValue(null);
     vi.mocked(getAccountStatusCredentials).mockResolvedValue([] as never);
     vi.mocked(getAccountStatus).mockResolvedValue([]);
     vi.mocked(checkinAccounts).mockResolvedValue([]);
@@ -43,7 +42,7 @@ describe('account status admin route', () => {
 
   it('requires an administrator session', async () => {
     const denied = Response.json({ error: 'unauthorized' }, { status: 401 });
-    vi.mocked(getAdminSessionErrorResponse)
+    vi.mocked(getAdminRoleErrorResponse)
       .mockResolvedValueOnce(denied)
       .mockResolvedValueOnce(denied);
 

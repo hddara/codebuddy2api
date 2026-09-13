@@ -2,7 +2,7 @@ import {
   createAccessKey,
   listAccessKeys,
 } from '@/lib/server/domain/access-keys';
-import { getAdminSessionErrorResponse } from '@/lib/server/admin/session';
+import { getAdminRoleErrorResponse } from '@/lib/server/admin/rbac';
 import { listCredentialFilenames } from '@/lib/server/domain/credentials';
 import { getJsonBody } from '@/lib/server/shared/http';
 
@@ -31,7 +31,7 @@ const validateCredentialFilenames = (
 };
 
 export const GET = async (request: Request): Promise<Response> => {
-  const authError = await getAdminSessionErrorResponse(request);
+  const authError = await getAdminRoleErrorResponse(request);
 
   if (authError) {
     return authError;
@@ -41,7 +41,7 @@ export const GET = async (request: Request): Promise<Response> => {
 };
 
 export const POST = async (request: Request): Promise<Response> => {
-  const authError = await getAdminSessionErrorResponse(request);
+  const authError = await getAdminRoleErrorResponse(request);
 
   if (authError) {
     return authError;

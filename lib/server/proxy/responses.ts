@@ -1,11 +1,16 @@
 import type { NextRequest } from 'next/server';
 
+import { getAllowedCredentialFilenames } from '../domain/applications';
 import { getDefaultModel } from '../domain/config';
 import { getCredentialSupportedModels } from '../domain/credentials';
 import type { DebugTrace } from '../domain/debug';
+import { getUserResourceAccess } from '../domain/users';
 import {
+  assertModelAllowed,
+  ProxyAccessError,
   proxyChatCompletions,
   proxyResponsesUpstream,
+  resolveAllowedCredentialFilenames,
   resolveProxyContext,
   resolveProxyContextByCredentialFilename,
   type ProxyContext,
@@ -1722,9 +1727,17 @@ export const handleResponsesRequest = async (
   try {
     const previousResponseId = body.previous_response_id ?? null;
     const accessKey = await resolveRequestAccessKey(request);
+    const userAccess = await getUserResourceAccess(accessKey?.ownerUserId);
     const storedPreviousSession = previousResponseId
       ? await getResponseSession(previousResponseId)
       : undefined;
+
+    // Validated up front because the sticky-session branch below picks its
+    // credential directly and would otherwise skip `resolveProxyContext`.
+    assertModelAllowed(
+      typeof body.model === 'string' ? body.model : undefined,
+      userAccess.allowedModels,
+    );
 
     if (
       previousResponseId &&
@@ -1754,7 +1767,10 @@ export const handleResponsesRequest = async (
                   name: accessKey.name,
                 }
               : undefined,
-            allowedCredentialFilenames: accessKey?.credentialFilenames,
+            allowedCredentialFilenames: resolveAllowedCredentialFilenames(
+              getAllowedCredentialFilenames(accessKey),
+              userAccess.allowedCredentialFilenames,
+            ),
             requireEligible: true,
           },
         )
@@ -1885,6 +1901,11 @@ export const handleResponsesRequest = async (
       ),
     );
   } catch (error) {
+    // Resource restrictions are client errors, not internal failures.
+    if (error instanceof ProxyAccessError) {
+      return createErrorResponse(error.status, error.message);
+    }
+
     console.error('[CodeBuddy2API] Responses request failed', {
       route: '/v1/responses',
       error,

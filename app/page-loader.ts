@@ -23,6 +23,7 @@ import {
 import { getModelsForCredentials } from '@/lib/server/proxy/codebuddy';
 import { getDebugSettings, listDebugLogs } from '@/lib/server/domain/debug';
 import { getUsageAnalytics } from '@/lib/server/domain/usage';
+import type { UserRole } from '@/lib/server/domain/users';
 import type { AppLocale } from '@/lib/i18n/routing';
 
 const defaultUsageRequest: UsageFiltersState = {
@@ -33,9 +34,20 @@ const defaultUsageRequest: UsageFiltersState = {
 
 export interface InitialDataRequest {
   locale: AppLocale;
+  /** Members must never receive credential data, not even through a deep link. */
+  role?: UserRole;
   tab: TabKey;
   usagePreferences?: AdminUsagePreferences | null;
 }
+
+/** Tabs whose data belongs to the CodeBuddy accounts (administrator only). */
+const ADMIN_ONLY_TABS: TabKey[] = [
+  'account-status',
+  'api-test',
+  'credentials',
+  'debug',
+  'settings',
+];
 
 const buildApiEndpoint = async () => {
   const headerStore = await headers();
@@ -84,14 +96,21 @@ const createDebugSnapshot = async () => {
 
 export const getInitialData = async ({
   locale,
+  role,
   tab,
   usagePreferences,
-}: InitialDataRequest): Promise<AdminConsoleInitialData> => {
+}: InitialDataRequest): Promise<AdminConsoleInitialData | undefined> => {
+  if (role === 'member' && ADMIN_ONLY_TABS.includes(tab)) {
+    return undefined;
+  }
+
   switch (tab) {
     case 'dashboard': {
       const [apiEndpoint, credentials, usage] = await Promise.all([
         buildApiEndpoint(),
-        listCredentials(),
+        role === 'member'
+          ? Promise.resolve({ credentials: [] as CredentialSummary[] })
+          : listCredentials(),
         getUsageAnalytics({ range: 'today' }),
       ]);
 
@@ -181,5 +200,12 @@ export const getInitialData = async ({
 
       return { settings, tab };
     }
+    // These tabs load their own data from the client because every response
+    // depends on the signed in user.
+    case 'profile':
+    case 'quotas':
+    case 'sessions':
+    case 'users':
+      return undefined;
   }
 };

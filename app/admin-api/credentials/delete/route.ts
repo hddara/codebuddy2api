@@ -1,4 +1,4 @@
-import { getAdminSessionErrorResponse } from '@/lib/server/admin/session';
+import { getAdminRoleErrorResponse } from '@/lib/server/admin/rbac';
 import { deleteCredentialByIndex } from '@/lib/server/domain/credentials';
 import { createErrorResponse, getJsonBody } from '@/lib/server/shared/http';
 
@@ -6,7 +6,7 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export const POST = async (request: Request): Promise<Response> => {
-  const authError = await getAdminSessionErrorResponse(request);
+  const authError = await getAdminRoleErrorResponse(request);
 
   if (authError) {
     return authError;

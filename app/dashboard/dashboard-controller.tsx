@@ -17,11 +17,13 @@ import {
 } from '@/app/dashboard/dashboard';
 
 interface DashboardTabControllerProps {
+  canViewCredentials: boolean;
   children: ReactNode;
   hasInitialData: boolean;
 }
 
 export const DashboardTabController = ({
+  canViewCredentials,
   children,
   hasInitialData,
 }: DashboardTabControllerProps) => {
@@ -36,7 +38,11 @@ export const DashboardTabController = ({
 
     const [usageResult, credentialsResult] = await Promise.all([
       requestJson<UsageResponse>('/admin-api/usage?range=today'),
-      requestJson<CredentialsResponse>('/admin-api/credentials'),
+      // Members may not read the CodeBuddy accounts, so they skip the request
+      // instead of collecting a 403.
+      canViewCredentials
+        ? requestJson<CredentialsResponse>('/admin-api/credentials')
+        : Promise.resolve({ data: null, ok: true, status: 200 }),
     ]);
 
     setDashboard({
@@ -53,7 +59,7 @@ export const DashboardTabController = ({
           (credential) => !credential.is_expired,
         ).length ?? 0,
     });
-  }, [setDashboard]);
+  }, [canViewCredentials, setDashboard]);
 
   useEffect(() => {
     // Skip the client fetch when the server already provided this tab's data.
@@ -74,6 +80,10 @@ export const DashboardTabController = ({
   }, [loadDashboard, refreshSignal, setRefreshSignal]);
 
   return (
-    <DashboardProvider value={{ dashboard }}>{children}</DashboardProvider>
+    <DashboardProvider
+      value={{ dashboard, showCredentials: canViewCredentials }}
+    >
+      {children}
+    </DashboardProvider>
   );
 };

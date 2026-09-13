@@ -1,21 +1,58 @@
 'use client';
 
 import { Avatar, DropdownMenu } from '@lobehub/ui/base-ui';
-import { ChartLine, LogOut } from 'lucide-react';
+import {
+  Bug,
+  ChartLine,
+  LogOut,
+  Send,
+  Settings2,
+  UserRound,
+} from 'lucide-react';
 import { useTranslations } from 'next-intl';
 import type { Route } from 'next';
 import { useRouter } from 'next/navigation';
 
 import { getAvatarColor } from '@/app/avatar';
 import type { AdminProfile } from '@/app/page-data';
+import type { ThemeMode } from '@/app/page-state';
+import { buildAppearanceItems } from '@/app/settings-menu-items';
+import type { SettingsSection } from '@/app/settings/settings-dialog';
+import type { LocalePreference } from '@/lib/i18n/routing';
 
 interface UserMenuProps {
+  /** Credential tooling and runtime configuration are administrator only. */
+  canUseAdminTools: boolean;
+  localePreference: LocalePreference;
+  onLocaleChange: (locale: string) => void;
   onLogout: () => void;
+  onOpenApiTest: () => void;
+  onOpenDebug: () => void;
+  onOpenSettings: (section: SettingsSection) => void;
+  onThemeChange: (theme: ThemeMode) => void;
   profile: AdminProfile;
   showLogout: boolean;
+  theme: ThemeMode;
 }
 
-export const UserMenu = ({ onLogout, profile, showLogout }: UserMenuProps) => {
+/**
+ * The single menu in the top right corner: appearance, account, console
+ * configuration and session actions all live here, and the configuration
+ * categories open a dialog instead of a page.
+ */
+export const UserMenu = ({
+  canUseAdminTools,
+  localePreference,
+  onLocaleChange,
+  onLogout,
+  onOpenApiTest,
+  onOpenDebug,
+  onOpenSettings,
+  onThemeChange,
+  profile,
+  showLogout,
+  theme,
+}: UserMenuProps) => {
   const router = useRouter();
   const translations = useTranslations('Admin');
   const roleLabels = {
@@ -23,10 +60,35 @@ export const UserMenu = ({ onLogout, profile, showLogout }: UserMenuProps) => {
     member: translations('userMenu.roleMember'),
     owner: translations('userMenu.roleOwner'),
   };
+  const settingsEntries: Array<{ key: SettingsSection; label: string }> = [
+    { key: 'service', label: translations('settingsPanel.title') },
+    { key: 'models', label: translations('credentials.modelTableTitle') },
+    { key: 'security', label: translations('securityPanel.title') },
+    {
+      key: 'maintenance',
+      label: translations('settingsPanel.usageCacheTitle'),
+    },
+  ];
 
   return (
     <DropdownMenu
       items={[
+        ...buildAppearanceItems({
+          localePreference,
+          onLocaleChange,
+          onThemeChange,
+          t: (key) => translations(key),
+          theme,
+        }),
+        { key: 'appearance-divider', type: 'divider' as const },
+        {
+          icon: UserRound,
+          key: 'profile',
+          label: translations('userMenu.profile'),
+          onClick: () => {
+            router.push('/profile' as Route);
+          },
+        },
         {
           icon: ChartLine,
           key: 'my-usage',
@@ -35,6 +97,33 @@ export const UserMenu = ({ onLogout, profile, showLogout }: UserMenuProps) => {
             router.push('/usage' as Route);
           },
         },
+        ...(canUseAdminTools
+          ? [
+              {
+                children: settingsEntries.map(({ key, label }) => ({
+                  key: `settings-${key}`,
+                  label,
+                  onClick: () => onOpenSettings(key),
+                })),
+                icon: Settings2,
+                key: 'settings',
+                label: translations('tabs.settings'),
+                type: 'submenu' as const,
+              },
+              {
+                icon: Send,
+                key: 'api-test',
+                label: translations('tabs.apiTest'),
+                onClick: onOpenApiTest,
+              },
+              {
+                icon: Bug,
+                key: 'debug',
+                label: translations('tabs.debug'),
+                onClick: onOpenDebug,
+              },
+            ]
+          : []),
         { key: 'user-divider', type: 'divider' as const },
         ...(showLogout
           ? [

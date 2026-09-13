@@ -1,6 +1,8 @@
 import type { NextRequest } from 'next/server';
 
 import { resolveRequestAccessKey } from './auth';
+import { getAllowedCredentialFilenames } from '../domain/applications';
+import { getUserResourceAccess } from '../domain/users';
 import { getCodeBuddyApiEndpoint, getDefaultModel } from '../domain/config';
 import {
   type CredentialData,
@@ -20,6 +22,7 @@ import {
   type DebugTrace,
 } from '../domain/debug';
 import { createErrorResponse, getRequestHeaderMap } from '../shared/http';
+import { recordSessionLog, type SessionProtocol } from '../domain/session-logs';
 import { recordUsageEvent, type UsageSnapshot } from '../domain/usage';
 
 interface OpenAIMessage {
@@ -171,6 +174,46 @@ const recordProxyUsage = async ({
     model,
     route,
     usage: toUsageSnapshot(usage) ?? {},
+  });
+};
+
+const getSessionProtocol = (route: string): SessionProtocol => {
+  if (route === '/v1/messages') {
+    return 'anthropic';
+  }
+
+  if (route === '/v1/responses') {
+    return 'responses';
+  }
+
+  return 'chat';
+};
+
+/**
+ * Stores the normalized conversation and the upstream request. Fire and forget:
+ * session logging must never delay or fail an inference request.
+ */
+const recordSession = ({
+  messages,
+  model,
+  proxyContext,
+  route,
+  upstreamRequest,
+}: {
+  messages: unknown;
+  model: string;
+  proxyContext: ProxyContext;
+  route: string;
+  upstreamRequest: unknown;
+}): void => {
+  void recordSessionLog({
+    accessKeyId: proxyContext.accessKeyId,
+    accessKeyName: proxyContext.accessKeyName,
+    messages,
+    model,
+    protocol: getSessionProtocol(route),
+    route,
+    upstreamRequest,
   });
 };
 
@@ -588,15 +631,75 @@ const normalizeMessages = (
   return applyPromptCacheControl(normalized);
 };
 
+/** Rejected because the account may not use the requested resource. */
+export class ProxyAccessError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status = 403) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/**
+ * The credentials a request may use: the ones its API key binds, narrowed by
+ * the ones the owning user is allowed to use. `undefined` means unrestricted.
+ */
+export const resolveAllowedCredentialFilenames = (
+  accessKeyFilenames: string[] | undefined,
+  userFilenames: string[] | null,
+): string[] | undefined => {
+  if (!userFilenames) {
+    return accessKeyFilenames;
+  }
+
+  if (!accessKeyFilenames) {
+    return userFilenames;
+  }
+
+  const allowed = new Set(userFilenames);
+  const intersection = accessKeyFilenames.filter((filename) =>
+    allowed.has(filename),
+  );
+
+  if (!intersection.length) {
+    throw new ProxyAccessError(
+      'No upstream account is available for this API key.',
+    );
+  }
+
+  return intersection;
+};
+
+/** The requested model must be part of the user's whitelist, if one is set. */
+export const assertModelAllowed = (
+  model: string | undefined,
+  allowedModels: string[] | null,
+): void => {
+  if (model && allowedModels && !allowedModels.includes(model)) {
+    throw new ProxyAccessError(
+      `Model "${model}" is not enabled for this account.`,
+      400,
+    );
+  }
+};
+
 export const resolveProxyContext = async (
   request: NextRequest,
   model?: string,
 ): Promise<ProxyContext> => {
   const accessKey = await resolveRequestAccessKey(request);
+  const userAccess = await getUserResourceAccess(accessKey?.ownerUserId);
+
+  assertModelAllowed(model, userAccess.allowedModels);
+
   const credential = await resolveCredentialForRequest({
     accessKeyId: accessKey?.id,
     affinityKey: getCredentialAffinityKey(request, accessKey?.id ?? null),
-    allowedCredentialFilenames: accessKey?.credentialFilenames,
+    allowedCredentialFilenames: resolveAllowedCredentialFilenames(
+      getAllowedCredentialFilenames(accessKey),
+      userAccess.allowedCredentialFilenames,
+    ),
     model,
   });
 
@@ -2476,18 +2579,35 @@ export const getModelsResponse = async (
   request?: NextRequest,
 ): Promise<Response> => {
   const accessKey = request ? await resolveRequestAccessKey(request) : null;
-  const models = (
-    await getModelsForCredentials(
-      await listEligibleCredentialRecords(accessKey?.credentialFilenames),
-    )
-  ).map((model) => ({
-    id: model.id,
-    slug: model.id,
-    display_name: model.displayName,
-    object: 'model',
-    created: 0,
-    owned_by: 'codebuddy',
-  }));
+  const { allowedCredentialFilenames, allowedModels } =
+    await getUserResourceAccess(accessKey?.ownerUserId);
+  let credentialFilenames: string[] | undefined;
+
+  try {
+    credentialFilenames = resolveAllowedCredentialFilenames(
+      getAllowedCredentialFilenames(accessKey),
+      allowedCredentialFilenames,
+    );
+  } catch (error) {
+    if (error instanceof ProxyAccessError) {
+      return createErrorResponse(error.status, error.message);
+    }
+
+    throw error;
+  }
+
+  const credentialRecords =
+    await listEligibleCredentialRecords(credentialFilenames);
+  const models = (await getModelsForCredentials(credentialRecords))
+    .filter((model) => !allowedModels || allowedModels.includes(model.id))
+    .map((model) => ({
+      id: model.id,
+      slug: model.id,
+      display_name: model.displayName,
+      object: 'model',
+      created: 0,
+      owned_by: 'codebuddy',
+    }));
 
   return Response.json({
     object: 'list',
@@ -2512,6 +2632,14 @@ export const proxyChatCompletions = async (
       context ?? (await resolveProxyContext(request, body.model));
     setDebugTraceCredential(debugTrace, resolvedContext.credentialFilename);
     const upstreamBody = await buildUpstreamBody(body, resolvedContext);
+
+    recordSession({
+      messages: upstreamBody.messages ?? body.messages ?? [],
+      model: upstreamBody.model?.trim() || body.model?.trim() || 'unknown',
+      proxyContext: resolvedContext,
+      route: usageRoute,
+      upstreamRequest: upstreamBody,
+    });
 
     if (resolvedContext.preferences.upstreamProtocol === 'responses') {
       const unsupportedOptions = getUnsupportedResponsesChatOptions(body);
@@ -2702,6 +2830,12 @@ export const proxyChatCompletions = async (
     return aggregated.response;
   } catch (error) {
     setDebugTraceError(debugTrace, error);
+
+    // Resource restrictions are client errors, not upstream failures.
+    if (error instanceof ProxyAccessError) {
+      return createErrorResponse(error.status, error.message);
+    }
+
     logUpstreamFailure({
       error,
       route: '/v1/chat/completions',
@@ -2736,6 +2870,18 @@ export const proxyResponsesUpstream = async (
           ? body.model
           : await getDefaultModel(),
     };
+
+    recordSession({
+      messages:
+        (upstreamBody as Record<string, unknown>).input ??
+        body.input ??
+        body.messages ??
+        [],
+      model: upstreamBody.model,
+      proxyContext: resolvedContext,
+      route: '/v1/responses',
+      upstreamRequest: upstreamBody,
+    });
     const apiEndpoint = await getCodeBuddyApiEndpoint();
     const upstreamUrl = `${apiEndpoint}/responses`;
     const upstreamHeaders = new Headers(
@@ -2834,6 +2980,12 @@ export const proxyResponsesUpstream = async (
     });
   } catch (error) {
     setDebugTraceError(debugTrace, error);
+
+    // Resource restrictions are client errors, not upstream failures.
+    if (error instanceof ProxyAccessError) {
+      return createErrorResponse(error.status, error.message);
+    }
+
     logUpstreamFailure({
       error,
       route: '/v1/responses',

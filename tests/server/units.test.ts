@@ -87,6 +87,7 @@ import {
   getUsageAnalytics,
   recordUsageEvent,
 } from '@/lib/server/domain/usage';
+import { createUser } from '@/lib/server/domain/users';
 import { resetStorageRuntime } from '@/lib/server/storage';
 
 const repoRoot = process.cwd();
@@ -4665,6 +4666,93 @@ describe('server units', () => {
       ]),
     );
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('restricts proxied models and credentials to what the owning user may use', async () => {
+    const firstCredential = await addCredential({
+      bearer_token: 'scoped-first-token',
+      user_id: 'scoped-first@example.com',
+    });
+    const secondCredential = await addCredential({
+      bearer_token: 'scoped-second-token',
+      user_id: 'scoped-second@example.com',
+    });
+    await updateCredentialSupportedModels(firstCredential.filename, [
+      'glm-allowed',
+      'glm-blocked',
+    ]);
+    await updateCredentialSupportedModels(secondCredential.filename, [
+      'glm-second',
+    ]);
+
+    const user = await createUser({
+      preferences: {
+        allowedCredentialFilenames: [firstCredential.filename],
+        allowedModels: ['glm-allowed'],
+      },
+      role: 'member',
+      username: 'scoped-member',
+    });
+    const scopedKey = await createApplication({
+      credentialFilenames: [
+        firstCredential.filename,
+        secondCredential.filename,
+      ],
+      name: 'Scoped Key',
+      ownerUserId: user.userId,
+    });
+    const scopedRequest = (): NextRequest =>
+      makeNextRequest('http://localhost/v1/chat/completions', {
+        headers: { authorization: `Bearer ${scopedKey.secret}` },
+      });
+
+    // A model outside the user whitelist never reaches the upstream.
+    const deniedModel = await proxyChatCompletions(scopedRequest(), {
+      messages: [{ content: 'hello', role: 'user' }],
+      model: 'glm-second',
+    });
+    expect(deniedModel.status).toBe(400);
+    expect(await deniedModel.json()).toMatchObject({
+      error: { message: expect.stringContaining('glm-second') },
+    });
+
+    // Model discovery keeps the intersection of key bindings and user access,
+    // then drops the models the user is not allowed to call.
+    const modelsResponse = await getModelsResponse(scopedRequest());
+    const payload = (await modelsResponse.json()) as {
+      data: Array<{ id: string }>;
+    };
+    expect(modelsResponse.status).toBe(200);
+    expect(payload.data.map((model) => model.id)).toEqual(['glm-allowed']);
+
+    // An empty intersection is a client error, not an upstream failure.
+    const narrowUser = await createUser({
+      preferences: {
+        allowedCredentialFilenames: [secondCredential.filename],
+      },
+      role: 'member',
+      username: 'narrow-member',
+    });
+    const narrowKey = await createApplication({
+      credentialFilenames: [firstCredential.filename],
+      name: 'Narrow Key',
+      ownerUserId: narrowUser.userId,
+    });
+    const narrowRequest = (): NextRequest =>
+      makeNextRequest('http://localhost/v1/chat/completions', {
+        headers: { authorization: `Bearer ${narrowKey.secret}` },
+      });
+    const forbidden = await proxyChatCompletions(narrowRequest(), {
+      messages: [{ content: 'hello', role: 'user' }],
+      model: 'glm-allowed',
+    });
+    expect(forbidden.status).toBe(403);
+    expect(await forbidden.json()).toMatchObject({
+      error: { message: expect.stringContaining('No upstream account') },
+    });
+
+    const forbiddenModels = await getModelsResponse(narrowRequest());
+    expect(forbiddenModels.status).toBe(403);
   });
 
   it('keeps empty streamed assistant content for previous_response_id follow-ups', async () => {

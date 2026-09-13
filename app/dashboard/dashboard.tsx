@@ -57,6 +57,8 @@ export const createDashboardState = (
 
 export interface DashboardController {
   dashboard: DashboardState;
+  /** CodeBuddy accounts are an administrator concern, so members hide the card. */
+  showCredentials: boolean;
 }
 
 const DashboardContext = createContext<DashboardController | null>(null);
@@ -89,19 +91,25 @@ export const getDailyMessage = (messages: unknown): string => {
 };
 
 const Dashboard = () => {
-  const { dashboard } = useDashboard();
+  const { dashboard, showCredentials } = useDashboard();
   const locale = useLocale();
   const messages = useMessages() as unknown as AppMessages;
   const translations = useTranslations('Admin.dashboard');
   const usageTranslations = useTranslations('Admin.usage');
   const dailyMessage = getDailyMessage(messages.Admin.dashboard.messages.daily);
   const metrics = [
-    {
-      icon: KeyRound,
-      detail: translations('active', { count: dashboard.validCredentials }),
-      label: translations('credentials'),
-      value: dashboard.totalCredentials,
-    },
+    ...(showCredentials
+      ? [
+          {
+            detail: translations('active', {
+              count: dashboard.validCredentials,
+            }),
+            icon: KeyRound,
+            label: translations('credentials'),
+            value: dashboard.totalCredentials,
+          },
+        ]
+      : []),
     {
       icon: ChartNoAxesCombined,
       label: usageTranslations('callsToday'),

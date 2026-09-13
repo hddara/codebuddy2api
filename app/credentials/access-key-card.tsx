@@ -5,6 +5,7 @@ import { useLocale, useTranslations } from 'next-intl';
 
 import type {
   AccessKeyFormState,
+  AccessKeyQuota,
   AccessKeySummary,
   CredentialSummary,
   RevealedAccessKeySecret,
@@ -15,6 +16,7 @@ interface AccessKeyCardProps {
   actionId: string | null;
   form: AccessKeyFormState;
   isCreating?: boolean;
+  quota: AccessKeyQuota | null;
   revealedSecret: RevealedAccessKeySecret | null;
   validCredentials: CredentialSummary[];
   onCancel?: () => void;
@@ -24,6 +26,7 @@ interface AccessKeyCardProps {
   onRevealSecret?: () => void;
   onSaveAccessKey: () => void;
   onToggleCredentialSelection: (filename: string) => void;
+  onUpdateAccessKeyMaxTokens: (value: string) => void;
   onUpdateAccessKeyName: (value: string) => void;
 }
 
@@ -32,6 +35,7 @@ export const AccessKeyCard = ({
   actionId,
   form,
   isCreating = false,
+  quota,
   revealedSecret,
   validCredentials,
   onCancel,
@@ -41,6 +45,7 @@ export const AccessKeyCard = ({
   onRevealSecret,
   onSaveAccessKey,
   onToggleCredentialSelection,
+  onUpdateAccessKeyMaxTokens,
   onUpdateAccessKeyName,
 }: AccessKeyCardProps) => {
   const locale = useLocale();
@@ -53,6 +58,9 @@ export const AccessKeyCard = ({
   const nameInputId = isCreating
     ? 'accessKeyName-new'
     : `accessKeyName-${accessKey.id}`;
+  const tokenLimitInputId = isCreating
+    ? 'accessKeyTokenLimit-new'
+    : `accessKeyTokenLimit-${accessKey.id}`;
 
   return (
     <Block
@@ -73,6 +81,14 @@ export const AccessKeyCard = ({
                 {text('credentials.accessKeyCount', {
                   count: accessKey.credentialFilenames.length,
                 })}
+              </Tag>
+              <Tag color="geekblue">
+                {quota && quota.maxTokens !== null
+                  ? text('credentials.accessKeyTokenUsage', {
+                      max: quota.maxTokens.toLocaleString(locale),
+                      used: quota.usedTokens.toLocaleString(locale),
+                    })
+                  : text('credentials.accessKeyTokenUnlimited')}
               </Tag>
             </div>
             <div className="font-mono text-sm text-secondary break-all">
@@ -154,6 +170,24 @@ export const AccessKeyCard = ({
               type="text"
               value={form.name}
               onChange={(event) => onUpdateAccessKeyName(event.target.value)}
+            />
+          </div>
+          <div className="mt-4">
+            <label
+              className="block mb-2 font-medium text-text-light dark:text-text-dark"
+              htmlFor={tokenLimitInputId}
+            >
+              {text('credentials.accessKeyTokenLimit')}
+            </label>
+            <Input
+              id={tokenLimitInputId}
+              min={0}
+              placeholder={text('credentials.accessKeyTokenUnlimited')}
+              type="number"
+              value={form.maxTokens}
+              onChange={(event) =>
+                onUpdateAccessKeyMaxTokens(event.target.value)
+              }
             />
           </div>
           <div className="mt-4">

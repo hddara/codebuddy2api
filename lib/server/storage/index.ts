@@ -266,6 +266,10 @@ const getNamespaceDirectory = (namespace: string): string | null => {
     return path.join(getFileStorageDir(), 'quotas');
   }
 
+  if (namespace === 'billing') {
+    return path.join(getFileStorageDir(), 'billing');
+  }
+
   return null;
 };
 
@@ -663,6 +667,7 @@ class DatabaseStorageBackend implements StorageBackend {
       namespace === 'applications' ||
       namespace === 'credentials' ||
       namespace === 'responses' ||
+      namespace === 'session-logs' ||
       namespace === 'users' ||
       namespace === 'user-sessions' ||
       (namespace === 'access-keys' && key === 'store');

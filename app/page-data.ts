@@ -14,7 +14,11 @@ export type TabKey =
   | 'account-status'
   | 'api-test'
   | 'debug'
-  | 'settings';
+  | 'settings'
+  | 'users'
+  | 'quotas'
+  | 'profile'
+  | 'sessions';
 
 export type AdminRole = 'admin' | 'member' | 'owner';
 
