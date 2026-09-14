@@ -7,7 +7,13 @@ import {
   DrizzlePgDatabaseStorageAdapter,
 } from './backends/postgres';
 import { DrizzleSqliteDatabaseStorageAdapter } from './backends/sqlite';
-import type { StorageEvent } from './backends/types';
+import type {
+  DatabaseSessionRecord,
+  DatabaseSessionTurnRecord,
+  ListSessionRecordsOptions,
+  SessionListCursor,
+  StorageEvent,
+} from './backends/types';
 
 export type StorageBackendKind = 'file' | 'pg' | 'sqlite';
 
@@ -66,6 +72,11 @@ const STORAGE_PERSISTENCE_ENV = 'CODEBUDDY_STORAGE_PERSISTENCE';
 const STORAGE_FILE_DIR_ENV = 'CODEBUDDY_STORAGE_FILE_DIR';
 const CREDENTIALS_DIR_ENV = 'CODEBUDDY_CREDENTIALS_DIR';
 const LEGACY_CONFIG_PATH_ENV = 'CODEBUDDY_CONFIG_PATH';
+
+const SESSION_LIST_DEFAULT_LIMIT = 50;
+const SESSION_LIST_MAX_LIMIT = 200;
+const SESSION_STORAGE_UNAVAILABLE_REASON =
+  'Session logging is only available for the sqlite and pg storage backends';
 
 const CREDENTIAL_MANAGER_STATE_FILENAME = 'manager_state.json';
 
@@ -724,6 +735,62 @@ class DatabaseStorageBackend implements StorageBackend {
     return this.adapter.trimDebugLogs(maxEntries);
   }
 
+  public putSessionRecord(record: DatabaseSessionRecord): Promise<void> {
+    return this.adapter.putSessionRecord(record);
+  }
+
+  public getSessionRecord(
+    sessionId: string,
+  ): Promise<DatabaseSessionRecord | null> {
+    return this.adapter.getSessionRecord(sessionId);
+  }
+
+  public findLatestSessionByExternalRef(
+    accessKeyId: string | null,
+    externalRef: string,
+    updatedAfter: Date,
+  ): Promise<DatabaseSessionRecord | null> {
+    return this.adapter.findLatestSessionByExternalRef(
+      accessKeyId,
+      externalRef,
+      updatedAfter,
+    );
+  }
+
+  public listSessionRecords(
+    options: ListSessionRecordsOptions,
+  ): Promise<DatabaseSessionRecord[]> {
+    return this.adapter.listSessionRecords(options);
+  }
+
+  public appendSessionTurns(
+    records: DatabaseSessionTurnRecord[],
+  ): Promise<void> {
+    return this.adapter.appendSessionTurns(records);
+  }
+
+  public listSessionTurns(
+    sessionId: string,
+  ): Promise<DatabaseSessionTurnRecord[]> {
+    return this.adapter.listSessionTurns(sessionId);
+  }
+
+  public trimSessionTurns(sessionId: string, maxTurns: number): Promise<void> {
+    return this.adapter.trimSessionTurns(sessionId, maxTurns);
+  }
+
+  public deleteSessionRecord(sessionId: string): Promise<void> {
+    return this.adapter.deleteSessionRecord(sessionId);
+  }
+
+  public clearSessionRecords(): Promise<void> {
+    return this.adapter.clearSessionRecords();
+  }
+
+  public trimSessionRecords(before: Date): Promise<void> {
+    return this.adapter.trimSessionRecords(before);
+  }
+
   private async importLegacyDocument(
     namespace: string,
     key: string,
@@ -911,6 +978,17 @@ const getEventBackend = async (): Promise<StorageBackend> => {
   return backend;
 };
 
+const getSessionBackend = async (): Promise<DatabaseStorageBackend> => {
+  await ensureStorageReady();
+  const backend = getRuntime().backend;
+
+  if (!(backend instanceof DatabaseStorageBackend)) {
+    throw new Error(SESSION_STORAGE_UNAVAILABLE_REASON);
+  }
+
+  return backend;
+};
+
 export const appendStorageUsageEvents = async (
   entries: StorageEvent[],
 ): Promise<void> => {
@@ -959,6 +1037,355 @@ export const trimStorageDebugLogs = async (
 ): Promise<void> => {
   const backend = await getEventBackend();
   await backend.trimDebugLogs?.(maxEntries);
+};
+
+export interface SessionRecord {
+  accessKeyId: string | null;
+  credentialFilename: string | null;
+  externalRef: string | null;
+  model: string | null;
+  sessionId: string;
+  sourceRoute: string;
+  /** Epoch milliseconds. */
+  startedAt: number;
+  title: string | null;
+  totalTokens: number;
+  turnCount: number;
+  /** Epoch milliseconds. */
+  updatedAt: number;
+}
+
+export interface SessionTurnRecord {
+  contentRaw: unknown;
+  contentText: string | null;
+  /** Full turn context: instructions, tool definitions, upstream request body. */
+  context: unknown;
+  /** Epoch milliseconds. */
+  createdAt: number;
+  model: string | null;
+  reasoning: string | null;
+  role: string;
+  route: string;
+  sessionId: string;
+  toolCalls: unknown;
+  turnId: string;
+  turnIndex: number;
+  usage: unknown;
+}
+
+export interface SessionWriteInput {
+  accessKeyId: string | null;
+  credentialFilename: string | null;
+  externalRef: string | null;
+  model: string | null;
+  sessionId: string;
+  sourceRoute: string;
+  /** Epoch milliseconds. */
+  startedAt: number;
+  title: string | null;
+  /** Epoch milliseconds. */
+  updatedAt: number;
+}
+
+export interface SessionListOptions {
+  accessKeyId?: string | null;
+  cursor?: { sessionId: string; updatedAt: number } | null;
+  limit?: number;
+}
+
+export interface SessionPage {
+  nextCursor: { sessionId: string; updatedAt: number } | null;
+  sessions: SessionRecord[];
+}
+
+export interface SessionStorageAvailability {
+  available: boolean;
+  backend: StorageBackendKind;
+  reason: string | null;
+}
+
+export interface StoredSession {
+  session: SessionRecord;
+  turns: SessionTurnRecord[];
+}
+
+/**
+ * Sensitive columns are encrypted one by one, mirroring what
+ * `DatabaseStorageBackend.putJson` does for documents. Without
+ * `CODEBUDDY_STORAGE_ENCRYPTION_KEY` the payload degrades to plain JSON, which
+ * is why every row also records how it was written.
+ */
+const encodeSessionColumn = (
+  value: unknown,
+): { ciphertext: string; mode: string } | null => {
+  return value === null || value === undefined ? null : encryptPayload(value);
+};
+
+const decodeSessionColumn = <T>(
+  ciphertext: string | null,
+  mode: string | null,
+): T | null => {
+  return ciphertext === null || mode === null
+    ? null
+    : decryptPayload<T>(ciphertext, mode);
+};
+
+const parseSessionUsage = (raw: string | null): unknown => {
+  if (raw === null) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+};
+
+const encodeSessionTitle = (
+  existing: DatabaseSessionRecord | null,
+  title: string | null,
+): { ciphertext: string; mode: string | null } | null => {
+  if (existing && existing.title !== null) {
+    return { ciphertext: existing.title, mode: existing.encryptionMode };
+  }
+
+  return encodeSessionColumn(title);
+};
+
+const encodeSessionTurn = (
+  turn: SessionTurnRecord,
+): DatabaseSessionTurnRecord => {
+  const contentRaw = encodeSessionColumn(turn.contentRaw);
+  const contentText = encodeSessionColumn(turn.contentText);
+  const context = encodeSessionColumn(turn.context);
+  const reasoning = encodeSessionColumn(turn.reasoning);
+  const toolCalls = encodeSessionColumn(turn.toolCalls);
+
+  return {
+    contentRaw: contentRaw?.ciphertext ?? null,
+    contentText: contentText?.ciphertext ?? null,
+    contextJson: context?.ciphertext ?? null,
+    createdAt: new Date(turn.createdAt),
+    encryptionMode:
+      contentRaw?.mode ??
+      contentText?.mode ??
+      context?.mode ??
+      reasoning?.mode ??
+      toolCalls?.mode ??
+      null,
+    model: turn.model,
+    reasoning: reasoning?.ciphertext ?? null,
+    role: turn.role,
+    route: turn.route,
+    sessionId: turn.sessionId,
+    toolCalls: toolCalls?.ciphertext ?? null,
+    turnId: turn.turnId,
+    turnIndex: turn.turnIndex,
+    usageJson:
+      turn.usage === null || turn.usage === undefined
+        ? null
+        : JSON.stringify(turn.usage),
+  };
+};
+
+const decodeSessionTurn = (
+  row: DatabaseSessionTurnRecord,
+): SessionTurnRecord => {
+  return {
+    contentRaw: decodeSessionColumn(row.contentRaw, row.encryptionMode),
+    contentText: decodeSessionColumn<string>(
+      row.contentText,
+      row.encryptionMode,
+    ),
+    context: decodeSessionColumn(row.contextJson, row.encryptionMode),
+    createdAt: row.createdAt.getTime(),
+    model: row.model,
+    reasoning: decodeSessionColumn<string>(row.reasoning, row.encryptionMode),
+    role: row.role,
+    route: row.route,
+    sessionId: row.sessionId,
+    toolCalls: decodeSessionColumn(row.toolCalls, row.encryptionMode),
+    turnId: row.turnId,
+    turnIndex: row.turnIndex,
+    usage: parseSessionUsage(row.usageJson),
+  };
+};
+
+const decodeSessionRecord = (row: DatabaseSessionRecord): SessionRecord => {
+  return {
+    accessKeyId: row.accessKeyId,
+    credentialFilename: row.credentialFilename,
+    externalRef: row.externalRef,
+    model: row.model,
+    sessionId: row.sessionId,
+    sourceRoute: row.sourceRoute,
+    startedAt: row.startedAt.getTime(),
+    title: decodeSessionColumn<string>(row.title, row.encryptionMode),
+    totalTokens: row.totalTokens,
+    turnCount: row.turnCount,
+    updatedAt: row.updatedAt.getTime(),
+  };
+};
+
+const sumSessionTurnTokens = (turns: SessionTurnRecord[]): number => {
+  return turns.reduce((total, turn) => {
+    const value = (turn.usage as { total_tokens?: unknown } | null)
+      ?.total_tokens;
+
+    return typeof value === 'number' && Number.isFinite(value)
+      ? total + value
+      : total;
+  }, 0);
+};
+
+export const getSessionStorageAvailability = (): SessionStorageAvailability => {
+  const backend = getStorageBackendKind();
+  const available = backend !== 'file';
+
+  return {
+    available,
+    backend,
+    reason: available ? null : SESSION_STORAGE_UNAVAILABLE_REASON,
+  };
+};
+
+/**
+ * Upserts the session metadata and appends the new turns. Counters are merged
+ * read-modify-write, so two instances writing the same session concurrently can
+ * lose one increment; the turns themselves are protected by their primary key.
+ */
+export const appendStorageSessionTurns = async (input: {
+  maxTurnsPerSession?: number;
+  session: SessionWriteInput;
+  turns: SessionTurnRecord[];
+}): Promise<void> => {
+  const backend = await getSessionBackend();
+  const existing = await backend.getSessionRecord(input.session.sessionId);
+  const title = encodeSessionTitle(existing, input.session.title);
+
+  await backend.putSessionRecord({
+    accessKeyId: input.session.accessKeyId,
+    credentialFilename: input.session.credentialFilename,
+    encryptionMode: title?.mode ?? null,
+    externalRef: input.session.externalRef,
+    model: input.session.model,
+    sessionId: input.session.sessionId,
+    sourceRoute: input.session.sourceRoute,
+    startedAt: existing?.startedAt ?? new Date(input.session.startedAt),
+    title: title?.ciphertext ?? null,
+    totalTokens:
+      (existing?.totalTokens ?? 0) + sumSessionTurnTokens(input.turns),
+    turnCount: (existing?.turnCount ?? 0) + input.turns.length,
+    updatedAt: new Date(input.session.updatedAt),
+  });
+
+  await backend.appendSessionTurns(input.turns.map(encodeSessionTurn));
+
+  if (input.maxTurnsPerSession && input.maxTurnsPerSession > 0) {
+    await backend.trimSessionTurns(
+      input.session.sessionId,
+      input.maxTurnsPerSession,
+    );
+  }
+};
+
+export const getStorageSession = async (
+  sessionId: string,
+): Promise<StoredSession | null> => {
+  const backend = await getSessionBackend();
+  const record = await backend.getSessionRecord(sessionId);
+
+  if (!record) {
+    return null;
+  }
+
+  const turns = await backend.listSessionTurns(sessionId);
+
+  return {
+    session: decodeSessionRecord(record),
+    turns: turns.map(decodeSessionTurn),
+  };
+};
+
+/** Session row without its turns, used to number the next turn. */
+export const getStorageSessionRecord = async (
+  sessionId: string,
+): Promise<SessionRecord | null> => {
+  const backend = await getSessionBackend();
+  const record = await backend.getSessionRecord(sessionId);
+
+  return record ? decodeSessionRecord(record) : null;
+};
+
+/**
+ * Newest session carrying `externalRef` that was still touched after
+ * `updatedAfterMs`. A null result means the resolved conversation went stale,
+ * which is how the fallback strategies decide between continuing a session and
+ * starting a fresh one.
+ */
+export const findStorageSessionByExternalRef = async (
+  accessKeyId: string | null,
+  externalRef: string,
+  updatedAfterMs: number,
+): Promise<SessionRecord | null> => {
+  const backend = await getSessionBackend();
+  const record = await backend.findLatestSessionByExternalRef(
+    accessKeyId,
+    externalRef,
+    new Date(updatedAfterMs),
+  );
+
+  return record ? decodeSessionRecord(record) : null;
+};
+
+export const listStorageSessions = async (
+  options: SessionListOptions = {},
+): Promise<SessionPage> => {
+  const backend = await getSessionBackend();
+  const requested = options.limit ?? SESSION_LIST_DEFAULT_LIMIT;
+  const limit = Math.min(
+    Math.max(Number.isFinite(requested) ? requested : 1, 1),
+    SESSION_LIST_MAX_LIMIT,
+  );
+  const cursor: SessionListCursor | null = options.cursor
+    ? {
+        sessionId: options.cursor.sessionId,
+        updatedAt: new Date(options.cursor.updatedAt),
+      }
+    : null;
+
+  const records = await backend.listSessionRecords({
+    accessKeyId: options.accessKeyId ?? null,
+    cursor,
+    limit: limit + 1,
+  });
+  const page = records.slice(0, limit);
+  const last = records.length > limit ? records[limit - 1] : null;
+
+  return {
+    nextCursor: last
+      ? { sessionId: last.sessionId, updatedAt: last.updatedAt.getTime() }
+      : null,
+    sessions: page.map(decodeSessionRecord),
+  };
+};
+
+export const deleteStorageSession = async (
+  sessionId: string,
+): Promise<void> => {
+  const backend = await getSessionBackend();
+  await backend.deleteSessionRecord(sessionId);
+};
+
+export const clearStorageSessions = async (): Promise<void> => {
+  const backend = await getSessionBackend();
+  await backend.clearSessionRecords();
+};
+
+export const trimStorageSessions = async (before: Date): Promise<void> => {
+  const backend = await getSessionBackend();
+  await backend.trimSessionRecords(before);
 };
 
 export const resetStorageRuntime = (): void => {

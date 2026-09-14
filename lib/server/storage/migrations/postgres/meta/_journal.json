@@ -15,6 +15,13 @@
       "when": 1784448000000,
       "tag": "0001_debug_log_metrics",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789374280000,
+      "tag": "0002_session_logs",
+      "breakpoints": true
     }
   ]
 }

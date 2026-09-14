@@ -1,11 +1,18 @@
 import type { NextRequest } from 'next/server';
 
-import { getAnthropicAuthErrorResponse } from '@/lib/server/proxy/auth';
+import {
+  getAnthropicAuthErrorResponse,
+  resolveRequestAccessKey,
+} from '@/lib/server/proxy/auth';
 import {
   createDebugTrace,
   finalizeDebugTrace,
   isDebugEnabled,
 } from '@/lib/server/domain/debug';
+import {
+  beginSessionCapture,
+  finalizeSessionCapture,
+} from '@/lib/server/domain/session-capture';
 import { handleMessagesRequest } from '@/lib/server/proxy/anthropic';
 import { getJsonBody } from '@/lib/server/shared/http';
 
@@ -30,6 +37,17 @@ export const POST = async (request: NextRequest): Promise<Response> => {
       })
     : undefined;
 
+  const sessionCapture = await beginSessionCapture({
+    accessKeyId: (await resolveRequestAccessKey(request))?.id ?? null,
+    body,
+    credentialFilename: null,
+    headers: request.headers,
+    route: '/v1/messages',
+  });
+
   const response = await handleMessagesRequest(request, body, debugTrace);
-  return finalizeDebugTrace(debugTrace, response);
+  return finalizeSessionCapture(
+    sessionCapture,
+    finalizeDebugTrace(debugTrace, response),
+  );
 };

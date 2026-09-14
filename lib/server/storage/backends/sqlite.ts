@@ -1,13 +1,33 @@
 import Database from 'better-sqlite3';
-import { and, asc, desc, eq, gte, inArray, lt } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gte,
+  inArray,
+  isNull,
+  lt,
+  or,
+  type SQL,
+} from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import path from 'node:path';
 
-import { debugLogs, documents, usageEvents } from './sqlite-schema';
+import {
+  debugLogs,
+  documents,
+  sessionTurns,
+  sessions,
+  usageEvents,
+} from './sqlite-schema';
 import type {
   DatabaseDocumentRecord,
+  DatabaseSessionRecord,
+  DatabaseSessionTurnRecord,
   DatabaseStorageAdapter,
+  ListSessionRecordsOptions,
   StorageEvent,
 } from './types';
 
@@ -34,6 +54,8 @@ export class DrizzleSqliteDatabaseStorageAdapter implements DatabaseStorageAdapt
       this.db.select({ key: documents.documentKey }).from(documents).limit(1),
       this.db.select({ key: usageEvents.eventId }).from(usageEvents).limit(1),
       this.db.select({ key: debugLogs.eventId }).from(debugLogs).limit(1),
+      this.db.select({ key: sessions.sessionId }).from(sessions).limit(1),
+      this.db.select({ key: sessionTurns.turnId }).from(sessionTurns).limit(1),
     ]);
   }
 
@@ -243,5 +265,162 @@ export class DrizzleSqliteDatabaseStorageAdapter implements DatabaseStorageAdapt
       .where(
         and(eq(documents.namespace, namespace), eq(documents.documentKey, key)),
       );
+  }
+
+  public async putSessionRecord(record: DatabaseSessionRecord): Promise<void> {
+    await this.db
+      .insert(sessions)
+      .values(record)
+      .onConflictDoUpdate({
+        set: {
+          accessKeyId: record.accessKeyId,
+          credentialFilename: record.credentialFilename,
+          encryptionMode: record.encryptionMode,
+          externalRef: record.externalRef,
+          model: record.model,
+          sourceRoute: record.sourceRoute,
+          title: record.title,
+          totalTokens: record.totalTokens,
+          turnCount: record.turnCount,
+          updatedAt: record.updatedAt,
+        },
+        target: sessions.sessionId,
+      });
+  }
+
+  public async getSessionRecord(
+    sessionId: string,
+  ): Promise<DatabaseSessionRecord | null> {
+    const rows = await this.db
+      .select()
+      .from(sessions)
+      .where(eq(sessions.sessionId, sessionId))
+      .limit(1);
+
+    return rows[0] ?? null;
+  }
+
+  public async findLatestSessionByExternalRef(
+    accessKeyId: string | null,
+    externalRef: string,
+    updatedAfter: Date,
+  ): Promise<DatabaseSessionRecord | null> {
+    const rows = await this.db
+      .select()
+      .from(sessions)
+      .where(
+        and(
+          accessKeyId === null
+            ? isNull(sessions.accessKeyId)
+            : eq(sessions.accessKeyId, accessKeyId),
+          eq(sessions.externalRef, externalRef),
+          gte(sessions.updatedAt, updatedAfter),
+        ),
+      )
+      .orderBy(desc(sessions.updatedAt), desc(sessions.sessionId))
+      .limit(1);
+
+    return rows[0] ?? null;
+  }
+
+  public async listSessionRecords(
+    options: ListSessionRecordsOptions,
+  ): Promise<DatabaseSessionRecord[]> {
+    const filters: SQL[] = [];
+
+    if (options.accessKeyId) {
+      filters.push(eq(sessions.accessKeyId, options.accessKeyId));
+    }
+
+    if (options.cursor) {
+      const cursorFilter = or(
+        lt(sessions.updatedAt, options.cursor.updatedAt),
+        and(
+          eq(sessions.updatedAt, options.cursor.updatedAt),
+          lt(sessions.sessionId, options.cursor.sessionId),
+        ),
+      );
+
+      if (cursorFilter) {
+        filters.push(cursorFilter);
+      }
+    }
+
+    return this.db
+      .select()
+      .from(sessions)
+      .where(filters.length ? and(...filters) : undefined)
+      .orderBy(desc(sessions.updatedAt), desc(sessions.sessionId))
+      .limit(options.limit);
+  }
+
+  public async appendSessionTurns(
+    records: DatabaseSessionTurnRecord[],
+  ): Promise<void> {
+    if (!records.length) return;
+
+    await this.db.insert(sessionTurns).values(records).onConflictDoNothing();
+  }
+
+  public async listSessionTurns(
+    sessionId: string,
+  ): Promise<DatabaseSessionTurnRecord[]> {
+    return this.db
+      .select()
+      .from(sessionTurns)
+      .where(eq(sessionTurns.sessionId, sessionId))
+      .orderBy(asc(sessionTurns.turnIndex));
+  }
+
+  public async trimSessionTurns(
+    sessionId: string,
+    maxTurns: number,
+  ): Promise<void> {
+    if (maxTurns <= 0) return;
+
+    // SQLite rejects OFFSET without LIMIT, so page in memory like trimDebugLogs.
+    const rows = await this.db
+      .select({ turnId: sessionTurns.turnId })
+      .from(sessionTurns)
+      .where(eq(sessionTurns.sessionId, sessionId))
+      .orderBy(desc(sessionTurns.turnIndex), desc(sessionTurns.turnId));
+    const staleRows = rows.slice(maxTurns);
+
+    if (!staleRows.length) return;
+
+    await this.db.delete(sessionTurns).where(
+      inArray(
+        sessionTurns.turnId,
+        staleRows.map((row) => row.turnId),
+      ),
+    );
+  }
+
+  public async deleteSessionRecord(sessionId: string): Promise<void> {
+    await this.db
+      .delete(sessionTurns)
+      .where(eq(sessionTurns.sessionId, sessionId));
+    await this.db.delete(sessions).where(eq(sessions.sessionId, sessionId));
+  }
+
+  public async clearSessionRecords(): Promise<void> {
+    await this.db.delete(sessionTurns);
+    await this.db.delete(sessions);
+  }
+
+  public async trimSessionRecords(before: Date): Promise<void> {
+    const staleRows = await this.db
+      .select({ sessionId: sessions.sessionId })
+      .from(sessions)
+      .where(lt(sessions.updatedAt, before));
+
+    if (!staleRows.length) return;
+
+    const staleIds = staleRows.map((row) => row.sessionId);
+
+    await this.db
+      .delete(sessionTurns)
+      .where(inArray(sessionTurns.sessionId, staleIds));
+    await this.db.delete(sessions).where(inArray(sessions.sessionId, staleIds));
   }
 }

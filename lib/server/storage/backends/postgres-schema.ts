@@ -7,6 +7,7 @@ import {
   type PgTableExtraConfigValue,
   text,
   timestamp,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
 export const createPostgresStorageSchema = (schemaName: string) => {
@@ -89,11 +90,74 @@ export const createPostgresStorageSchema = (schemaName: string) => {
     ],
   );
 
-  return { debugLogs, documents, schema, usageEvents };
+  /**
+   * One row per conversation. `title` carries prompt content, so it is
+   * encrypted column-wise with `encryption_mode` describing how the row was
+   * written.
+   */
+  const sessions = schema.table(
+    'sessions',
+    {
+      sessionId: text('session_id').primaryKey(),
+      title: text('title'),
+      sourceRoute: text('source_route').notNull(),
+      accessKeyId: text('access_key_id'),
+      credentialFilename: text('credential_filename'),
+      model: text('model'),
+      externalRef: text('external_ref'),
+      turnCount: integer('turn_count').default(0).notNull(),
+      totalTokens: integer('total_tokens').default(0).notNull(),
+      startedAt: timestamp('started_at', { withTimezone: true }).notNull(),
+      updatedAt: timestamp('updated_at', { withTimezone: true }).notNull(),
+      encryptionMode: text('encryption_mode'),
+    },
+    (table): PgTableExtraConfigValue[] => [
+      index('sessions_updated_at_idx').on(table.updatedAt, table.sessionId),
+      index('sessions_access_key_updated_idx').on(
+        table.accessKeyId,
+        table.updatedAt,
+        table.sessionId,
+      ),
+    ],
+  );
+
+  /**
+   * One row per turn. The content columns hold ciphertext or a plain JSON
+   * string, so they are text rather than jsonb.
+   */
+  const sessionTurns = schema.table(
+    'session_turns',
+    {
+      turnId: text('turn_id').primaryKey(),
+      sessionId: text('session_id').notNull(),
+      turnIndex: integer('turn_index').notNull(),
+      role: text('role').notNull(),
+      contentText: text('content_text'),
+      contentRaw: text('content_raw'),
+      toolCalls: text('tool_calls'),
+      reasoning: text('reasoning'),
+      contextJson: text('context_json'),
+      usageJson: text('usage_json'),
+      model: text('model'),
+      route: text('route').notNull(),
+      createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+      encryptionMode: text('encryption_mode'),
+    },
+    (table): PgTableExtraConfigValue[] => [
+      uniqueIndex('session_turns_session_idx').on(
+        table.sessionId,
+        table.turnIndex,
+      ),
+    ],
+  );
+
+  return { debugLogs, documents, schema, sessionTurns, sessions, usageEvents };
 };
 
 export const {
   debugLogs: postgresDebugLogs,
   documents: postgresDocuments,
+  sessionTurns: postgresSessionTurns,
+  sessions: postgresSessions,
   usageEvents: postgresUsageEvents,
 } = createPostgresStorageSchema('codebuddy2api');

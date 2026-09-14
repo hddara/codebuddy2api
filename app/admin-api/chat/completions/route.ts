@@ -7,6 +7,10 @@ import {
   isDebugEnabled,
 } from '@/lib/server/domain/debug';
 import {
+  beginSessionCapture,
+  finalizeSessionCapture,
+} from '@/lib/server/domain/session-capture';
+import {
   proxyChatCompletions,
   resolveProxyContextByCredentialFilename,
 } from '@/lib/server/proxy/codebuddy';
@@ -40,6 +44,14 @@ export const POST = async (request: NextRequest): Promise<Response> => {
       ? body.credential_filename.trim()
       : '';
 
+  const sessionCapture = await beginSessionCapture({
+    accessKeyId: null,
+    body,
+    credentialFilename: credentialFilename || null,
+    headers: request.headers,
+    route: '/admin-api/chat/completions',
+  });
+
   try {
     const context = credentialFilename
       ? await resolveProxyContextByCredentialFilename(credentialFilename)
@@ -50,7 +62,10 @@ export const POST = async (request: NextRequest): Promise<Response> => {
       context,
       debugTrace,
     );
-    return finalizeDebugTrace(debugTrace, response);
+    return finalizeSessionCapture(
+      sessionCapture,
+      finalizeDebugTrace(debugTrace, response),
+    );
   } catch (error) {
     const response = Response.json(
       {
@@ -60,6 +75,9 @@ export const POST = async (request: NextRequest): Promise<Response> => {
       },
       { status: 400 },
     );
-    return finalizeDebugTrace(debugTrace, response);
+    return finalizeSessionCapture(
+      sessionCapture,
+      finalizeDebugTrace(debugTrace, response),
+    );
   }
 };

@@ -63,6 +63,13 @@ type ResponseSessionDefaults = Pick<
 
 interface ResponseSession {
   accessKeyId: string | null;
+  /**
+   * Stable identity shared by every response in one `previous_response_id`
+   * chain. The first response of a chain seeds it with its own id, so a
+   * conversation stays identifiable even though each turn mints a new response
+   * id. Session logging reads it back to group a chain into one session.
+   */
+  conversationRef: string;
   credentialFilename: string | null;
   createdAt: number;
   id: string;
@@ -323,6 +330,7 @@ const storeUpstreamResponseBinding = async ({
 }): Promise<void> => {
   await storeResponseSession({
     accessKeyId: proxyContext.accessKeyId,
+    conversationRef: responseId,
     credentialFilename: proxyContext.credentialFilename,
     createdAt: Date.now(),
     defaults: {},
@@ -950,6 +958,7 @@ const prepareTranscript = async (
   accessKeyId: string | null,
   previousSession?: ResponseSession,
 ): Promise<{
+  conversationRef: string | null;
   defaults: ResponseSessionDefaults;
   model: string;
   transcript: TranscriptMessage[];
@@ -959,6 +968,11 @@ const prepareTranscript = async (
   const resolvedPreviousSession =
     previousSession ??
     (await getValidatedPreviousSession(previousResponseId, accessKeyId));
+  // Chains inherit their root, so the whole conversation keeps one identity.
+  const conversationRef =
+    resolvedPreviousSession?.conversationRef ??
+    resolvedPreviousSession?.id ??
+    null;
 
   const transcript = (resolvedPreviousSession?.transcript ?? []).slice(
     -MAX_RESPONSE_TRANSCRIPT_MESSAGES,
@@ -1010,10 +1024,11 @@ const prepareTranscript = async (
   }
 
   return {
+    conversationRef,
     defaults,
     model,
-    transcript,
     previousResponseId,
+    transcript,
   };
 };
 
@@ -1130,6 +1145,7 @@ const mapChatResponseToResponsesPayload = async (
   transcript: TranscriptMessage[],
   model: string,
   previousResponseId: string | null,
+  conversationRef: string | null,
   upstreamPayload: Record<string, unknown>,
 ): Promise<Record<string, unknown>> => {
   const responseId = createResponseId();
@@ -1180,6 +1196,7 @@ const mapChatResponseToResponsesPayload = async (
 
   await storeResponseSession({
     accessKeyId,
+    conversationRef: conversationRef ?? responseId,
     credentialFilename,
     createdAt: Date.now(),
     id: responseId,
@@ -1216,6 +1233,7 @@ const createResponsesEventStream = async (
   transcript: TranscriptMessage[],
   model: string,
   previousResponseId: string | null,
+  conversationRef: string | null,
   maxOutputTokens: number | undefined,
   proxyContext: ProxyContext,
   debugTrace?: DebugTrace,
@@ -1401,6 +1419,7 @@ const createResponsesEventStream = async (
             try {
               await storeResponseSession({
                 accessKeyId: proxyContext.accessKeyId,
+                conversationRef: conversationRef ?? responseId,
                 credentialFilename: proxyContext.credentialFilename,
                 createdAt: Date.now(),
                 id: responseId,
@@ -1832,6 +1851,7 @@ export const handleResponsesRequest = async (
         prepared.transcript,
         prepared.model,
         prepared.previousResponseId,
+        prepared.conversationRef,
         body.max_output_tokens,
         proxyContext,
         debugTrace,
@@ -1881,6 +1901,7 @@ export const handleResponsesRequest = async (
         prepared.transcript,
         prepared.model,
         prepared.previousResponseId,
+        prepared.conversationRef,
         upstreamPayload,
       ),
     );
@@ -1898,6 +1919,28 @@ export const handleResponsesRequest = async (
           : 500,
       error instanceof Error ? error.message : 'Unexpected responses error',
     );
+  }
+};
+
+/**
+ * Resolves the conversation a `previous_response_id` belongs to, so session
+ * logging can fold a whole Responses chain into one session. Unknown, expired
+ * or foreign ids resolve to null instead of throwing: identity resolution must
+ * never turn a servable request into an error.
+ */
+export const resolveResponsesConversationRef = async (
+  previousResponseId: string,
+  accessKeyId: string | null,
+): Promise<string | null> => {
+  try {
+    const session = await getValidatedPreviousSession(
+      previousResponseId,
+      accessKeyId,
+    );
+
+    return session ? session.conversationRef || session.id : null;
+  } catch {
+    return null;
   }
 };
 

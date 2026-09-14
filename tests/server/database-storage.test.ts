@@ -272,7 +272,7 @@ describe('drizzle pg storage adapter', () => {
       [1_873_289_124],
     );
     expect(poolRelease).toHaveBeenCalledTimes(1);
-    expect(selectLimit).toHaveBeenCalledTimes(5);
+    expect(selectLimit).toHaveBeenCalledTimes(7);
 
     await adapter.deleteDocument('config', 'runtime');
     expect(deleteFrom).toHaveBeenCalledTimes(5);

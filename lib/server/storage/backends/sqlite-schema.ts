@@ -4,6 +4,7 @@ import {
   primaryKey,
   sqliteTable,
   text,
+  uniqueIndex,
 } from 'drizzle-orm/sqlite-core';
 
 export const documents = sqliteTable(
@@ -83,5 +84,70 @@ export const debugLogs = sqliteTable(
   },
   (table) => [
     index('debug_logs_created_at_idx').on(table.createdAt, table.eventId),
+  ],
+);
+
+/**
+ * One row per conversation. Session logging only runs on database backends, so
+ * these tables have no file-backend counterpart.
+ *
+ * `title` carries a truncated copy of the first user message, which is prompt
+ * content: it is encrypted column-wise like `session_turns`, with
+ * `encryption_mode` recording how this row was written.
+ */
+export const sessions = sqliteTable(
+  'sessions',
+  {
+    sessionId: text('session_id').primaryKey(),
+    title: text('title'),
+    sourceRoute: text('source_route').notNull(),
+    accessKeyId: text('access_key_id'),
+    credentialFilename: text('credential_filename'),
+    model: text('model'),
+    externalRef: text('external_ref'),
+    turnCount: integer('turn_count').default(0).notNull(),
+    totalTokens: integer('total_tokens').default(0).notNull(),
+    startedAt: integer('started_at', { mode: 'timestamp_ms' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+    encryptionMode: text('encryption_mode'),
+  },
+  (table) => [
+    index('sessions_updated_at_idx').on(table.updatedAt, table.sessionId),
+    index('sessions_access_key_updated_idx').on(
+      table.accessKeyId,
+      table.updatedAt,
+      table.sessionId,
+    ),
+  ],
+);
+
+/**
+ * One row per turn. The content columns hold either AES-256-GCM ciphertext or a
+ * plain JSON string, selected by `encryption_mode`; both are opaque to SQL, so
+ * they are declared as plain text rather than json columns.
+ */
+export const sessionTurns = sqliteTable(
+  'session_turns',
+  {
+    turnId: text('turn_id').primaryKey(),
+    sessionId: text('session_id').notNull(),
+    turnIndex: integer('turn_index').notNull(),
+    role: text('role').notNull(),
+    contentText: text('content_text'),
+    contentRaw: text('content_raw'),
+    toolCalls: text('tool_calls'),
+    reasoning: text('reasoning'),
+    contextJson: text('context_json'),
+    usageJson: text('usage_json'),
+    model: text('model'),
+    route: text('route').notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+    encryptionMode: text('encryption_mode'),
+  },
+  (table) => [
+    uniqueIndex('session_turns_session_idx').on(
+      table.sessionId,
+      table.turnIndex,
+    ),
   ],
 );

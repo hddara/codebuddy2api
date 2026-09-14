@@ -38,17 +38,20 @@ SQLite 文件默认位于容器内的 `/app/.codebuddy_data/storage.sqlite`。�
 
 ## 环境变量
 
-| 变量                                    | 作用                                   | 示例 / 默认值                                    |
-| --------------------------------------- | -------------------------------------- | ------------------------------------------------ |
-| `CODEBUDDY_STORAGE_BACKEND`             | 存储后端                               | `file`、`sqlite` 或 `pg`                         |
-| `CODEBUDDY_STORAGE_SQLITE_PATH`         | SQLite 文件路径                        | `.codebuddy_data/storage.sqlite`                 |
-| `CODEBUDDY_STORAGE_ENCRYPTION_KEY`      | 加密数据库中的敏感数据；数据库后端必填 | 长随机字符串                                     |
-| `CODEBUDDY_STORAGE_IMPORT_LEGACY_FILES` | 是否从旧文件导入数据                   | 新部署设为 `false`                               |
-| `DATABASE_URL`                          | PostgreSQL 连接字符串                  | `postgres://user:password@db:5432/codebuddy2api` |
-| `CODEBUDDY_API_ENDPOINT`                | 上游 CodeBuddy API 地址                | `https://copilot.tencent.com`                    |
-| `CODEBUDDY_AUTH_MODE`                   | 上游认证模式                           | `auto` / `token`                                 |
-| `CODEBUDDY_INTERNET_ENVIRONMENT`        | 网络环境                               | `internal` / `ioa` / `public`                    |
-| `CODEBUDDY_LOG_LEVEL`                   | 日志级别                               | `INFO`                                           |
-| `CODEBUDDY_ADMIN_PASSKEY_RP_ID`         | 管理员 Passkey 使用的 hostname         | `example.com`                                    |
-| `CODEBUDDY_USAGE_RETENTION_DAYS`        | 用量事件保留天数（余额统计窗口）       | `35`（file 后端为 `7`），需覆盖一个配额周期      |
-| `CODEBUDDY_QUOTA_ENFORCEMENT`           | 超额行为                               | `reject`（默认拒绝）/ `warn` 仅记录日志          |
+| 变量                                      | 作用                                   | 示例 / 默认值                                    |
+| ----------------------------------------- | -------------------------------------- | ------------------------------------------------ |
+| `CODEBUDDY_STORAGE_BACKEND`               | 存储后端                               | `file`、`sqlite` 或 `pg`                         |
+| `CODEBUDDY_STORAGE_SQLITE_PATH`           | SQLite 文件路径                        | `.codebuddy_data/storage.sqlite`                 |
+| `CODEBUDDY_STORAGE_ENCRYPTION_KEY`        | 加密数据库中的敏感数据；数据库后端必填 | 长随机字符串                                     |
+| `CODEBUDDY_STORAGE_IMPORT_LEGACY_FILES`   | 是否从旧文件导入数据                   | 新部署设为 `false`                               |
+| `DATABASE_URL`                            | PostgreSQL 连接字符串                  | `postgres://user:password@db:5432/codebuddy2api` |
+| `CODEBUDDY_API_ENDPOINT`                  | 上游 CodeBuddy API 地址                | `https://copilot.tencent.com`                    |
+| `CODEBUDDY_AUTH_MODE`                     | 上游认证模式                           | `auto` / `token`                                 |
+| `CODEBUDDY_INTERNET_ENVIRONMENT`          | 网络环境                               | `internal` / `ioa` / `public`                    |
+| `CODEBUDDY_LOG_LEVEL`                     | 日志级别                               | `INFO`                                           |
+| `CODEBUDDY_ADMIN_PASSKEY_RP_ID`           | 管理员 Passkey 使用的 hostname         | `example.com`                                    |
+| `CODEBUDDY_USAGE_RETENTION_DAYS`          | 用量事件保留天数（余额统计窗口）       | `35`（file 后端为 `7`），需覆盖一个配额周期      |
+| `CODEBUDDY_QUOTA_ENFORCEMENT`             | 超额行为                               | `reject`（默认拒绝）/ `warn` 仅记录日志          |
+| `CODEBUDDY_SESSION_LOG_ENABLED`           | 是否记录会话日志                       | `true`（默认）；仅 DB 后端支持                   |
+| `CODEBUDDY_SESSION_RETENTION_DAYS`        | 会话日志保留天数                       | `30`；`0` 表示不记录                             |
+| `CODEBUDDY_SESSION_MAX_TURNS_PER_SESSION` | 单个会话保留的最大轮次                 | `200`；`0` 表示不限制                            |

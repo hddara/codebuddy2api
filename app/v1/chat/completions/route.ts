@@ -1,11 +1,18 @@
 import type { NextRequest } from 'next/server';
 
-import { getClientAuthErrorResponse } from '@/lib/server/proxy/auth';
+import {
+  getClientAuthErrorResponse,
+  resolveRequestAccessKey,
+} from '@/lib/server/proxy/auth';
 import {
   createDebugTrace,
   finalizeDebugTrace,
   isDebugEnabled,
 } from '@/lib/server/domain/debug';
+import {
+  beginSessionCapture,
+  finalizeSessionCapture,
+} from '@/lib/server/domain/session-capture';
 import { proxyChatCompletions } from '@/lib/server/proxy/codebuddy';
 import { getJsonBody } from '@/lib/server/shared/http';
 
@@ -30,11 +37,22 @@ export const POST = async (request: NextRequest): Promise<Response> => {
       })
     : undefined;
 
+  const sessionCapture = await beginSessionCapture({
+    accessKeyId: (await resolveRequestAccessKey(request))?.id ?? null,
+    body,
+    credentialFilename: null,
+    headers: request.headers,
+    route: '/v1/chat/completions',
+  });
+
   const response = await proxyChatCompletions(
     request,
     body,
     undefined,
     debugTrace,
   );
-  return finalizeDebugTrace(debugTrace, response);
+  return finalizeSessionCapture(
+    sessionCapture,
+    finalizeDebugTrace(debugTrace, response),
+  );
 };
