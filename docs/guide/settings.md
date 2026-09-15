@@ -13,6 +13,8 @@
 | 认证模式（auto/token）          | 上游认证方式                                 |
 | 网络环境（internal/ioa/public） | 上游网络环境                                 |
 | 日志级别                        | 选择 `DEBUG`、`INFO`、`WARNING` 或 `ERROR`   |
+| 每日自动签到（true/false）      | 开启后每天自动为全部凭证签到                 |
+| 自动签到时间（HH:mm）           | 服务器本地时间，默认 `00:30`                 |
 
 ## 凭证模型和用量
 

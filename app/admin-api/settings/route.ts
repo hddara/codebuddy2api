@@ -1,4 +1,5 @@
 import { getAdminSessionErrorResponse } from '@/lib/server/admin/session';
+import { scheduleAutoCheckin } from '@/lib/server/domain/auto-checkin';
 import {
   getActiveConfig,
   getSettingLabels,
@@ -42,8 +43,9 @@ export const POST = async (request: Request): Promise<Response> => {
   const body = await getJsonBody<{
     settings?: Record<string, unknown>;
   }>(request);
+  const settings = await updateSettings(body.settings ?? {});
 
-  return Response.json({
-    settings: await updateSettings(body.settings ?? {}),
-  });
+  await scheduleAutoCheckin();
+
+  return Response.json({ settings });
 };

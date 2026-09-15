@@ -11,6 +11,8 @@ Settings controls service parameters, credential models, usage data, and console
 | Authentication mode (auto/token)          | Upstream authentication method                        |
 | Network environment (internal/ioa/public) | Upstream network environment                          |
 | Log level                                 | Choose `DEBUG`, `INFO`, `WARNING`, or `ERROR`         |
+| Automatic daily check-in (true/false)     | Checks in every credential once per day               |
+| Automatic check-in time (HH:mm)           | Server local time; default `00:30`                    |
 
 Click **Save** after changing a field.
 

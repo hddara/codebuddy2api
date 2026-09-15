@@ -14,15 +14,33 @@ import {
   Tooltip,
 } from '@lobehub/ui';
 import { Button } from '@lobehub/ui/base-ui';
-import { Check, Copy, RefreshCw } from 'lucide-react';
+import { Check, Copy, Info, RefreshCw } from 'lucide-react';
 import { useTranslations } from 'next-intl';
 import { useCallback, useMemo, useState } from 'react';
 
 import type { CredentialSummary } from '@/app/credentials/credentials';
 
 interface AccountStatusProps {
+  autoCheckin?: AutoCheckinStatus | null;
   credentials: CredentialSummary[];
   initialStatuses?: AccountStatusSnapshot[];
+}
+
+export interface AutoCheckinStatus {
+  attempts: number;
+  enabled: boolean;
+  lastError: string | null;
+  lastRunAt: string | null;
+  lastStatus: 'completed' | 'failed' | 'idle';
+  nextRunAt: string | null;
+  result: {
+    failed: number;
+    finishedAt: string;
+    succeeded: number;
+    total: number;
+  } | null;
+  running: boolean;
+  time: string;
 }
 
 export interface AccountStatusSnapshot {
@@ -174,6 +192,79 @@ const AccountStatusSkeleton = () => (
   </Block>
 );
 
+const formatMoment = (value: string | null): string => {
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString();
+};
+
+const AutoCheckinBar = ({
+  onRun,
+  running,
+  status,
+}: {
+  onRun: () => void;
+  running: boolean;
+  status: AutoCheckinStatus | null;
+}) => {
+  const text = useTranslations('Admin');
+  const enabled = Boolean(status?.enabled);
+  const parts: string[] = [];
+
+  if (status?.enabled) {
+    parts.push(text('accountStatus.autoCheckinDaily', { time: status.time }));
+
+    if (status.nextRunAt) {
+      parts.push(
+        text('accountStatus.autoCheckinNext', {
+          time: formatMoment(status.nextRunAt),
+        }),
+      );
+    }
+
+    if (status.result) {
+      parts.push(
+        status.result.failed
+          ? text('accountStatus.autoCheckinFailed', {
+              failed: status.result.failed,
+              total: status.result.total,
+            })
+          : text('accountStatus.autoCheckinSucceeded', {
+              succeeded: status.result.succeeded,
+              total: status.result.total,
+            }),
+      );
+    } else {
+      parts.push(text('accountStatus.autoCheckinIdle'));
+    }
+  }
+
+  return (
+    <Flexbox align="center" gap={8} horizontal wrap="wrap">
+      <Tag>{text('accountStatus.autoCheckin')}</Tag>
+      <Text className="account-status-auto-checkin-summary" type="secondary">
+        <span suppressHydrationWarning>
+          {enabled ? parts.join(' · ') : text('accountStatus.autoCheckinOff')}
+        </span>
+      </Text>
+      {enabled && status?.lastStatus === 'failed' && status.lastError ? (
+        <Tooltip title={status.lastError}>
+          <Flexbox
+            className="account-status-auto-checkin-error"
+            gap={4}
+            horizontal
+          >
+            <Info size={14} />
+          </Flexbox>
+        </Tooltip>
+      ) : null}
+      <Button disabled={!enabled || running} loading={running} onClick={onRun}>
+        {text('accountStatus.autoCheckinRun')}
+      </Button>
+    </Flexbox>
+  );
+};
+
 const AccountStatusCard = ({
   credential,
   snapshot,
@@ -288,6 +379,7 @@ const AccountStatusCard = ({
 };
 
 const AccountStatus = ({
+  autoCheckin = null,
   credentials,
   initialStatuses = [],
 }: AccountStatusProps) => {
@@ -299,9 +391,44 @@ const AccountStatus = ({
       initialStatuses.map((status) => [status.filename, status]),
     ),
   );
+  const [autoCheckinState, setAutoCheckinState] =
+    useState<AutoCheckinStatus | null>(autoCheckin);
+  const [autoCheckinBusy, setAutoCheckinBusy] = useState(false);
   const [busy, setBusy] = useState<Record<string, string>>({});
   const [page, setPage] = useState(1);
   const [batchBusy, setBatchBusy] = useState<string | null>(null);
+  const runAutoCheckin = useCallback(async () => {
+    setAutoCheckinBusy(true);
+    try {
+      const response = await fetch('/admin-api/auto-checkin', {
+        method: 'POST',
+      });
+      if (!response.ok) {
+        throw new Error(
+          `Automatic check-in request failed (${response.status})`,
+        );
+      }
+      const payload = (await response.json()) as {
+        status?: AutoCheckinStatus;
+      };
+      if (payload.status) setAutoCheckinState(payload.status);
+    } catch (error) {
+      setAutoCheckinState((current) =>
+        current
+          ? {
+              ...current,
+              lastError:
+                error instanceof Error
+                  ? error.message
+                  : 'Automatic check-in request failed',
+              lastStatus: 'failed',
+            }
+          : current,
+      );
+    } finally {
+      setAutoCheckinBusy(false);
+    }
+  }, []);
   const loadOne = useCallback(
     async (filename: string, action: 'refresh' | 'checkin' = 'refresh') => {
       setBusy((current) => ({ ...current, [filename]: action }));
@@ -375,6 +502,7 @@ const AccountStatus = ({
       <Flexbox
         align="center"
         distribution="space-between"
+        gap={12}
         horizontal
         wrap="wrap"
       >
@@ -394,6 +522,11 @@ const AccountStatus = ({
             {text('accountStatus.checkinAll')}
           </Button>
         </Flexbox>
+        <AutoCheckinBar
+          onRun={() => void runAutoCheckin()}
+          running={autoCheckinBusy}
+          status={autoCheckinState}
+        />
       </Flexbox>
       {credentials.length ? (
         pageCredentials.map((credential) => {
