@@ -50,7 +50,7 @@ spec:
     spec:
       containers:
         - name: codebuddy2api
-          image: ghcr.io/hddara/codebuddy2api:1.2.1
+          image: ghcr.nju.edu.cn/hddara/codebuddy2api:1.2.1
           imagePullPolicy: Always
           ports:
             - containerPort: 8001
