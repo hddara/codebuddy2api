@@ -56,6 +56,61 @@ const toNumber = (value: unknown): number | null => {
   return Number.isFinite(number) ? number : null;
 };
 
+const resolveCheckinState = (
+  payload: unknown,
+): { claimed: boolean | null; message: string | null } => {
+  const value = findValue(payload, [
+    'claimed',
+    'isClaimed',
+    'checkedIn',
+    'today_checked_in',
+    'todayCheckedIn',
+    'status',
+  ]);
+  const claimed =
+    typeof value === 'boolean'
+      ? value
+      : typeof value === 'string'
+        ? ['CLAIMED', 'ALREADY_CLAIMED', 'CHECKED_IN'].includes(
+            value.toUpperCase(),
+          )
+        : null;
+
+  return { claimed, message: typeof value === 'string' ? value : null };
+};
+
+const MAX_ERROR_DETAIL_LENGTH = 300;
+
+const readErrorDetail = async (response: Response): Promise<string> => {
+  try {
+    const detail = (await response.text()).trim();
+
+    if (!detail) {
+      return '';
+    }
+
+    return detail.length > MAX_ERROR_DETAIL_LENGTH
+      ? `${detail.slice(0, MAX_ERROR_DETAIL_LENGTH)}...`
+      : detail;
+  } catch {
+    return '';
+  }
+};
+
+class UpstreamRequestError extends Error {
+  readonly status: number;
+
+  constructor(path: string, status: number, detail: string) {
+    super(
+      detail
+        ? `${path} returned ${status}: ${detail}`
+        : `${path} returned ${status}`,
+    );
+    this.name = 'UpstreamRequestError';
+    this.status = status;
+  }
+}
+
 const fetchJson = async (
   credential: CredentialRecord,
   path: string,
@@ -102,7 +157,12 @@ const fetchJson = async (
     method,
     signal: AbortSignal.timeout(15_000),
   });
-  if (!response.ok) throw new Error(`${path} returned ${response.status}`);
+  if (!response.ok) {
+    const detail = await readErrorDetail(response);
+
+    throw new UpstreamRequestError(path, response.status, detail);
+  }
+
   return response.json();
 };
 
@@ -118,9 +178,8 @@ const fetchCheckinStatus = async (
     );
   } catch (error) {
     if (
-      !(error instanceof Error) ||
-      (!error.message.endsWith('returned 404') &&
-        !error.message.endsWith('returned 405'))
+      !(error instanceof UpstreamRequestError) ||
+      (error.status !== 404 && error.status !== 405)
     ) {
       throw error;
     }
@@ -216,27 +275,8 @@ const loadAccountStatus = async (
     errors.push(error instanceof Error ? error.message : 'Model query failed');
   }
 
-  const claimedValue = findValue(checkinPayload, [
-    'claimed',
-    'isClaimed',
-    'checkedIn',
-    'today_checked_in',
-    'todayCheckedIn',
-    'status',
-  ]);
-  const claimed =
-    typeof claimedValue === 'boolean'
-      ? claimedValue
-      : typeof claimedValue === 'string'
-        ? ['CLAIMED', 'ALREADY_CLAIMED', 'CHECKED_IN'].includes(
-            claimedValue.toUpperCase(),
-          )
-        : null;
   return {
-    checkin: {
-      claimed,
-      message: typeof claimedValue === 'string' ? claimedValue : null,
-    },
+    checkin: resolveCheckinState(checkinPayload),
     credits: {
       total: toNumber(
         findValue(normalizeQuotaPayload(creditsPayload), [
@@ -301,6 +341,18 @@ export const getAccountStatusCredentials = async () => {
   return response.credentials;
 };
 
+const isCheckinClaimed = async (
+  credential: CredentialRecord,
+): Promise<boolean> => {
+  try {
+    const payload = await fetchCheckinStatus(credential);
+
+    return resolveCheckinState(payload).claimed === true;
+  } catch {
+    return false;
+  }
+};
+
 export const submitCredentialCheckin = async (
   credential: CredentialRecord,
 ): Promise<{ error: string | null; ok: boolean }> => {
@@ -309,6 +361,17 @@ export const submitCredentialCheckin = async (
     return { error: null, ok: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Check-in failed';
+
+    // Upstream rejects a second claim on the same day; confirm the reported state
+    // so an account that is already claimed today is not counted as a failure.
+    if (
+      error instanceof UpstreamRequestError &&
+      error.status >= 400 &&
+      error.status < 500 &&
+      (await isCheckinClaimed(credential))
+    ) {
+      return { error: null, ok: true };
+    }
 
     return {
       error: message.replace(
