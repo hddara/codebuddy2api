@@ -354,6 +354,16 @@ textarea {
   opacity: 0.72;
 }
 
+.account-status-auto-checkin-summary {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.account-status-auto-checkin-error {
+  color: var(--lobe-color-error);
+  cursor: help;
+}
+
 .account-status-card-header,
 .account-status-card-checkin {
   min-width: 0;

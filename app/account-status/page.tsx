@@ -3,10 +3,12 @@ import {
   getAccountStatus,
   getAccountStatusCredentials,
 } from '@/lib/server/domain/account-status';
+import { getAutoCheckinStatus } from '@/lib/server/domain/auto-checkin';
 import AccountStatus from './account-status';
 
 const AccountStatusPage = async () => {
-  const [credentials, statuses] = await Promise.all([
+  const [autoCheckin, credentials, statuses] = await Promise.all([
+    getAutoCheckinStatus(),
     getAccountStatusCredentials(),
     getAccountStatus(),
   ]);
@@ -14,6 +16,7 @@ const AccountStatusPage = async () => {
   return (
     <AdminPage initialTab="account-status">
       <AccountStatus
+        autoCheckin={autoCheckin}
         credentials={credentials as never}
         initialStatuses={statuses}
       />

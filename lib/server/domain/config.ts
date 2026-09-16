@@ -15,9 +15,13 @@ export interface RuntimeConfig {
   CODEBUDDY_API_ENDPOINT: string;
   CODEBUDDY_ADMIN_PASSKEY_RP_ID: string;
   CODEBUDDY_AUTH_MODE: 'auto' | 'token';
+  CODEBUDDY_AUTO_CHECKIN_ENABLED: string;
+  CODEBUDDY_AUTO_CHECKIN_TIME: string;
   CODEBUDDY_INTERNET_ENVIRONMENT: 'ioa' | 'internal' | 'public';
   CODEBUDDY_LOG_LEVEL: string;
 }
+
+export const DEFAULT_CHECKIN_TIME = '00:30';
 
 export type ConfigLabelLocale = 'zh-CN' | 'en-US' | 'ja-JP';
 
@@ -27,6 +31,8 @@ const DEFAULT_CONFIG: RuntimeConfig = {
   CODEBUDDY_API_ENDPOINT: 'https://copilot.tencent.com',
   CODEBUDDY_ADMIN_PASSKEY_RP_ID: '',
   CODEBUDDY_AUTH_MODE: 'auto',
+  CODEBUDDY_AUTO_CHECKIN_ENABLED: 'false',
+  CODEBUDDY_AUTO_CHECKIN_TIME: DEFAULT_CHECKIN_TIME,
   CODEBUDDY_INTERNET_ENVIRONMENT: 'ioa',
   CODEBUDDY_LOG_LEVEL: 'INFO',
 };
@@ -40,6 +46,9 @@ const SETTING_LABELS_BY_LOCALE: Record<
     CODEBUDDY_API_ENDPOINT: 'CodeBuddy API endpoint',
     CODEBUDDY_ADMIN_PASSKEY_RP_ID: 'Admin passkey RP ID / domain',
     CODEBUDDY_AUTH_MODE: 'Authentication mode (auto/token)',
+    CODEBUDDY_AUTO_CHECKIN_ENABLED: 'Automatic daily check-in (true/false)',
+    CODEBUDDY_AUTO_CHECKIN_TIME:
+      'Automatic check-in time (HH:mm, server local)',
     CODEBUDDY_INTERNET_ENVIRONMENT: 'Network environment (internal/ioa/public)',
     CODEBUDDY_LOG_LEVEL: 'Log level',
   },
@@ -47,6 +56,9 @@ const SETTING_LABELS_BY_LOCALE: Record<
     CODEBUDDY_API_ENDPOINT: 'CodeBuddy API エンドポイント',
     CODEBUDDY_ADMIN_PASSKEY_RP_ID: '管理者 passkey RP ID / ドメイン',
     CODEBUDDY_AUTH_MODE: '認証モード (auto/token)',
+    CODEBUDDY_AUTO_CHECKIN_ENABLED: '毎日の自動チェックイン (true/false)',
+    CODEBUDDY_AUTO_CHECKIN_TIME:
+      '自動チェックイン時刻 (HH:mm・サーバーローカル)',
     CODEBUDDY_INTERNET_ENVIRONMENT: 'ネットワーク環境 (internal/ioa/public)',
     CODEBUDDY_LOG_LEVEL: 'ログレベル',
   },
@@ -54,6 +66,8 @@ const SETTING_LABELS_BY_LOCALE: Record<
     CODEBUDDY_API_ENDPOINT: 'CodeBuddy 官方 API 端点',
     CODEBUDDY_ADMIN_PASSKEY_RP_ID: '管理员 Passkey RP ID / 域名',
     CODEBUDDY_AUTH_MODE: '认证模式 (auto/token)',
+    CODEBUDDY_AUTO_CHECKIN_ENABLED: '每日自动签到 (true/false)',
+    CODEBUDDY_AUTO_CHECKIN_TIME: '自动签到时间 (HH:mm，服务器本地时间)',
     CODEBUDDY_INTERNET_ENVIRONMENT: '网络环境 (internal/ioa/public)',
     CODEBUDDY_LOG_LEVEL: '日志级别',
   },
@@ -118,6 +132,16 @@ export const getActiveConfig = async (): Promise<RuntimeConfig> => {
     CODEBUDDY_AUTH_MODE: normalizeValue(
       'CODEBUDDY_AUTH_MODE',
       persisted.CODEBUDDY_AUTH_MODE ?? process.env.CODEBUDDY_AUTH_MODE,
+    ),
+    CODEBUDDY_AUTO_CHECKIN_ENABLED: normalizeValue(
+      'CODEBUDDY_AUTO_CHECKIN_ENABLED',
+      persisted.CODEBUDDY_AUTO_CHECKIN_ENABLED ??
+        process.env.CODEBUDDY_AUTO_CHECKIN_ENABLED,
+    ),
+    CODEBUDDY_AUTO_CHECKIN_TIME: normalizeValue(
+      'CODEBUDDY_AUTO_CHECKIN_TIME',
+      persisted.CODEBUDDY_AUTO_CHECKIN_TIME ??
+        process.env.CODEBUDDY_AUTO_CHECKIN_TIME,
     ),
     CODEBUDDY_INTERNET_ENVIRONMENT: normalizeValue(
       'CODEBUDDY_INTERNET_ENVIRONMENT',

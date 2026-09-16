@@ -1,3 +1,4 @@
+import { getAutoCheckinStatus } from '@/lib/server/domain/auto-checkin';
 import {
   ensureStorageReady,
   getStorageBackendMeta,
@@ -20,7 +21,10 @@ export const GET = async (): Promise<Response> => {
     );
   }
 
+  const autoCheckin = await getAutoCheckinStatus().catch(() => null);
+
   return Response.json({
+    autoCheckin,
     storage: getStorageBackendMeta().backend,
     status: 'healthy',
     service: 'codebuddy2api',

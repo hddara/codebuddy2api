@@ -75,6 +75,10 @@ const settingsSelectOptions: Record<
     { label: 'auto', value: 'auto' },
     { label: 'token', value: 'token' },
   ],
+  CODEBUDDY_AUTO_CHECKIN_ENABLED: [
+    { label: 'false', value: 'false' },
+    { label: 'true', value: 'true' },
+  ],
   CODEBUDDY_INTERNET_ENVIRONMENT: [
     { label: 'ioa', value: 'ioa' },
     { label: 'internal', value: 'internal' },

@@ -52,7 +52,15 @@
       "checkinAll": "Check in all",
       "empty": "No credentials",
       "quotaUnknown": "Unknown quota",
-      "quotaUsed": "{percent}% quota remaining"
+      "quotaUsed": "{percent}% quota remaining",
+      "autoCheckin": "Auto check-in",
+      "autoCheckinOff": "Disabled (enable it in Settings)",
+      "autoCheckinDaily": "daily at {time}",
+      "autoCheckinNext": "next at {time}",
+      "autoCheckinSucceeded": "last run succeeded {succeeded}/{total}",
+      "autoCheckinFailed": "last run failed {failed}/{total}",
+      "autoCheckinIdle": "not run yet",
+      "autoCheckinRun": "Run now"
     },
     "dashboard": {
       "welcomeTitle": "Ready to crank through some tokens?",

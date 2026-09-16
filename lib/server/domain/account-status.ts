@@ -301,24 +301,34 @@ export const getAccountStatusCredentials = async () => {
   return response.credentials;
 };
 
+export const submitCredentialCheckin = async (
+  credential: CredentialRecord,
+): Promise<{ error: string | null; ok: boolean }> => {
+  try {
+    await fetchJson(credential, '/v2/billing/meter/daily-checkin', 'POST', {});
+    return { error: null, ok: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Check-in failed';
+
+    return {
+      error: message.replace(
+        '/v2/billing/meter/daily-checkin returned',
+        'claim returned',
+      ),
+      ok: false,
+    };
+  }
+};
+
 export const checkinAccount = async (
   filename: string,
 ): Promise<AccountStatusSnapshot> => {
   const credential = (await listEligibleCredentialRecords([filename]))[0];
   if (!credential) throw new Error('Credential is unavailable');
-  try {
-    await fetchJson(credential, '/v2/billing/meter/daily-checkin', 'POST', {});
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Check-in failed';
-    return {
-      ...(await loadAccountStatus(credential)),
-      error: message.replace(
-        '/v2/billing/meter/daily-checkin returned',
-        'claim returned',
-      ),
-    };
-  }
-  return loadAccountStatus(credential);
+  const outcome = await submitCredentialCheckin(credential);
+  const status = await loadAccountStatus(credential);
+
+  return outcome.ok ? status : { ...status, error: outcome.error };
 };
 
 export const checkinAccounts = async (

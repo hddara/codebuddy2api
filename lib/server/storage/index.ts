@@ -263,6 +263,10 @@ const getDocumentPath = (namespace: string, key: string): string => {
     return path.join(getFileStorageDir(), 'admin-auth.json');
   }
 
+  if (namespace === 'checkin' && key === 'state') {
+    return path.join(getFileStorageDir(), 'checkin-state.json');
+  }
+
   if (
     namespace === 'credentials' &&
     key === CREDENTIAL_MANAGER_STATE_FILENAME
