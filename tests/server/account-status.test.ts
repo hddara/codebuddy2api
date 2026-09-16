@@ -186,6 +186,73 @@ describe('account status domain', () => {
     expect(result.credits).toMatchObject({ remaining: 2, total: 3, used: 1 });
   });
 
+  it('includes the upstream error body when a request fails', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ message: 'quota exceeded' }), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 400,
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ isClaimed: false }))
+      .mockResolvedValueOnce(
+        jsonResponse({ userQuota: { total: 10, used: 2, remaining: 8 } }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ claimed: false }));
+
+    const result = await checkinAccount('one.json');
+
+    expect(result.error).toBe(
+      'claim returned 400: {"message":"quota exceeded"}',
+    );
+  });
+
+  it('treats a rejected claim as success when the account is already claimed', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        jsonResponse({ message: 'already claimed today' }, 400),
+      )
+      .mockResolvedValueOnce(jsonResponse({ claimed: true }))
+      .mockResolvedValueOnce(
+        jsonResponse({ userQuota: { total: 10, used: 2, remaining: 8 } }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ claimed: true }));
+
+    const result = await checkinAccount('one.json');
+
+    expect(result.error).toBeNull();
+    expect(result.checkin.claimed).toBe(true);
+    expect(result.credits.remaining).toBe(8);
+  });
+
+  it('truncates upstream error bodies that are too long', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('x'.repeat(500), { status: 502 }))
+      .mockResolvedValueOnce(jsonResponse({}))
+      .mockResolvedValueOnce(jsonResponse({}));
+
+    const result = await checkinAccount('one.json');
+
+    expect(result.error).toBe(`claim returned 502: ${'x'.repeat(300)}...`);
+  });
+
+  it('falls back to the status code when the error body cannot be read', async () => {
+    const broken = new Response('{}', { status: 400 });
+
+    vi.spyOn(broken, 'text').mockImplementation(() =>
+      Promise.reject(new Error('stream broken')),
+    );
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(broken)
+      .mockResolvedValueOnce(jsonResponse({ isClaimed: false }))
+      .mockResolvedValueOnce(jsonResponse({}))
+      .mockResolvedValueOnce(jsonResponse({}));
+
+    const result = await checkinAccount('one.json');
+
+    expect(result.error).toBe('claim returned 400');
+  });
+
   it('rejects a check-in request for a missing credential', async () => {
     vi.mocked(listEligibleCredentialRecords).mockResolvedValueOnce([] as never);
 
