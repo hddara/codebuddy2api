@@ -27,4 +27,5 @@
 ## 本机开发注意
 
 - CodeBuddy IDE 插件会注入 `NODE_OPTIONS`（node shim）与 `CODEBUDDY_SAFE_DELETE_*`、`NODE_ENV=production`，直接跑测试/构建会假失败；按净化环境口诀执行（详见每日记忆 2026-09-16）。
+- 本地记忆（`.codebuddy/memory/*.md`）与 `.brv/context-tree` 子模块指针**随主仓库一起提交**（子模块无 remote，无需单独 push；先例 `88ffe09` / `78c36ef`）。
 - 子模块/归档 md 改动后跑一次 `bunx prettier --write`，否则 push 会被 pre-push 钩子拦。
