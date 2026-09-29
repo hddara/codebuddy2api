@@ -5,6 +5,7 @@
 - 仓库：`hddara/codebuddy2api`（fork 自 `orangeboyChen/codebuddy2api`，`upstream` remote 指向上游）。
 - 默认分支 `main`；fork 后旧 main 线已备份为 `backup/main-legacy-20260916`。
 - 项目归档与上下文存 `.brv/context-tree`（独立 git 子仓库），会话归档写 `projects/codebuddy2api/sessions/`。
+- **上游同步策略**：`upstream` 有新提交时用 **cherry-pick**（跳过 `chore: prepare release v*` 那个版本号提交），**不要 merge** —— merge 会把 package.json 版本拉回上游值并产生大量冲突。首次同步见每日记忆 2026-09-29。
 
 ## 发版约定（release.yml）
 
@@ -23,6 +24,10 @@
 ## 已知红灯（均非代码问题）
 
 - `ci-main` / `ci-pr` 失败于 Codecov 上传（fork 未配 `CODECOV_TOKEN` 且 `fail_ci_if_error: true`）。`release.yml` 不涉 Codecov，发版不受影响。
+
+## 进行中 / 待办
+
+- **凭证限流识别与自动换号（未实施）**：方案见 brv `projects/codebuddy2api/plans/2026-09-29-rate-limit-detection.md`。现状是「候选只过滤 token 过期、上游 429 只透传、亲和把会话钉死」；4 项待拍板 + 3 项待取证（真实限流报文、限流窗口粒度、是否全体同时受限）。
 
 ## 本机开发注意
 
