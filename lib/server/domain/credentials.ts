@@ -12,6 +12,7 @@ import {
   readStorageJson,
   writeStorageJson,
 } from '../storage';
+import { logEvent } from '../shared/log';
 
 export type CredentialData = Record<string, unknown> & {
   access_token?: string;
@@ -736,6 +737,18 @@ export const resolveCredentialForRequest = async ({
   });
 
   if (!eligibleRecords.length) {
+    void logEvent({
+      level: 'WARN',
+      message: 'No eligible credential available',
+      payload: {
+        accessKeyId: accessKeyId ?? null,
+        affinityKey: affinityKey ?? null,
+        model: requestedModel ?? null,
+        restrictedToAccessKey: Boolean(allowedCredentialFilenames),
+        totalCredentials: records.length,
+      },
+    });
+
     return null;
   }
 
@@ -756,6 +769,20 @@ export const resolveCredentialForRequest = async ({
         updatedAt: Date.now(),
       };
       scheduleRuntimeStateSave();
+      void logEvent({
+        level: 'INFO',
+        message: 'Credential selected',
+        payload: {
+          accessKeyId: accessKeyId ?? null,
+          affinityHit: true,
+          affinityKey,
+          candidateCount: eligibleRecords.length,
+          credentialFilename: assignedRecord.filename,
+          credentialUserId: String(assignedRecord.data.user_id ?? 'unknown'),
+          model: requestedModel ?? null,
+        },
+      });
+
       return assignedRecord;
     }
 
@@ -786,6 +813,20 @@ export const resolveCredentialForRequest = async ({
   }
 
   scheduleRuntimeStateSave();
+  void logEvent({
+    level: 'INFO',
+    message: 'Credential selected',
+    payload: {
+      accessKeyId: accessKeyId ?? null,
+      affinityHit: false,
+      affinityKey: affinityKey ?? null,
+      candidateCount: eligibleRecords.length,
+      credentialFilename: current.filename,
+      credentialUserId: String(current.data.user_id ?? 'unknown'),
+      model: requestedModel ?? null,
+      rotatedFrom: currentNextFilename,
+    },
+  });
 
   return current;
 };

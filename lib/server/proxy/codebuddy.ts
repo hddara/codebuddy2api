@@ -20,6 +20,7 @@ import {
   type DebugTrace,
 } from '../domain/debug';
 import { createErrorResponse, getRequestHeaderMap } from '../shared/http';
+import { logEvent, summarizeLogHeaders, truncateLogText } from '../shared/log';
 import { recordUsageEvent, type UsageSnapshot } from '../domain/usage';
 
 interface OpenAIMessage {
@@ -82,6 +83,7 @@ interface ChatStreamChunk {
   id?: string;
   object?: string;
   created?: number;
+  error?: unknown;
   model?: string;
   usage?: unknown;
   choices?: Array<{
@@ -248,6 +250,63 @@ const extractResponsesId = (value: unknown): string | null => {
   return typeof id === 'string' && id ? id : null;
 };
 
+/**
+ * Upstream can report a rejection as an in-stream error frame while the HTTP
+ * status stays 200, which would otherwise leave no server-side trace at all.
+ */
+const describeStreamError = (failure: unknown, fallback: string): string => {
+  if (typeof failure === 'string' && failure) {
+    return failure;
+  }
+
+  if (failure && typeof failure === 'object') {
+    const message = (failure as { message?: unknown }).message;
+
+    if (typeof message === 'string' && message) {
+      return message;
+    }
+
+    try {
+      return JSON.stringify(failure);
+    } catch {
+      return fallback;
+    }
+  }
+
+  return fallback;
+};
+
+const extractStreamErrorEvent = (
+  value: unknown,
+): { detail: string; type: string | null } | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const payload = value as {
+    error?: unknown;
+    response?: unknown;
+    type?: unknown;
+  };
+  const failure =
+    payload.error ??
+    (payload.response && typeof payload.response === 'object'
+      ? (payload.response as { error?: unknown }).error
+      : undefined);
+  const type = typeof payload.type === 'string' ? payload.type : null;
+  const isErrorType =
+    type === 'error' || type === 'response.failed' || type === 'response.error';
+
+  if (!failure && !isErrorType) {
+    return null;
+  }
+
+  return {
+    detail: describeStreamError(failure, type ?? 'unknown upstream error'),
+    type,
+  };
+};
+
 const parseUsageHeader = (response: Response): unknown => {
   const usageHeader = response.headers.get('x-codebuddy-usage');
 
@@ -351,6 +410,22 @@ const trackResponsesUsageStream = async ({
 
           try {
             const event = JSON.parse(raw) as unknown;
+            const streamError = extractStreamErrorEvent(event);
+
+            if (streamError) {
+              void logEvent({
+                level: 'WARN',
+                message: 'Upstream Responses stream reported an error frame',
+                payload: {
+                  credentialFilename: proxyContext.credentialFilename,
+                  detail: truncateLogText(streamError.detail),
+                  eventType: streamError.type,
+                  model,
+                  route: '/v1/responses',
+                },
+              });
+            }
+
             latestUsage = extractResponsesUsage(event) ?? latestUsage;
             responseId = extractResponsesId(event) ?? responseId;
             if (responseId) await bindResponseId(responseId);
@@ -431,16 +506,26 @@ const trackResponsesUsageStream = async ({
 };
 
 const logUpstreamFailure = ({
+  credentialFilename,
   detail,
+  elapsedMs,
   error,
+  model,
+  responseHeaders,
   route,
   status,
+  stream,
   url,
 }: {
+  credentialFilename?: string | null;
   detail?: string;
+  elapsedMs?: number;
   error?: unknown;
+  model?: string;
+  responseHeaders?: Headers;
   route: string;
   status?: number;
+  stream?: boolean;
   url: string;
 }): void => {
   const payload: Record<string, unknown> = {
@@ -448,19 +533,77 @@ const logUpstreamFailure = ({
     url,
   };
 
+  if (credentialFilename) {
+    payload.credentialFilename = credentialFilename;
+  }
+
   if (typeof status === 'number') {
     payload.status = status;
   }
 
+  if (typeof elapsedMs === 'number') {
+    payload.elapsedMs = elapsedMs;
+  }
+
+  if (model) {
+    payload.model = model;
+  }
+
+  if (typeof stream === 'boolean') {
+    payload.stream = stream;
+  }
+
+  const upstreamHeaders = summarizeLogHeaders(responseHeaders);
+
+  if (upstreamHeaders) {
+    payload.upstreamHeaders = upstreamHeaders;
+  }
+
   if (detail) {
-    payload.detail = detail.slice(0, 1000);
+    payload.detail = truncateLogText(detail);
   }
 
   if (error) {
     payload.error = error;
   }
 
-  console.error('[CodeBuddy2API] Upstream request failed', payload);
+  void logEvent({
+    level: 'ERROR',
+    message: 'Upstream request failed',
+    payload,
+  });
+};
+
+const logUpstreamSuccess = ({
+  credentialFilename,
+  elapsedMs,
+  model,
+  route,
+  status,
+  stream,
+  url,
+}: {
+  credentialFilename?: string | null;
+  elapsedMs: number;
+  model?: string;
+  route: string;
+  status: number;
+  stream?: boolean;
+  url: string;
+}): void => {
+  void logEvent({
+    level: 'DEBUG',
+    message: 'Upstream request completed',
+    payload: {
+      credentialFilename: credentialFilename ?? null,
+      elapsedMs,
+      model: model ?? null,
+      route,
+      status,
+      stream: typeof stream === 'boolean' ? stream : null,
+      url,
+    },
+  });
 };
 
 const hasPromptCacheControl = (content: unknown): boolean => {
@@ -1782,6 +1925,19 @@ const mapResponsesStreamToChat = (
                       (failure as { message?: unknown }).message ?? failure,
                     )
                   : String(failure ?? 'Upstream Responses stream failed');
+              void logEvent({
+                level: 'WARN',
+                message: 'Upstream Responses stream reported an error event',
+                payload: {
+                  credentialFilename: proxyContext.credentialFilename,
+                  detail: truncateLogText(
+                    describeStreamError(failure, message),
+                  ),
+                  eventType: typeof event.type === 'string' ? event.type : null,
+                  model,
+                  route,
+                },
+              });
               controller.enqueue(
                 encoder.encode(
                   `data: ${JSON.stringify({ error: { message } })}\n\n`,
@@ -2050,6 +2206,18 @@ const normalizeStreamingResponse = ({
           const chunk = JSON.parse(raw) as ChatStreamChunk;
           if (chunk.usage !== undefined) {
             latestUsage = chunk.usage;
+          }
+          if (chunk.error !== undefined) {
+            void logEvent({
+              level: 'WARN',
+              message: 'Upstream stream reported an error chunk',
+              payload: {
+                credentialFilename: proxyContext.credentialFilename,
+                detail: truncateLogText(describeStreamError(chunk.error, raw)),
+                model,
+                route,
+              },
+            });
           }
           const normalized = normalizeStreamToolCalls(chunk, state);
           lines[lineIndex] = `data: ${JSON.stringify(normalized)}`;
@@ -2538,6 +2706,7 @@ export const proxyChatCompletions = async (
         url: upstreamUrl,
       });
 
+      const upstreamStartedAt = Date.now();
       let upstreamResponse = await fetch(upstreamUrl, {
         method: 'POST',
         headers: upstreamHeaders,
@@ -2552,9 +2721,14 @@ export const proxyChatCompletions = async (
       if (!upstreamResponse.ok) {
         const detail = await upstreamResponse.text();
         logUpstreamFailure({
+          credentialFilename: resolvedContext.credentialFilename,
           detail,
+          elapsedMs: Date.now() - upstreamStartedAt,
+          model: String(upstreamBody.model ?? '') || undefined,
+          responseHeaders: upstreamResponse.headers,
           route: usageRoute,
           status: upstreamResponse.status,
+          stream: Boolean(body.stream),
           url: upstreamUrl,
         });
         setDebugTraceError(debugTrace, detail);
@@ -2564,6 +2738,16 @@ export const proxyChatCompletions = async (
           detail,
         );
       }
+
+      logUpstreamSuccess({
+        credentialFilename: resolvedContext.credentialFilename,
+        elapsedMs: Date.now() - upstreamStartedAt,
+        model: String(upstreamBody.model ?? '') || undefined,
+        route: usageRoute,
+        status: upstreamResponse.status,
+        stream: Boolean(body.stream),
+        url: upstreamUrl,
+      });
 
       if (body.stream) {
         return mapResponsesStreamToChat(
@@ -2623,6 +2807,7 @@ export const proxyChatCompletions = async (
       url: upstreamUrl,
     });
 
+    const upstreamStartedAt = Date.now();
     let upstreamResponse = await fetch(upstreamUrl, {
       method: 'POST',
       headers: upstreamHeaders,
@@ -2638,9 +2823,14 @@ export const proxyChatCompletions = async (
     if (!upstreamResponse.ok) {
       const detail = await upstreamResponse.text();
       logUpstreamFailure({
+        credentialFilename: resolvedContext.credentialFilename,
         detail,
-        route: '/v1/chat/completions',
+        elapsedMs: Date.now() - upstreamStartedAt,
+        model: String(upstreamBody.model ?? '') || undefined,
+        responseHeaders: upstreamResponse.headers,
+        route: usageRoute,
         status: upstreamResponse.status,
+        stream: Boolean(body.stream),
         url: upstreamUrl,
       });
       setDebugTraceError(debugTrace, detail);
@@ -2650,6 +2840,16 @@ export const proxyChatCompletions = async (
         detail,
       );
     }
+
+    logUpstreamSuccess({
+      credentialFilename: resolvedContext.credentialFilename,
+      elapsedMs: Date.now() - upstreamStartedAt,
+      model: String(upstreamBody.model ?? '') || undefined,
+      route: usageRoute,
+      status: upstreamResponse.status,
+      stream: Boolean(body.stream),
+      url: upstreamUrl,
+    });
 
     if (body.stream) {
       return normalizeStreamingResponse({
@@ -2749,6 +2949,11 @@ export const proxyResponsesUpstream = async (
       url: upstreamUrl,
     });
 
+    const upstreamStartedAt = Date.now();
+    const upstreamStream = Boolean(
+      (upstreamBody as { stream?: unknown }).stream,
+    );
+    const upstreamModel = String(upstreamBody.model ?? '') || undefined;
     let upstreamResponse = await fetch(upstreamUrl, {
       method: 'POST',
       headers: upstreamHeaders,
@@ -2764,9 +2969,14 @@ export const proxyResponsesUpstream = async (
     if (!upstreamResponse.ok) {
       const detail = await upstreamResponse.text();
       logUpstreamFailure({
+        credentialFilename: resolvedContext.credentialFilename,
         detail,
+        elapsedMs: Date.now() - upstreamStartedAt,
+        model: upstreamModel,
+        responseHeaders: upstreamResponse.headers,
         route: '/v1/responses',
         status: upstreamResponse.status,
+        stream: upstreamStream,
         url: upstreamUrl,
       });
       setDebugTraceError(debugTrace, detail);
@@ -2776,6 +2986,16 @@ export const proxyResponsesUpstream = async (
         detail,
       );
     }
+
+    logUpstreamSuccess({
+      credentialFilename: resolvedContext.credentialFilename,
+      elapsedMs: Date.now() - upstreamStartedAt,
+      model: upstreamModel,
+      route: '/v1/responses',
+      status: upstreamResponse.status,
+      stream: upstreamStream,
+      url: upstreamUrl,
+    });
 
     const model = String(upstreamBody.model ?? 'unknown');
     const fallbackUsage = parseUsageHeader(upstreamResponse);
