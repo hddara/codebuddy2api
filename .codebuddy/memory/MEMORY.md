@@ -21,7 +21,8 @@
 - **对外的镜像地址一律写成 `ghcr.nju.edu.cn/hddara/codebuddy2api:<版本号>`**（用户 2026-09-16 指定，同时写入全局记忆）：nju 站是只读加速、digest 与源站一致、可匿名拉取；**推送/登录仍走 `ghcr.io`**。
 - 生产镜像固定用版本 tag（**不用 `latest`**，便于区分与回滚）；`deploy/docker-compose.yml` 与 `deploy/k8s/codebuddy2api.yaml` 已按此约定指向对应版本。
 - `release.yml` 的 Release notes 通过 `env.IMAGE_MIRROR: ghcr.nju.edu.cn` + `image="${IMAGE/ghcr.io/$IMAGE_MIRROR}"` 输出 nju 地址（PR #4 合入 main）。
-- 当前生产版本：`1.2.2`（2026-09-29 发布；内容 = 诊断日志增强）。
+- 当前生产版本：`1.2.3`（2026-09-29 发布；内容 = storage 的 scrypt v2 加密模式，修生产 500「AES-GCM 解密失败」）。上一个版本 `1.2.2` = 诊断日志增强（**已部署到生产**，`[CodeBuddy2API][ERROR] Upstream request failed` 已在 Grafana Loki 的 `{swarm_stack="codebuddy2api"}` 里可见）。
+  - 生产 500 的排查结论见 brv `plans/2026-09-29-production-500-decrypt-failure.md`：该批报错**与上游限流无关**（7 天日志里 `429/rate limit/quota` 零命中），根因是凭证解析阶段的存储解密失败。
 - **双推镜像（2026-09-29 起）**：`release.yml` / `docker-publish.yml` 各有独立的 `publish-acr` 作业，用 `docker buildx imagetools create` 把 ghcr 已发布的**多架构 manifest 按引用复制**到 `registry.cn-hangzhou.aliyuncs.com/hucx/codebuddy2api`（不重复构建、digest 一致），并覆盖 ACR 的 `latest`。
   - 凭据来自仓库 secrets `ACR_USERNAME` / `ACR_PASSWORD`；**`secrets` 不能写在 `if` 里**，故先用一个步骤把「凭据是否存在」输出成 `steps.acr.outputs.has_credentials`，后续步骤据此 gate；无 secret 时整段跳过，且 ACR 作业不在 `release` 的 `needs` 内 → **镜像站故障不会阻塞 GitHub 发版**。
   - 对外地址仍以 `ghcr.nju.edu.cn` 为准（用户 2026-09-29 确认），ACR 只作为备用通道，在 Release 正文附一行。
