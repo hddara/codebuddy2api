@@ -203,8 +203,11 @@ jobs:
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
-      # Copies the published multi-arch manifest by reference instead of
+      # Copies the published platform manifests by reference instead of
       # rebuilding: no extra build minutes and identical digests to ghcr.
+      # The index is rebuilt from the platform manifests only, because buildx
+      # attaches provenance attestations (config media type
+      # application/vnd.oci.empty.v1+json) that ACR rejects with 403.
       - name: Mirror multi-arch manifest to ACR
         if: ${{ steps.acr.outputs.has_credentials == 'true' }}
         env:
@@ -214,10 +217,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          sources=()
+          while read -r digest; do
+            sources+=("${IMAGE}@${digest}")
+          done < <(docker buildx imagetools inspect "${IMAGE}:${SHORT_SHA}" --raw \
+            | jq -r '.manifests[] | select((.platform.architecture // "") != "unknown") | .digest')
+          if [[ ${#sources[@]} -eq 0 ]]; then
+            echo 'No platform manifests found on the published image.' >&2
+            exit 1
+          fi
           targets=()
           IFS=',' read -ra tags <<< "$TAGS"
           for tag in "${tags[@]}"; do
             targets+=("-t" "${ACR_IMAGE}:${tag}")
           done
-          docker buildx imagetools create "${targets[@]}" "${IMAGE}:${SHORT_SHA}"
+          docker buildx imagetools create "${targets[@]}" "${sources[@]}"
           docker buildx imagetools inspect "${ACR_IMAGE}:${SHORT_SHA}"

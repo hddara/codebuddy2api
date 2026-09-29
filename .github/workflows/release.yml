@@ -224,19 +224,31 @@ jobs:
           registry: ${{ env.ACR_REGISTRY }}
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
-      # Copies the published multi-arch manifest by reference instead of
+      # Copies the published platform manifests by reference instead of
       # rebuilding: no extra build minutes and identical digests to ghcr.
+      # The index is rebuilt from the platform manifests only, because buildx
+      # attaches provenance attestations (config media type
+      # application/vnd.oci.empty.v1+json) that ACR rejects with 403.
       - name: Mirror multi-arch manifest to ACR
         if: ${{ steps.acr.outputs.has_credentials == 'true' }}
         env:
-          SOURCE: ${{ needs.detect-release.outputs.image }}:${{ needs.detect-release.outputs.version }}
+          REPOSITORY: ${{ needs.detect-release.outputs.image }}
           VERSION: ${{ needs.detect-release.outputs.version }}
         run: |
           set -euo pipefail
+          sources=()
+          while read -r digest; do
+            sources+=("${REPOSITORY}@${digest}")
+          done < <(docker buildx imagetools inspect "${REPOSITORY}:${VERSION}" --raw \
+            | jq -r '.manifests[] | select((.platform.architecture // "") != "unknown") | .digest')
+          if [[ ${#sources[@]} -eq 0 ]]; then
+            echo 'No platform manifests found on the published image.' >&2
+            exit 1
+          fi
           docker buildx imagetools create \
             -t "${ACR_IMAGE}:${VERSION}" \
             -t "${ACR_IMAGE}:latest" \
-            "$SOURCE"
+            "${sources[@]}"
           docker buildx imagetools inspect "${ACR_IMAGE}:${VERSION}"
 
   release:
