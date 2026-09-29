@@ -1,5 +1,7 @@
 # codebuddy2api 长期记忆
 
+> 账户/凭据台账（镜像仓库、PAT、ACR secrets 等）见 brv `.brv/context-tree/projects/codebuddy2api/preferences/accounts-inventory.md`，索取一次、后续免问。
+
 ## 仓库与分支
 
 - 仓库：`hddara/codebuddy2api`（fork 自 `orangeboyChen/codebuddy2api`，`upstream` remote 指向上游）。
@@ -20,6 +22,9 @@
 - 生产镜像固定用版本 tag（**不用 `latest`**，便于区分与回滚）；`deploy/docker-compose.yml` 与 `deploy/k8s/codebuddy2api.yaml` 已按此约定指向对应版本。
 - `release.yml` 的 Release notes 通过 `env.IMAGE_MIRROR: ghcr.nju.edu.cn` + `image="${IMAGE/ghcr.io/$IMAGE_MIRROR}"` 输出 nju 地址（PR #4 合入 main）。
 - 当前生产版本：`1.2.2`（2026-09-29 发布；内容 = 诊断日志增强）。
+- **双推镜像（2026-09-29 起）**：`release.yml` / `docker-publish.yml` 各有独立的 `publish-acr` 作业，用 `docker buildx imagetools create` 把 ghcr 已发布的**多架构 manifest 按引用复制**到 `registry.cn-hangzhou.aliyuncs.com/hucx/codebuddy2api`（不重复构建、digest 一致），并覆盖 ACR 的 `latest`。
+  - 凭据来自仓库 secrets `ACR_USERNAME` / `ACR_PASSWORD`；**`secrets` 不能写在 `if` 里**，故先用一个步骤把「凭据是否存在」输出成 `steps.acr.outputs.has_credentials`，后续步骤据此 gate；无 secret 时整段跳过，且 ACR 作业不在 `release` 的 `needs` 内 → **镜像站故障不会阻塞 GitHub 发版**。
+  - 对外地址仍以 `ghcr.nju.edu.cn` 为准（用户 2026-09-29 确认），ACR 只作为备用通道，在 Release 正文附一行。
 
 ## 诊断日志（1.2.2 起）
 
