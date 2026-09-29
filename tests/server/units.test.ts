@@ -3925,6 +3925,21 @@ describe('server units', () => {
     expect(denied.status).toBe(429);
     expect(await denied.text()).toContain('upstream denied');
 
+    await waitForAsync(async () => {
+      expect(console.error).toHaveBeenCalledWith(
+        '[CodeBuddy2API][ERROR] Upstream request failed',
+        expect.objectContaining({
+          credentialFilename: createdCredential.filename,
+          detail: 'upstream denied',
+          route: '/v1/responses',
+          status: 429,
+          upstreamHeaders: expect.objectContaining({
+            'content-type': 'text/plain; charset=utf-8',
+          }),
+        }),
+      );
+    });
+
     const emptyStream = await proxyResponsesUpstream(
       request,
       { input: 'empty stream', model: 'gpt-5.5', stream: true },
