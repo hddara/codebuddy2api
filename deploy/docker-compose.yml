@@ -1,6 +1,6 @@
 services:
   codebuddy2api:
-    image: ghcr.nju.edu.cn/hddara/codebuddy2api:1.2.2
+    image: ghcr.nju.edu.cn/hddara/codebuddy2api:1.2.3
     restart: unless-stopped
     ports:
       - '8001:8001'
