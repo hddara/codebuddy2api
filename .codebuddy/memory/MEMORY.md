@@ -25,6 +25,9 @@
 - **双推镜像（2026-09-29 起）**：`release.yml` / `docker-publish.yml` 各有独立的 `publish-acr` 作业，用 `docker buildx imagetools create` 把 ghcr 已发布的**多架构 manifest 按引用复制**到 `registry.cn-hangzhou.aliyuncs.com/hucx/codebuddy2api`（不重复构建、digest 一致），并覆盖 ACR 的 `latest`。
   - 凭据来自仓库 secrets `ACR_USERNAME` / `ACR_PASSWORD`；**`secrets` 不能写在 `if` 里**，故先用一个步骤把「凭据是否存在」输出成 `steps.acr.outputs.has_credentials`，后续步骤据此 gate；无 secret 时整段跳过，且 ACR 作业不在 `release` 的 `needs` 内 → **镜像站故障不会阻塞 GitHub 发版**。
   - 对外地址仍以 `ghcr.nju.edu.cn` 为准（用户 2026-09-29 确认），ACR 只作为备用通道，在 Release 正文附一行。
+  - ⚠️ **ACR 会 403 拒收 buildx 的 attestation 子清单**（`unknown manifest class for application/vnd.oci.empty.v1+json`），所以 ACR 侧 index 必须**按平台清单 digest 重建**（从源 index 用 `jq` 筛 amd64/arm64 的 digest，再 `imagetools create`），不能直接整 index 复制。
+  - 本地兜底脚本：`tests/deploy/mirror-image-to-acr.sh <版本> [附tag...]`（本机已 `docker login registry.cn-hangzhou.aliyuncs.com`；**源要用 `ghcr.nju.edu.cn`**，直连 ghcr.io 极慢）。
+  - 状态（2026-09-29）：ACR 已有 `1.2.2` / `latest`（2 平台，digest 与 ghcr 平台清单一致）；CI 侧 `ACR_USERNAME`/`ACR_PASSWORD` **尚未真正生效**（仓库级 secrets 为空，疑似配在组织级未授权或配成 Variables）。
 
 ## 诊断日志（1.2.2 起）
 
