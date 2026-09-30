@@ -27,6 +27,47 @@ const credential = (filename: string) => ({
   filePath: `/tmp/${filename}`,
   filename,
 });
+
+/**
+ * Mirrors the upstream `get-user-resource` shape: capacity lives per package and
+ * each package carries its own cycle, so the totals have to be summed over the
+ * usable ones only.
+ */
+const quotaPayload = (
+  packages: Array<Record<string, unknown>>,
+  totalDosage?: number,
+) => ({
+  code: 0,
+  data: {
+    Response: {
+      Data: {
+        Accounts: packages,
+        TotalCount: packages.length,
+        TotalDosage:
+          totalDosage ??
+          packages.reduce(
+            (sum, item) => sum + Number(item.CycleCapacityRemain ?? 0),
+            0,
+          ),
+      },
+    },
+  },
+});
+
+const quotaPackage = (
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> => ({
+  CapacityUnit: 'credits',
+  CycleCapacityRemain: 750,
+  CycleCapacitySize: 1000,
+  CycleCapacityUsed: 250,
+  CycleEndTime: '2026-09-30 23:59:59',
+  CycleStartTime: '2026-09-01 00:00:00',
+  PackageName: 'Pro',
+  Status: 0,
+  ...overrides,
+});
+
 const jsonResponse = (payload: unknown, status = 200) =>
   new Response(JSON.stringify(payload), {
     headers: { 'Content-Type': 'application/json' },
@@ -51,15 +92,18 @@ describe('account status domain', () => {
   it('normalizes quota, check-in, and models', async () => {
     const fetchMock = vi
       .spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(
-        jsonResponse({
-          userQuota: { total: 1000, used: 250, remaining: 750, plan: 'Pro' },
-        }),
-      )
+      .mockResolvedValueOnce(jsonResponse(quotaPayload([quotaPackage()])))
       .mockResolvedValueOnce(jsonResponse({ status: 'CLAIMED' }));
     const [result] = await getAccountStatus();
     expect(result).toMatchObject({
-      credits: { total: 1000, used: 250, remaining: 750, plan: 'Pro' },
+      credits: {
+        total: 1000,
+        used: 250,
+        remaining: 750,
+        plan: 'Pro',
+        resetAt: '2026-09-30 23:59:59',
+        usablePackageCount: 1,
+      },
       checkin: { claimed: true },
       models: ['model-one'],
       error: null,
@@ -67,36 +111,105 @@ describe('account status domain', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('excludes expired packages from the usable totals', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        jsonResponse(
+          quotaPayload(
+            [
+              quotaPackage(),
+              quotaPackage({
+                CycleCapacityRemain: 9999,
+                CycleCapacitySize: 9999,
+                CycleCapacityUsed: 0,
+                CycleEndTime: '2027-06-24 14:25:16',
+                PackageName: 'Expired pack',
+                Status: 3,
+              }),
+            ],
+            10749,
+          ),
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse({ status: 'CLAIMED' }));
+
+    const [result] = await getAccountStatus();
+
+    // The expired 9999 package must not inflate any of the totals, even though
+    // the upstream account-level TotalDosage (10749) does include it.
+    expect(result.credits).toMatchObject({
+      remaining: 750,
+      resetAt: '2026-09-30 23:59:59',
+      total: 1000,
+      used: 250,
+      usablePackageCount: 1,
+    });
+    expect(result.credits.packages).toHaveLength(2);
+    expect(result.credits.packages[1]).toMatchObject({
+      packageName: 'Expired pack',
+      status: 3,
+    });
+  });
+
+  it('sums several usable packages and reports the soonest reset', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        jsonResponse(
+          quotaPayload([
+            quotaPackage(),
+            quotaPackage({
+              CycleCapacityRemain: 1456,
+              CycleCapacitySize: 1500,
+              CycleCapacityUsed: 43,
+              CycleEndTime: '2026-10-15 15:57:04',
+              PackageName: '裂变包',
+            }),
+          ]),
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse({ status: 'CLAIMED' }));
+
+    const [result] = await getAccountStatus();
+
+    expect(result.credits).toMatchObject({
+      plan: 'Pro + 裂变包',
+      remaining: 2206,
+      resetAt: '2026-09-30 23:59:59',
+      total: 2500,
+      used: 293,
+      usablePackageCount: 2,
+    });
+  });
+
   it('records partial upstream errors', async () => {
     vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(jsonResponse({ userQuota: { total: 0 } }))
+      .mockResolvedValueOnce(jsonResponse(quotaPayload([])))
       .mockResolvedValueOnce(jsonResponse({}, 404))
       .mockResolvedValueOnce(jsonResponse({}, 404));
     vi.mocked(getModelsForCredential).mockRejectedValueOnce(
       new Error('models unavailable'),
     );
     const [result] = await getAccountStatus();
-    expect(result.credits.total).toBe(0);
+    expect(result.credits.total).toBeNull();
     expect(result.error).toContain('returned 404');
     expect(result.error).toContain('models unavailable');
   });
 
-  it('keeps unsupported quota and check-in values unknown', async () => {
+  it('keeps non-numeric package capacity unknown', async () => {
     vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(
-        jsonResponse({
-          data: [
+        jsonResponse(
+          quotaPayload([
             {
-              limits: {
-                planName: 'Team',
-                quota: 'not-a-number',
-                reset_at: 'tomorrow',
-                total_remain: '3',
-                total_used: '2',
-              },
+              CycleCapacityRemain: '3',
+              CycleCapacitySize: 'not-a-number',
+              CycleCapacityUsed: '2',
+              CycleEndTime: 'tomorrow',
+              PackageName: 'Team',
+              Status: 0,
             },
-          ],
-        }),
+          ]),
+        ),
       )
       .mockResolvedValueOnce(jsonResponse({ status: 'PENDING' }));
 
@@ -110,6 +223,7 @@ describe('account status domain', () => {
         resetAt: 'tomorrow',
         total: null,
         used: 2,
+        usablePackageCount: 1,
       },
     });
   });
@@ -124,7 +238,15 @@ describe('account status domain', () => {
     ] as never);
     vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(
-        jsonResponse({ items: [{ total: 12, used: 4, remaining: 8 }] }),
+        jsonResponse(
+          quotaPayload([
+            quotaPackage({
+              CycleCapacityRemain: 8,
+              CycleCapacitySize: 12,
+              CycleCapacityUsed: 4,
+            }),
+          ]),
+        ),
       )
       .mockResolvedValueOnce(jsonResponse({ items: [{ claimed: true }] }));
 
@@ -163,7 +285,15 @@ describe('account status domain', () => {
     vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(jsonResponse({ success: true }))
       .mockResolvedValueOnce(
-        jsonResponse({ userQuota: { total: 10, used: 2, remaining: 8 } }),
+        jsonResponse(
+          quotaPayload([
+            quotaPackage({
+              CycleCapacityRemain: 8,
+              CycleCapacitySize: 10,
+              CycleCapacityUsed: 2,
+            }),
+          ]),
+        ),
       )
       .mockResolvedValueOnce(jsonResponse({ claimed: true }));
     const result = await checkinAccount('one.json');
@@ -174,9 +304,15 @@ describe('account status domain', () => {
     vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(jsonResponse({}, 503))
       .mockResolvedValueOnce(
-        jsonResponse({
-          userQuota: { quota: 3, total_remain: 2, total_used: 1 },
-        }),
+        jsonResponse(
+          quotaPayload([
+            quotaPackage({
+              CycleCapacityRemain: 2,
+              CycleCapacitySize: 3,
+              CycleCapacityUsed: 1,
+            }),
+          ]),
+        ),
       )
       .mockResolvedValueOnce(jsonResponse({ isClaimed: false }));
 
@@ -196,7 +332,15 @@ describe('account status domain', () => {
       )
       .mockResolvedValueOnce(jsonResponse({ isClaimed: false }))
       .mockResolvedValueOnce(
-        jsonResponse({ userQuota: { total: 10, used: 2, remaining: 8 } }),
+        jsonResponse(
+          quotaPayload([
+            quotaPackage({
+              CycleCapacityRemain: 8,
+              CycleCapacitySize: 10,
+              CycleCapacityUsed: 2,
+            }),
+          ]),
+        ),
       )
       .mockResolvedValueOnce(jsonResponse({ claimed: false }));
 
@@ -214,7 +358,15 @@ describe('account status domain', () => {
       )
       .mockResolvedValueOnce(jsonResponse({ claimed: true }))
       .mockResolvedValueOnce(
-        jsonResponse({ userQuota: { total: 10, used: 2, remaining: 8 } }),
+        jsonResponse(
+          quotaPayload([
+            quotaPackage({
+              CycleCapacityRemain: 8,
+              CycleCapacitySize: 10,
+              CycleCapacityUsed: 2,
+            }),
+          ]),
+        ),
       )
       .mockResolvedValueOnce(jsonResponse({ claimed: true }));
 
@@ -271,7 +423,15 @@ describe('account status domain', () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) =>
       init?.method === 'POST'
         ? jsonResponse({ success: true })
-        : jsonResponse({ userQuota: { total: 1, used: 0, remaining: 1 } }),
+        : jsonResponse(
+            quotaPayload([
+              quotaPackage({
+                CycleCapacityRemain: 1,
+                CycleCapacitySize: 1,
+                CycleCapacityUsed: 0,
+              }),
+            ]),
+          ),
     );
     const results = await checkinAccounts();
     expect(results).toHaveLength(5);
