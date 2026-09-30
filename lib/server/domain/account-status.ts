@@ -15,6 +15,18 @@ export interface AccountStatusSnapshot {
     remaining: number | null;
     plan: string | null;
     resetAt: string | null;
+    /** Every package the account holds, including expired ones. */
+    packages: Array<{
+      capacityRemain: number | null;
+      capacitySize: number | null;
+      capacityUsed: number | null;
+      cycleEndTime: string | null;
+      cycleStartTime: string | null;
+      packageName: string | null;
+      status: number | null;
+    }>;
+    /** Packages that are neither expired nor empty; the totals above cover these only. */
+    usablePackageCount: number;
   };
   error: string | null;
   filename: string;
@@ -31,6 +43,24 @@ const asRecord = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === 'object'
     ? (value as Record<string, unknown>)
     : null;
+
+/**
+ * Same lookup as `findValue`, but keeps the search inside `value` instead of
+ * walking into nested objects. Quota fields are read off a package record, and
+ * a recursive search would happily pick the same field name from a sibling or
+ * from an aggregated node, which is how an expired package's capacity leaks
+ * into a usable one.
+ */
+const findOwnValue = (
+  value: Record<string, unknown>,
+  keys: string[],
+): unknown => {
+  for (const key of keys) {
+    if (value[key] !== undefined && value[key] !== null) return value[key];
+  }
+
+  return undefined;
+};
 
 const findValue = (value: unknown, keys: string[]): unknown => {
   const record = asRecord(value);
@@ -193,33 +223,6 @@ const fetchCheckinStatus = async (
   }
 };
 
-const normalizeQuotaPayload = (payload: unknown): unknown => {
-  const accounts = findValue(payload, ['Accounts']);
-  if (!Array.isArray(accounts)) return payload;
-  let total = 0;
-  let used = 0;
-  let remaining = 0;
-  let hasValues = false;
-  for (const account of accounts) {
-    const size = toNumber(
-      findValue(account, ['CycleCapacitySize', 'CapacitySize']),
-    );
-    const accountRemaining = toNumber(
-      findValue(account, ['CycleCapacityRemain', 'CapacityRemain']),
-    );
-    const accountUsed = toNumber(
-      findValue(account, ['CycleCapacityUsed', 'CapacityUsed']),
-    );
-    if (size !== null || accountRemaining !== null || accountUsed !== null) {
-      hasValues = true;
-      total += size ?? (accountRemaining ?? 0) + (accountUsed ?? 0);
-      remaining += accountRemaining ?? 0;
-      used += accountUsed ?? (size ?? 0) - (accountRemaining ?? 0);
-    }
-  }
-  return hasValues ? { total, used, remaining } : payload;
-};
-
 /**
  * The upstream quota response carries the fields the account really reports
  * (package size, remaining dosage, cycle end). Keep the raw body in the logs so
@@ -247,6 +250,91 @@ const logCreditsPayload = (
       ),
     },
   });
+};
+
+/**
+ * A single package from the upstream quota response. One account usually holds
+ * several packages at once, each with its own cycle and its own capacity, so the
+ * account-level totals cannot answer "how much can I use right now".
+ */
+interface QuotaPackage {
+  capacityRemain: number | null;
+  capacitySize: number | null;
+  capacityUsed: number | null;
+  cycleEndTime: string | null;
+  cycleStartTime: string | null;
+  packageName: string | null;
+  status: number | null;
+}
+
+const PACKAGE_FIELDS = {
+  capacityRemain: ['CycleCapacityRemain', 'CapacityRemain'],
+  capacitySize: ['CycleCapacitySize', 'CapacitySize'],
+  capacityUsed: ['CycleCapacityUsed', 'CapacityUsed'],
+  cycleEndTime: ['CycleEndTime'],
+  cycleStartTime: ['CycleStartTime'],
+  packageName: ['PackageName'],
+  status: ['Status'],
+};
+
+/**
+ * `Status: 3` marks an expired package. Its capacity must never be counted as
+ * available, which is exactly what the previous account-level aggregation did.
+ */
+const EXPIRED_PACKAGE_STATUS = 3;
+
+const toRecordArray = (value: unknown): Array<Record<string, unknown>> =>
+  Array.isArray(value)
+    ? value.filter((item): item is Record<string, unknown> => !!asRecord(item))
+    : [];
+
+const readString = (
+  record: Record<string, unknown>,
+  keys: string[],
+): string | null => {
+  const value = findOwnValue(record, keys);
+
+  return value === undefined || value === null || value === ''
+    ? null
+    : String(value);
+};
+
+const extractQuotaPackages = (payload: unknown): QuotaPackage[] => {
+  const accounts = findValue(payload, ['Accounts']);
+
+  return toRecordArray(accounts).map((record) => ({
+    capacityRemain: toNumber(
+      findOwnValue(record, PACKAGE_FIELDS.capacityRemain),
+    ),
+    capacitySize: toNumber(findOwnValue(record, PACKAGE_FIELDS.capacitySize)),
+    capacityUsed: toNumber(findOwnValue(record, PACKAGE_FIELDS.capacityUsed)),
+    cycleEndTime: readString(record, PACKAGE_FIELDS.cycleEndTime),
+    cycleStartTime: readString(record, PACKAGE_FIELDS.cycleStartTime),
+    packageName: readString(record, PACKAGE_FIELDS.packageName),
+    status: toNumber(findOwnValue(record, PACKAGE_FIELDS.status)),
+  }));
+};
+
+/**
+ * A package counts as usable when it is not expired. Capacity is deliberately
+ * not part of the test: an unparseable size still describes a real package, and
+ * dropping it would silently hide the account's allowance instead of reporting
+ * the value as unknown.
+ */
+const isUsablePackage = (quotaPackage: QuotaPackage): boolean =>
+  quotaPackage.status !== EXPIRED_PACKAGE_STATUS;
+
+/**
+ * Packages with the earliest cycle end are consumed first, so the reset that
+ * actually matters is the one on the soonest-expiring usable package.
+ */
+const pickResetAt = (quotaPackages: QuotaPackage[]): string | null => {
+  const endings = quotaPackages
+    .map((item) => item.cycleEndTime)
+    .filter((value): value is string => Boolean(value))
+    .sort();
+
+  return endings[0] ?? null;
 };
 
 const loadAccountStatus = async (
@@ -306,47 +394,34 @@ const loadAccountStatus = async (
     errors.push(error instanceof Error ? error.message : 'Model query failed');
   }
 
+  const quotaPackages = extractQuotaPackages(creditsPayload);
+  const usablePackages = quotaPackages.filter(isUsablePackage);
+  const sum = (
+    selector: (item: QuotaPackage) => number | null,
+  ): number | null => {
+    const values = usablePackages
+      .map(selector)
+      .filter((value): value is number => value !== null);
+
+    return values.length
+      ? values.reduce((left, right) => left + right, 0)
+      : null;
+  };
+
   return {
     checkin: resolveCheckinState(checkinPayload),
     credits: {
-      total: toNumber(
-        findValue(normalizeQuotaPayload(creditsPayload), [
-          'total',
-          'total_size',
-          'quota',
-          'TotalDosage',
-        ]),
-      ),
-      used: toNumber(
-        findValue(normalizeQuotaPayload(creditsPayload), [
-          'used',
-          'total_used',
-        ]),
-      ),
-      remaining: toNumber(
-        findValue(normalizeQuotaPayload(creditsPayload), [
-          'remaining',
-          'total_remain',
-        ]),
-      ),
+      total: sum((item) => item.capacitySize),
+      used: sum((item) => item.capacityUsed),
+      remaining: sum((item) => item.capacityRemain),
       plan:
-        String(
-          findValue(creditsPayload, [
-            'plan',
-            'planName',
-            'userType',
-            'PackageName',
-          ]) ?? '',
-        ) || null,
-      resetAt:
-        String(
-          findValue(creditsPayload, [
-            'resetAt',
-            'reset_at',
-            'resetTime',
-            'CycleEndTime',
-          ]) ?? '',
-        ) || null,
+        usablePackages
+          .map((item) => item.packageName)
+          .filter((value): value is string => Boolean(value))
+          .join(' + ') || null,
+      resetAt: pickResetAt(usablePackages),
+      packages: quotaPackages,
+      usablePackageCount: usablePackages.length,
     },
     error: errors.length ? errors.join('; ') : null,
     filename: credential.filename,
