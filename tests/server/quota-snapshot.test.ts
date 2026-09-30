@@ -90,6 +90,36 @@ describe('quota snapshot sampling', () => {
     expect(getQuotaSnapshotStatus().sampledCount).toBe(0);
   });
 
+  it('records the partial error reported for a credential', async () => {
+    vi.mocked(getAccountStatus).mockResolvedValue([
+      { ...snapshot('a.json', 0), error: 'claimed returned 400' },
+    ] as never);
+
+    await captureQuotaSnapshots('manual');
+
+    expect(logEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: 'Quota snapshot',
+        payload: expect.objectContaining({
+          error: 'claimed returned 400',
+          remaining: 0,
+        }),
+      }),
+    );
+  });
+
+  it('stringifies a non-Error rejection', async () => {
+    vi.mocked(getAccountStatus).mockRejectedValue('plain failure');
+
+    await expect(captureQuotaSnapshots('scheduled')).resolves.toBe(0);
+    expect(logEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        level: 'WARN',
+        payload: expect.objectContaining({ error: 'plain failure' }),
+      }),
+    );
+  });
+
   it('samples shortly after startup and then keeps rescheduling', async () => {
     vi.mocked(getAccountStatus).mockResolvedValue([] as never);
 
