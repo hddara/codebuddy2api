@@ -5,6 +5,7 @@ import {
   type CredentialRecord,
 } from './credentials';
 import { getModelsForCredential } from '../proxy/codebuddy';
+import { logEvent, truncateLogText } from '../shared/log';
 
 export interface AccountStatusSnapshot {
   checkin: { claimed: boolean | null; message: string | null };
@@ -219,6 +220,35 @@ const normalizeQuotaPayload = (payload: unknown): unknown => {
   return hasValues ? { total, used, remaining } : payload;
 };
 
+/**
+ * The upstream quota response carries the fields the account really reports
+ * (package size, remaining dosage, cycle end). Keep the raw body in the logs so
+ * the reset cadence and any per-day allowance can be derived after the fact
+ * instead of guessed from the parsed snapshot alone.
+ */
+const MAX_CREDITS_LOG_LENGTH = 4000;
+
+const logCreditsPayload = (
+  credential: CredentialRecord,
+  payload: unknown,
+  source: string,
+): void => {
+  void logEvent({
+    level: 'INFO',
+    message: 'Credits payload captured',
+    payload: {
+      credentialFilename: credential.filename,
+      credentialUserId: String(credential.data.user_id ?? 'unknown'),
+      queriedAt: new Date().toISOString(),
+      source,
+      payload: truncateLogText(
+        JSON.stringify(payload ?? null),
+        MAX_CREDITS_LOG_LENGTH,
+      ),
+    },
+  });
+};
+
 const loadAccountStatus = async (
   credential: CredentialRecord,
 ): Promise<AccountStatusSnapshot> => {
@@ -246,6 +276,7 @@ const loadAccountStatus = async (
         ),
       },
     );
+    logCreditsPayload(credential, creditsPayload, 'account-status');
   } catch (error) {
     errors.push(
       error instanceof Error ? error.message : 'Credits query failed',
