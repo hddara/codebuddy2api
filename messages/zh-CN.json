@@ -230,6 +230,9 @@
       "accessKeyExampleName": "例如：Claude Team / CI Runner",
       "accessKeyHelp": "secret 由服务端自动生成；这里只修改名称和绑定凭证。",
       "accessKeyLabel": "API Key",
+      "accessKeyModelAliases": "模型别名",
+      "accessKeyModelAliasesHelp": "每行一条，格式 别名=真实模型名。例如 deepseek-v4.1-flash-a=deepseek-v4.1-flash：客户端请求别名时会按真实模型名访问上游与选择凭证。",
+      "accessKeyModelAliasesPlaceholder": "deepseek-v4.1-flash-a=deepseek-v4.1-flash",
       "accessKeyName": "API Key 名称",
       "accessKeyUpdatedAt": "更新于 {value}",
       "autoAuthDescription": "点击下方按钮自动启动 CodeBuddy OAuth2 认证流程，系统将自动获取并保存您的认证凭证。",
@@ -250,6 +253,7 @@
       "credentialBadgeActive": "有效",
       "credentialBadgeExpired": "已过期",
       "credentialBadgeNext": "下一次轮询",
+      "credentialBadgeRateLimited": "已限流",
       "credentialBindings": "绑定凭证",
       "credentialCurrentNoCredentials": "当前没有可用凭证",
       "credentialCurrentNone": "暂无当前凭证信息",
@@ -258,6 +262,8 @@
       "credentialEditTitle": "编辑凭证配置",
       "credentialEmpty": "暂无凭证，请先认证或手动添加。",
       "credentialExpired": "已过期凭证",
+      "credentialRateLimitRelease": "解除限制",
+      "credentialRateLimitedUntil": "限流中，{time} 自动解除",
       "credentialUpstreamProtocol": "上游协议",
       "credentialUpstreamProtocolHelp": "Chat 将请求发送到 Chat Completions；Responses 会将所有受支持的下游接口转换为上游 Responses 协议。",
       "credentialUpstreamChat": "Chat",
@@ -382,6 +388,8 @@
       "copyEndpoint": "API 端点已复制。",
       "credentialDeleteFailed": "删除凭证失败。",
       "credentialDeleted": "凭证已删除。",
+      "credentialLimitReleaseFailed": "解除账号限流失败。",
+      "credentialLimitReleased": "已解除账号限流：{name}",
       "credentialRequired": "Bearer Token 不能为空。",
       "credentialSaveFailed": "添加凭证失败。",
       "credentialSaved": "凭证已保存：{name}",
@@ -515,5 +523,16 @@
       "waitingForPasskey": "正在等待已保存的 passkey...",
       "usernameLabel": "用户名"
     }
+  },
+  "usage": {
+    "emptyCalls": "暂无调用数据",
+    "emptyTokens": "暂无 Token 数据",
+    "emptyCredits": "暂无积分数据（等待额度采样）",
+    "metricCalls": "调用次数",
+    "metricTokens": "Token 用量",
+    "metricCredits": "消耗积分（估算）",
+    "callTrend": "调用趋势",
+    "tokenTrend": "Token 趋势",
+    "creditTrend": "积分消耗趋势（按额度采样估算）"
   }
 }

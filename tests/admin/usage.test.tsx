@@ -45,6 +45,8 @@ const renderUsage = () => {
               autoRefreshSeconds: 15,
               autoRefreshVisible: false,
               callSeries: [],
+              creditSeries: [],
+              creditSummary: 0,
               credentialRows: [
                 {
                   cacheHitTokens: 30,

@@ -1775,6 +1775,7 @@ export const handleResponsesRequest = async (
       : await resolveProxyContext(
           request,
           typeof body.model === 'string' ? body.model : undefined,
+          body,
         );
     const proxyContext = storedPreviousSession?.upstreamProtocol
       ? {
@@ -1786,8 +1787,10 @@ export const handleResponsesRequest = async (
         }
       : resolvedProxyContext;
 
-    const scopedBody =
-      typeof body.model !== 'string' || !body.model.trim()
+    const aliasResolvedModel = proxyContext.resolvedModel?.trim();
+    const scopedBody = aliasResolvedModel
+      ? { ...body, model: aliasResolvedModel }
+      : typeof body.model !== 'string' || !body.model.trim()
         ? {
             ...body,
             model:

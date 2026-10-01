@@ -1,11 +1,21 @@
 import crypto from 'node:crypto';
 
 import { readStorageJsonResult, writeStorageJson } from '../storage';
+import {
+  areModelAliasesEqual,
+  normalizeModelAliases,
+  type ModelAliases,
+} from './model-aliases';
 
 export interface AccessKeyRecord {
   createdAt: string;
   credentialFilenames: string[];
   id: string;
+  /**
+   * Optional per-key model aliases (`alias -> real upstream model name`). Older
+   * records have no such field and behave exactly as before.
+   */
+  modelAliases?: ModelAliases;
   name: string;
   secret: string;
   updatedAt: string;
@@ -16,6 +26,7 @@ export interface AccessKeySummary {
   credentialFilenames: string[];
   id: string;
   maskedSecret: string;
+  modelAliases: ModelAliases;
   name: string;
   updatedAt: string;
 }
@@ -86,9 +97,22 @@ const pruneAccessKeyStore = async (
         changed = true;
       }
 
+      const modelAliases =
+        record.modelAliases === undefined
+          ? undefined
+          : normalizeModelAliases(record.modelAliases);
+
+      if (
+        modelAliases !== undefined &&
+        !areModelAliasesEqual(record.modelAliases ?? {}, modelAliases)
+      ) {
+        changed = true;
+      }
+
       return {
         ...record,
         credentialFilenames: remainingFilenames,
+        modelAliases,
       };
     }),
   );
@@ -216,6 +240,7 @@ const toSummary = (record: AccessKeyRecord): AccessKeySummary => {
     credentialFilenames: [...record.credentialFilenames],
     id: record.id,
     maskedSecret: maskSecret(record.secret),
+    modelAliases: { ...(record.modelAliases ?? {}) },
     name: record.name,
     updatedAt: record.updatedAt,
   };
@@ -246,6 +271,9 @@ export const listStoredAccessKeys = async (): Promise<AccessKeyRecord[]> => {
   return (await readAccessKeyStore()).accessKeys.map((item) => ({
     ...item,
     credentialFilenames: [...item.credentialFilenames],
+    ...(item.modelAliases === undefined
+      ? {}
+      : { modelAliases: { ...item.modelAliases } }),
   }));
 };
 
@@ -274,9 +302,11 @@ export const findAccessKeyBySecret = async (
 
 export const createAccessKey = async ({
   credentialFilenames,
+  modelAliases,
   name,
 }: {
   credentialFilenames: string[];
+  modelAliases?: ModelAliases;
   name: string;
 }): Promise<{
   access_key: AccessKeySummary;
@@ -285,6 +315,7 @@ export const createAccessKey = async ({
   const trimmedName = name.trim();
   const normalizedCredentialFilenames =
     normalizeCredentialFilenames(credentialFilenames);
+  const normalizedModelAliases = normalizeModelAliases(modelAliases ?? {});
 
   if (!trimmedName) {
     throw new Error('Access key name is required');
@@ -296,6 +327,9 @@ export const createAccessKey = async ({
       createdAt: now,
       credentialFilenames: normalizedCredentialFilenames,
       id: crypto.randomUUID(),
+      ...(Object.keys(normalizedModelAliases).length
+        ? { modelAliases: normalizedModelAliases }
+        : {}),
       name: trimmedName,
       secret: generateSecret(),
       updatedAt: now,
@@ -313,15 +347,18 @@ export const updateAccessKey = async (
   id: string,
   {
     credentialFilenames,
+    modelAliases,
     name,
   }: {
     credentialFilenames: string[];
+    modelAliases?: ModelAliases;
     name: string;
   },
 ): Promise<AccessKeySummary> => {
   const trimmedName = name.trim();
   const normalizedCredentialFilenames =
     normalizeCredentialFilenames(credentialFilenames);
+  const normalizedModelAliases = normalizeModelAliases(modelAliases ?? {});
 
   if (!trimmedName) {
     throw new Error('Access key name is required');
@@ -337,6 +374,12 @@ export const updateAccessKey = async (
     record.name = trimmedName;
     record.credentialFilenames = normalizedCredentialFilenames;
     record.updatedAt = new Date().toISOString();
+
+    if (Object.keys(normalizedModelAliases).length) {
+      record.modelAliases = normalizedModelAliases;
+    } else {
+      delete record.modelAliases;
+    }
 
     return toSummary(record);
   });

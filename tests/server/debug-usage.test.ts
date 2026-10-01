@@ -24,6 +24,7 @@ import {
 import {
   clearUsageHistory,
   getUsageAnalytics,
+  recordQuotaUsageDelta,
   recordUsageEvent,
   resetUsageHistory,
 } from '@/lib/server/domain/usage';
@@ -662,6 +663,38 @@ describe('debug and usage persistence', () => {
     expect(
       (await getUsageAnalytics({ range: 'today' })).rangeSummary.callCount,
     ).toBe(2);
+  });
+
+  it('keeps quota rows out of the request totals and reports them as credits', async () => {
+    await recordUsageEvent({
+      conversationId: 'conversation-1',
+      model: 'gpt-test',
+      promptChars: 42,
+      route: '/v1/chat/completions',
+      usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+    });
+    await recordQuotaUsageDelta({
+      credentialFilename: 'primary.json',
+      credits: 7,
+      observedAt: new Date().toISOString(),
+    });
+
+    const analytics = await getUsageAnalytics({ range: 'today' });
+
+    // The quota row carries credits in `totalTokens`; counting it as a request
+    // would inflate both the call count and the token totals.
+    expect(analytics.rangeSummary).toMatchObject({
+      callCount: 1,
+      totalTokens: 15,
+    });
+    expect(analytics.creditSummary).toBe(7);
+    expect(analytics.creditSeries).toHaveLength(1);
+    expect(
+      analytics.creditSeries[0].points.some((point) => point.credits === 7),
+    ).toBe(true);
+    expect(analytics.tableRows.map((row) => row.model)).not.toContain(
+      'credits',
+    );
   });
 
   it('uses append-only SQLite events for debug and usage records', async () => {

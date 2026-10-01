@@ -13,6 +13,7 @@ import {
   writeStorageJson,
 } from '../storage';
 import { logEvent } from '../shared/log';
+import type { RateLimitKind } from '../shared/rate-limit';
 
 export type CredentialData = Record<string, unknown> & {
   access_token?: string;
@@ -43,6 +44,20 @@ export interface CredentialRecord {
   filename: string;
 }
 
+/**
+ * Runtime health mark for a credential that the upstream rejected with a rate
+ * limit. Kept out of the credential document itself so user data stays clean.
+ */
+export interface CredentialLimitEntry {
+  code: number | null;
+  hits: number;
+  kind: RateLimitKind;
+  observedAt: number;
+  reason: string | null;
+  resumeAt: number;
+  status: number;
+}
+
 interface ManagerState {
   globalNextFilename: string | null;
   keyNextFilenameByAccessKeyId: Record<string, string | null>;
@@ -53,6 +68,7 @@ interface ManagerState {
       updatedAt: number;
     }
   >;
+  limitedCredentials: Record<string, CredentialLimitEntry>;
 }
 
 const globalCredentialState = globalThis as typeof globalThis & {
@@ -116,6 +132,69 @@ const pruneAffinityAssignments = (
   );
 };
 
+/**
+ * Drops malformed and already expired rate limit marks. Expiry is evaluated on
+ * every read, so a credential rejoins the rotation without an explicit action.
+ */
+const pruneLimitedCredentials = (
+  entries: unknown,
+  now: number = Date.now(),
+): ManagerState['limitedCredentials'] => {
+  if (!entries || typeof entries !== 'object') {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(entries as Record<string, unknown>).flatMap(
+      ([filename, value]) => {
+        const record = value as Partial<CredentialLimitEntry> | null;
+
+        if (!filename || !record || typeof record !== 'object') {
+          return [];
+        }
+
+        const resumeAt = Number(record.resumeAt);
+
+        if (!Number.isFinite(resumeAt) || resumeAt <= now) {
+          return [];
+        }
+
+        const kind: RateLimitKind =
+          record.kind === 'quota' ? 'quota' : 'frequency';
+
+        return [
+          [
+            filename,
+            {
+              code:
+                typeof record.code === 'number' && Number.isFinite(record.code)
+                  ? record.code
+                  : null,
+              hits:
+                typeof record.hits === 'number' && Number.isFinite(record.hits)
+                  ? record.hits
+                  : 1,
+              kind,
+              observedAt:
+                typeof record.observedAt === 'number' &&
+                Number.isFinite(record.observedAt)
+                  ? record.observedAt
+                  : now,
+              reason: typeof record.reason === 'string' ? record.reason : null,
+              resumeAt,
+              status:
+                typeof record.status === 'number' &&
+                Number.isFinite(record.status)
+                  ? record.status
+                  : 429,
+            } satisfies CredentialLimitEntry,
+          ] as const,
+        ];
+      },
+    ),
+  );
+};
+
 const getRuntimeState = async (): Promise<ManagerState> => {
   if (!globalCredentialState.__codebuddy2apiCredentialState__) {
     const persisted = await loadPersistedManagerState();
@@ -126,10 +205,14 @@ const getRuntimeState = async (): Promise<ManagerState> => {
       globalNextFilename: persisted.globalNextFilename ?? null,
       keyNextFilenameByAccessKeyId:
         persisted.keyNextFilenameByAccessKeyId ?? {},
+      limitedCredentials: pruneLimitedCredentials(persisted.limitedCredentials),
     };
   }
 
-  return globalCredentialState.__codebuddy2apiCredentialState__;
+  const state = globalCredentialState.__codebuddy2apiCredentialState__;
+  state.limitedCredentials = pruneLimitedCredentials(state.limitedCredentials);
+
+  return state;
 };
 
 const saveRuntimeState = async (): Promise<void> => {
@@ -137,10 +220,12 @@ const saveRuntimeState = async (): Promise<void> => {
   state.affinityAssignmentsByKey = pruneAffinityAssignments(
     state.affinityAssignmentsByKey,
   );
+  state.limitedCredentials = pruneLimitedCredentials(state.limitedCredentials);
   await writeStorageJson('credentials', 'manager_state.json', {
     affinityAssignmentsByKey: state.affinityAssignmentsByKey,
     globalNextFilename: state.globalNextFilename,
     keyNextFilenameByAccessKeyId: state.keyNextFilenameByAccessKeyId,
+    limitedCredentials: state.limitedCredentials,
     savedAt: Math.floor(Date.now() / 1000),
   });
 };
@@ -396,6 +481,105 @@ export const listEligibleCredentialRecords = async (
   );
 };
 
+export const listCredentialLimits = async (): Promise<
+  Array<CredentialLimitEntry & { filename: string }>
+> => {
+  const state = await getRuntimeState();
+
+  return Object.entries(state.limitedCredentials).map(([filename, entry]) => ({
+    filename,
+    ...entry,
+  }));
+};
+
+/**
+ * Records that the upstream rejected requests for this credential with a rate
+ * limit. The mark expires on its own at `resumeAt`, which is the instant the
+ * upstream reported (or a bounded fallback when it reported none).
+ */
+export const markCredentialLimited = async ({
+  code = null,
+  filename,
+  kind,
+  reason = null,
+  resumeAt,
+  status,
+}: {
+  code?: number | null;
+  filename: string;
+  kind: RateLimitKind;
+  reason?: string | null;
+  resumeAt: number;
+  status: number;
+}): Promise<CredentialLimitEntry> => {
+  const state = await getRuntimeState();
+  const now = Date.now();
+  const existing = state.limitedCredentials[filename];
+  // Never shorten an already observed cooldown window.
+  const resolvedResumeAt = Math.max(existing?.resumeAt ?? 0, resumeAt);
+  const entry: CredentialLimitEntry = {
+    code,
+    hits: (existing?.hits ?? 0) + 1,
+    kind,
+    observedAt: now,
+    reason,
+    resumeAt: resolvedResumeAt,
+    status,
+  };
+
+  state.limitedCredentials[filename] = entry;
+  scheduleRuntimeStateSave();
+
+  void logEvent({
+    level: 'WARN',
+    message: 'Credential rate limited',
+    payload: {
+      code,
+      credentialFilename: filename,
+      hits: entry.hits,
+      kind,
+      reason,
+      resumeAt: new Date(resolvedResumeAt).toISOString(),
+      resumeInMs: resolvedResumeAt - now,
+      status,
+    },
+  });
+
+  return entry;
+};
+
+export const clearCredentialLimits = async (
+  filenames?: string[],
+): Promise<number> => {
+  const state = await getRuntimeState();
+  const targets = filenames?.length
+    ? filenames.filter((filename) => filename in state.limitedCredentials)
+    : Object.keys(state.limitedCredentials);
+
+  if (!targets.length) {
+    return 0;
+  }
+
+  targets.forEach((filename) => {
+    delete state.limitedCredentials[filename];
+  });
+  scheduleRuntimeStateSave();
+
+  void logEvent({
+    level: 'INFO',
+    message: 'Credential rate limit cleared',
+    payload: {
+      count: targets.length,
+      filenames: targets,
+    },
+  });
+
+  return targets.length;
+};
+
+export const isCredentialLimited = async (filename: string): Promise<boolean> =>
+  Boolean((await getRuntimeState()).limitedCredentials[filename]);
+
 const chooseNextRecord = (
   eligibleRecords: CredentialRecord[],
   nextFilename: string | null,
@@ -435,6 +619,7 @@ export const listCredentials = async (): Promise<{
   credentials: Array<Record<string, unknown>>;
 }> => {
   const records = await readCredentialRecords();
+  const limitedCredentials = (await getRuntimeState()).limitedCredentials;
 
   return {
     credentials: records.map((record, index) => {
@@ -443,6 +628,7 @@ export const listCredentials = async (): Promise<{
         'enterprise_id',
         'enterpriseId',
       ]);
+      const limitEntry = limitedCredentials[record.filename] ?? null;
       const tenantId =
         getNestedValue(record.data, ['tenant_id', 'tenantId']) ?? enterpriseId;
 
@@ -465,6 +651,13 @@ export const listCredentials = async (): Promise<{
         name:
           (record.data.user_info as Record<string, unknown> | undefined)
             ?.name ?? null,
+        rate_limited_hits: limitEntry?.hits ?? 0,
+        rate_limited_kind: limitEntry?.kind ?? null,
+        rate_limited_reason: limitEntry?.reason ?? null,
+        // Seconds, like `created_at` / `expires_at` in this payload.
+        rate_limited_until: limitEntry
+          ? Math.floor(limitEntry.resumeAt / 1000)
+          : null,
         scope: record.data.scope ?? null,
         session_state: record.data.session_state ?? null,
         tenant_id: tenantId,
@@ -602,6 +795,9 @@ export const addCredential = async (
   };
 
   await writeStorageJson('credentials', jsonFilename, payload);
+  // Saving a credential is an explicit human action (re-login, fix), so drop a
+  // previous rate limit mark and let the credential rejoin the rotation.
+  await clearCredentialLimits([jsonFilename]);
   await saveRuntimeState();
 
   return {
@@ -639,6 +835,7 @@ export const deleteCredentialByIndex = async (
       delete state.affinityAssignmentsByKey[key];
     }
   });
+  delete state.limitedCredentials[deletedFilename];
   await saveRuntimeState();
 
   return { message: 'Credential deleted', success: true };
@@ -715,11 +912,13 @@ export const resolveCredentialForRequest = async ({
   accessKeyId,
   affinityKey,
   allowedCredentialFilenames,
+  excludeCredentialFilenames,
   model,
 }: {
   accessKeyId?: string;
   affinityKey?: string;
   allowedCredentialFilenames?: string[];
+  excludeCredentialFilenames?: string[];
   model?: string;
 } = {}): Promise<CredentialRecord | null> => {
   const records = await readCredentialRecords();
@@ -757,9 +956,68 @@ export const resolveCredentialForRequest = async ({
     state.affinityAssignmentsByKey,
   );
 
+  // Credentials already tried inside the same client request are excluded, so a
+  // rotation retry never lands on the same account again.
+  const excludedFilenames = new Set(excludeCredentialFilenames ?? []);
+  const rotatableRecords = excludedFilenames.size
+    ? eligibleRecords.filter(
+        (record) => !excludedFilenames.has(record.filename),
+      )
+    : eligibleRecords;
+
+  if (!rotatableRecords.length) {
+    void logEvent({
+      level: 'WARN',
+      message: 'No credential left for rotation retry',
+      payload: {
+        accessKeyId: accessKeyId ?? null,
+        excludedFilenames: [...excludedFilenames],
+        model: requestedModel ?? null,
+      },
+    });
+
+    return null;
+  }
+
+  // Rate limited credentials stay out of the rotation until their mark expires.
+  // Affinity is intentionally evaluated against the filtered pool: a pinned
+  // conversation on a throttled credential is reassigned on the next request.
+  const limitedCredentials = state.limitedCredentials;
+  const availableRecords = rotatableRecords.filter(
+    (record) => !limitedCredentials[record.filename],
+  );
+  const limitedCandidates = rotatableRecords.length - availableRecords.length;
+  // Every otherwise eligible credential is cooling down: reuse the one that
+  // recovers first instead of failing the request outright.
+  const allLimited = availableRecords.length === 0;
+  const selectionPool = allLimited
+    ? [...rotatableRecords].sort(
+        (left, right) =>
+          (limitedCredentials[left.filename]?.resumeAt ?? 0) -
+          (limitedCredentials[right.filename]?.resumeAt ?? 0),
+      )
+    : availableRecords;
+
+  if (allLimited) {
+    void logEvent({
+      level: 'WARN',
+      message: 'All eligible credentials are rate limited',
+      payload: {
+        accessKeyId: accessKeyId ?? null,
+        affinityKey: affinityKey ?? null,
+        earliestResumeAt: new Date(
+          limitedCredentials[selectionPool[0].filename]?.resumeAt ?? Date.now(),
+        ).toISOString(),
+        limitedCandidates,
+        model: requestedModel ?? null,
+        selectedCredentialFilename: selectionPool[0].filename,
+      },
+    });
+  }
+
   if (affinityKey) {
     const assignment = state.affinityAssignmentsByKey[affinityKey];
-    const assignedRecord = eligibleRecords.find(
+    const assignedRecord = selectionPool.find(
       (record) => record.filename === assignment?.credentialFilename,
     );
 
@@ -776,8 +1034,9 @@ export const resolveCredentialForRequest = async ({
           accessKeyId: accessKeyId ?? null,
           affinityHit: true,
           affinityKey,
-          candidateCount: eligibleRecords.length,
+          candidateCount: selectionPool.length,
           credentialFilename: assignedRecord.filename,
+          limitedCandidates,
           credentialUserId: String(assignedRecord.data.user_id ?? 'unknown'),
           model: requestedModel ?? null,
         },
@@ -795,7 +1054,7 @@ export const resolveCredentialForRequest = async ({
     ? (state.keyNextFilenameByAccessKeyId[accessKeyId] ?? null)
     : state.globalNextFilename;
   const { current, nextFilename } = chooseNextRecord(
-    eligibleRecords,
+    selectionPool,
     currentNextFilename,
   );
 
@@ -820,9 +1079,10 @@ export const resolveCredentialForRequest = async ({
       accessKeyId: accessKeyId ?? null,
       affinityHit: false,
       affinityKey: affinityKey ?? null,
-      candidateCount: eligibleRecords.length,
+      candidateCount: selectionPool.length,
       credentialFilename: current.filename,
       credentialUserId: String(current.data.user_id ?? 'unknown'),
+      limitedCandidates,
       model: requestedModel ?? null,
       rotatedFrom: currentNextFilename,
     },

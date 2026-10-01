@@ -6,6 +6,7 @@ import {
   Globe2,
   Pencil,
   Save,
+  ShieldOff,
   Trash2,
   UserRound,
   X,
@@ -28,6 +29,7 @@ interface CredentialCardProps {
   onCredentialUpstreamProtocolChange: (value: 'chat' | 'responses') => void;
   onDelete: () => void;
   onEdit: () => void;
+  onReleaseCredentialLimit: () => void;
   onResetCredentialForm: () => void;
   onSaveCredential: () => void;
 }
@@ -41,6 +43,7 @@ export const CredentialCard = ({
   onCredentialUpstreamProtocolChange,
   onDelete,
   onEdit,
+  onReleaseCredentialLimit,
   onResetCredentialForm,
   onSaveCredential,
 }: CredentialCardProps) => {
@@ -66,6 +69,16 @@ export const CredentialCard = ({
   const avatarText = (credential.name ?? credential.email ?? credential.user_id)
     .slice(0, 1)
     .toUpperCase();
+  // The API only returns a mark while it is still active, so presence is the
+  // state; no clock read during render.
+  const rateLimitReleaseAt =
+    typeof credential.rate_limited_until === 'number'
+      ? credential.rate_limited_until * 1000
+      : null;
+  const isRateLimited = rateLimitReleaseAt !== null;
+  const rateLimitReleaseTime = rateLimitReleaseAt
+    ? new Date(rateLimitReleaseAt).toLocaleString(locale)
+    : '';
 
   return (
     <Block
@@ -84,6 +97,11 @@ export const CredentialCard = ({
               {credential.filename}
             </div>
             <Tag color={badge.color}>{badge.label}</Tag>
+            {isRateLimited ? (
+              <Tag color="orange">
+                {text('credentials.credentialBadgeRateLimited')}
+              </Tag>
+            ) : null}
           </div>
           <div className="flex flex-wrap gap-4 text-sm text-secondary">
             <span className="flex items-center gap-1">
@@ -120,6 +138,21 @@ export const CredentialCard = ({
                 : text('credentials.credentialRoleKeepDeveloper')}
             </Tag>
           </div>
+          {isRateLimited ? (
+            <div className="credential-card-limit flex flex-wrap items-center gap-3 py-2">
+              <span
+                className="text-sm text-secondary"
+                title={credential.rate_limited_reason ?? undefined}
+              >
+                {text('credentials.credentialRateLimitedUntil', {
+                  time: rateLimitReleaseTime,
+                })}
+              </span>
+              <Button icon={ShieldOff} onClick={onReleaseCredentialLimit}>
+                {text('credentials.credentialRateLimitRelease')}
+              </Button>
+            </div>
+          ) : null}
         </div>
         <div className="credential-card-actions flex gap-2 shrink-0">
           <Button icon={Pencil} onClick={onEdit} type="primary">

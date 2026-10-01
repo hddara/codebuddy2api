@@ -36,6 +36,23 @@ export interface UsageChartSeries {
   points: UsageBucketPoint[];
 }
 
+export interface UsageCreditPoint {
+  callCount: number;
+  credits: number;
+  label: string;
+  start: string;
+}
+
+export interface UsageCreditSeries {
+  color: string;
+  model: string;
+  points: UsageCreditPoint[];
+}
+
+type UsageChartMetric = 'callCount' | 'credits' | 'totalTokens';
+
+type UsageChartPoint = UsageBucketPoint | UsageCreditPoint;
+
 export interface UsageTableRow {
   callCount: number;
   cacheHitTokens: number;
@@ -80,13 +97,15 @@ export interface UsageState {
   autoRefreshSeconds: number;
   autoRefreshVisible: boolean;
   callSeries: UsageChartSeries[];
+  creditSeries: UsageCreditSeries[];
+  creditSummary: number;
   credentialRows: CredentialUsageRow[];
   filters: {
     accessKeys: UsageFilterOption[];
     credentials: UsageFilterOption[];
   };
   hoveredPoint: {
-    chart: 'calls' | 'tokens';
+    chart: 'calls' | 'credits' | 'tokens';
     label: string;
     metricLabel: string;
     model: string;
@@ -109,6 +128,8 @@ export interface UsageState {
 export interface AdminUsageSnapshot {
   callSeries: UsageChartSeries[];
   autoRefreshSeconds?: number;
+  creditSeries: UsageCreditSeries[];
+  creditSummary: number;
   filters: UsageState['filters'];
   range: UsageRange;
   request?: UsageFiltersState;
@@ -127,6 +148,8 @@ export const defaultUsageState: UsageState = {
   autoRefreshSeconds: 15,
   autoRefreshVisible: true,
   callSeries: [],
+  creditSeries: [],
+  creditSummary: 0,
   credentialRows: [],
   filters: { accessKeys: [], credentials: [] },
   hoveredPoint: null,
@@ -147,6 +170,8 @@ export const createUsageState = (initialData: UsageInitialData): UsageState => {
       initialData.usage?.autoRefreshSeconds ??
       defaultUsageState.autoRefreshSeconds,
     callSeries: initialData.usage?.callSeries ?? [],
+    creditSeries: initialData.usage?.creditSeries ?? [],
+    creditSummary: initialData.usage?.creditSummary ?? 0,
     credentialRows: initialData.usage?.credentialRows ?? [],
     filters: initialData.usage?.filters ?? defaultUsageState.filters,
     lastUpdatedAt: initialData.usage?.updatedAtLabel ?? '',
@@ -257,16 +282,16 @@ const UsageChart = ({
   series,
   title,
 }: {
-  chart: 'calls' | 'tokens';
+  chart: 'calls' | 'credits' | 'tokens';
   chartWidth: number;
   emptyLabel: string;
   hoveredPoint: UsageState['hoveredPoint'];
   icon: LucideIcon;
   locale: string;
-  metric: 'callCount' | 'totalTokens';
+  metric: UsageChartMetric;
   metricLabel: string;
   onHoverPoint: (point: UsageState['hoveredPoint']) => void;
-  series: UsageChartSeries[];
+  series: Array<{ color: string; model: string; points: UsageChartPoint[] }>;
   title: string;
 }) => {
   const height = 260;
@@ -275,9 +300,13 @@ const UsageChart = ({
   const pointCount = labels.length;
   const chartWidth = width - padding.left - padding.right;
   const chartHeight = height - padding.top - padding.bottom;
+  const readMetric = (point: UsageChartPoint): number =>
+    metric === 'credits'
+      ? ((point as UsageCreditPoint).credits ?? 0)
+      : ((point as UsageBucketPoint)[metric] ?? 0);
   const largestValue = Math.max(
     1,
-    ...series.flatMap((item) => item.points.map((point) => point[metric])),
+    ...series.flatMap((item) => item.points.map((point) => readMetric(point))),
   );
   const gridStep = Math.max(5, Math.ceil(largestValue / 20) * 5);
   const gridStepCount = Math.ceil(largestValue / gridStep);
@@ -340,7 +369,7 @@ const UsageChart = ({
                 const color = item.color;
                 const points = item.points.map((point, index) => ({
                   x: getX(index),
-                  y: getY(point[metric]),
+                  y: getY(readMetric(point)),
                 }));
                 return (
                   <g key={item.model}>
@@ -354,7 +383,7 @@ const UsageChart = ({
                       vectorEffect="non-scaling-stroke"
                     />
                     {item.points.map((point, index) => {
-                      const value = point[metric];
+                      const value = readMetric(point);
                       const x = getX(index);
                       const y = getY(value);
                       const hover = () =>
@@ -857,6 +886,19 @@ const Usage = () => {
           series={usage.tokenSeries}
           title={translations('tokenTrend')}
         />
+        <UsageChart
+          chart="credits"
+          chartWidth={1000}
+          emptyLabel={translations('emptyCredits')}
+          hoveredPoint={usage.hoveredPoint}
+          icon={Coins}
+          locale={locale}
+          metric="credits"
+          metricLabel={translations('metricCredits')}
+          onHoverPoint={onHoverPoint}
+          series={usage.creditSeries}
+          title={translations('creditTrend')}
+        />
       </div>
       <div className="usage-chart-mobile grid gap-6 mb-6">
         <UsageChart
@@ -884,6 +926,19 @@ const Usage = () => {
           onHoverPoint={onHoverPoint}
           series={usage.tokenSeries}
           title={translations('tokenTrend')}
+        />
+        <UsageChart
+          chart="credits"
+          chartWidth={320}
+          emptyLabel={translations('emptyCredits')}
+          hoveredPoint={usage.hoveredPoint}
+          icon={Coins}
+          locale={locale}
+          metric="credits"
+          metricLabel={translations('metricCredits')}
+          onHoverPoint={onHoverPoint}
+          series={usage.creditSeries}
+          title={translations('creditTrend')}
         />
       </div>
       <Block

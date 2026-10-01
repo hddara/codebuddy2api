@@ -230,6 +230,9 @@
       "accessKeyExampleName": "例: Claude Team / CI Runner",
       "accessKeyHelp": "secret はサーバー側で自動生成されます。ここでは名前と紐付ける認証情報のみ変更できます。",
       "accessKeyLabel": "API key",
+      "accessKeyModelAliases": "モデルの別名",
+      "accessKeyModelAliasesHelp": "1 行に 1 件、別名=実モデル名 の形式で記述します。例: deepseek-v4.1-flash-a=deepseek-v4.1-flash。別名で来たリクエストは実モデル名で上流へ送信され、認証情報の選択にも実モデル名が使われます。",
+      "accessKeyModelAliasesPlaceholder": "deepseek-v4.1-flash-a=deepseek-v4.1-flash",
       "accessKeyName": "API key 名",
       "accessKeyUpdatedAt": "更新: {value}",
       "autoAuthDescription": "CodeBuddy OAuth フローを開始すると、サインイン完了後にコンソールが認証情報を自動保存します。",
@@ -250,6 +253,7 @@
       "credentialBadgeActive": "有効",
       "credentialBadgeExpired": "期限切れ",
       "credentialBadgeNext": "次のローテーション",
+      "credentialBadgeRateLimited": "制限中",
       "credentialBindings": "紐付け認証情報",
       "currentNoCredentials": "現在利用可能な認証情報はありません。",
       "currentNone": "現在の認証情報状態はまだありません。",
@@ -262,6 +266,8 @@
       "credentialEditTitle": "認証情報設定を編集",
       "credentialEmpty": "認証情報がありません。先に認証するか手動で追加してください。",
       "credentialExpired": "期限切れの認証情報",
+      "credentialRateLimitRelease": "制限を解除",
+      "credentialRateLimitedUntil": "制限中、{time} に自動解除",
       "credentialUpstreamProtocol": "上流プロトコル",
       "credentialUpstreamProtocolHelp": "Chat は Chat Completions に送信します。Responses は対応するすべての下流 API を上流の Responses プロトコルに変換します。",
       "credentialUpstreamChat": "Chat",
@@ -386,6 +392,8 @@
       "copyEndpoint": "API エンドポイントをコピーしました。",
       "credentialDeleteFailed": "認証情報の削除に失敗しました。",
       "credentialDeleted": "認証情報を削除しました。",
+      "credentialLimitReleaseFailed": "アカウントの制限解除に失敗しました。",
+      "credentialLimitReleased": "アカウントの制限を解除しました: {name}",
       "credentialRequired": "Bearer Token を入力してください。",
       "credentialSaveFailed": "認証情報の保存に失敗しました。",
       "credentialSaved": "認証情報を保存しました: {name}",
@@ -519,5 +527,16 @@
       "waitingForPasskey": "保存済み passkey を待っています...",
       "usernameLabel": "ユーザー名"
     }
+  },
+  "usage": {
+    "emptyCalls": "呼び出しデータがありません",
+    "emptyTokens": "トークンデータがありません",
+    "emptyCredits": "クレジットデータがありません（クォータ取得待ち）",
+    "metricCalls": "呼び出し回数",
+    "metricTokens": "トークン",
+    "metricCredits": "消費クレジット（推定）",
+    "callTrend": "呼び出し推移",
+    "tokenTrend": "トークン推移",
+    "creditTrend": "クレジット消費推移（クォータ取得による推定）"
   }
 }

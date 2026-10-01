@@ -39,6 +39,7 @@ import {
   type CredentialUsageRow,
   createUsageState,
   type UsageChartSeries,
+  type UsageCreditSeries,
   type UsageFilterOption,
   type UsageFiltersState,
   type UsageRange,
@@ -63,6 +64,10 @@ import { type TabKey } from '@/app/page-data';
 import { themeAtom, type ThemeMode } from '@/app/page-state';
 import { AdminHeader } from '@/app/header';
 import { themeChangeEventName } from '@/lib/theme';
+import {
+  formatModelAliasesText,
+  parseModelAliasesText,
+} from '@/lib/model-aliases-text';
 import { type LocalePreference } from '@/lib/i18n/routing';
 import {
   saveLocalePreference,
@@ -122,6 +127,8 @@ interface CurrentCredentialResponse {
 
 interface UsageResponse {
   callSeries?: UsageChartSeries[];
+  creditSeries?: UsageCreditSeries[];
+  creditSummary?: number;
   credentialRows?: Array<{
     cacheHitTokens?: number;
     callCount?: number;
@@ -778,6 +785,8 @@ const AdminPageLayoutContent = ({
       setUsage((current) => ({
         ...current,
         callSeries: result.data?.callSeries ?? [],
+        creditSeries: result.data?.creditSeries ?? [],
+        creditSummary: result.data?.creditSummary ?? 0,
         credentialRows: (result.data?.credentialRows ?? []).map(
           (row): CredentialUsageRow => ({
             cacheHitTokens: row.cacheHitTokens ?? 0,
@@ -1047,6 +1056,36 @@ const AdminPageLayoutContent = ({
     await refreshAdminData();
   };
 
+  const releaseCredentialLimit = async (filename: string) => {
+    const result = await requestJson<{ cleared?: number; success?: boolean }>(
+      '/admin-api/credentials/limits',
+      {
+        body: JSON.stringify({ filename }),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        method: 'POST',
+      },
+    );
+
+    if (!result.ok || !result.data?.success) {
+      showNotification(
+        'error',
+        getErrorMessage(
+          result.data,
+          consoleMessages.credentialLimitReleaseFailed,
+        ),
+      );
+      return;
+    }
+
+    showNotification(
+      'success',
+      translations('console.credentialLimitReleased', { name: filename }),
+    );
+    await refreshCredentialList();
+  };
+
   const deleteCredential = async (index: number) => {
     setCredentials((current) => ({
       ...current,
@@ -1081,7 +1120,8 @@ const AdminPageLayoutContent = ({
   };
 
   const saveAccessKey = async () => {
-    const { credentialFilenames, editingId, name } = credentials.accessKeyForm;
+    const { credentialFilenames, editingId, modelAliasesText, name } =
+      credentials.accessKeyForm;
 
     setCredentials((current) => ({
       ...current,
@@ -1098,6 +1138,7 @@ const AdminPageLayoutContent = ({
     }>(endpoint, {
       body: JSON.stringify({
         credential_filenames: credentialFilenames,
+        model_aliases: parseModelAliasesText(modelAliasesText),
         name,
       }),
       headers: {
@@ -1130,6 +1171,7 @@ const AdminPageLayoutContent = ({
       accessKeyForm: {
         credentialFilenames: [],
         editingId: null,
+        modelAliasesText: '',
         name: '',
       },
       revealedSecret:
@@ -1721,6 +1763,7 @@ const AdminPageLayoutContent = ({
                     accessKeyForm: {
                       credentialFilenames: [],
                       editingId: null,
+                      modelAliasesText: '',
                       name: '',
                     },
                   }));
@@ -1821,6 +1864,9 @@ const AdminPageLayoutContent = ({
                           ),
                       ),
                       editingId: accessKey.id,
+                      modelAliasesText: formatModelAliasesText(
+                        accessKey.modelAliases,
+                      ),
                       name: accessKey.name,
                     },
                   }));
@@ -1844,6 +1890,9 @@ const AdminPageLayoutContent = ({
                 },
                 onRefreshCredentialList: () => {
                   void refreshCredentialList();
+                },
+                onReleaseCredentialLimit: (filename: string) => {
+                  void releaseCredentialLimit(filename);
                 },
                 onResetCredentialForm: () => {
                   setCredentials((current) => ({
@@ -1896,6 +1945,15 @@ const AdminPageLayoutContent = ({
                     };
                   });
                 },
+                onUpdateAccessKeyModelAliases: (value) => {
+                  setCredentials((current) => ({
+                    ...current,
+                    accessKeyForm: {
+                      ...current.accessKeyForm,
+                      modelAliasesText: value,
+                    },
+                  }));
+                },
                 onUpdateAccessKeyName: (value) => {
                   setCredentials((current) => ({
                     ...current,
@@ -1912,6 +1970,7 @@ const AdminPageLayoutContent = ({
                     accessKeyForm: {
                       credentialFilenames: [],
                       editingId: null,
+                      modelAliasesText: '',
                       name: '',
                     },
                   }));

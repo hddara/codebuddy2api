@@ -18,6 +18,7 @@ interface CredentialGroupProps {
   onCredentialUpstreamProtocolChange: (value: 'chat' | 'responses') => void;
   onDelete: (index: number) => void;
   onEdit: (credential: CredentialSummary) => void;
+  onReleaseCredentialLimit: (filename: string) => void;
   onResetCredentialForm: () => void;
   onSaveCredential: () => void;
   title?: string;
@@ -32,6 +33,7 @@ export const CredentialGroup = ({
   onCredentialUpstreamProtocolChange,
   onDelete,
   onEdit,
+  onReleaseCredentialLimit,
   onResetCredentialForm,
   onSaveCredential,
   title,
@@ -57,6 +59,9 @@ export const CredentialGroup = ({
           }
           onDelete={() => onDelete(credential.index)}
           onEdit={() => onEdit(credential)}
+          onReleaseCredentialLimit={() =>
+            onReleaseCredentialLimit(credential.filename)
+          }
           onResetCredentialForm={onResetCredentialForm}
           onSaveCredential={onSaveCredential}
         />

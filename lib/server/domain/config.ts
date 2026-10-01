@@ -17,11 +17,13 @@ export interface RuntimeConfig {
   CODEBUDDY_AUTH_MODE: 'auto' | 'token';
   CODEBUDDY_AUTO_CHECKIN_ENABLED: string;
   CODEBUDDY_AUTO_CHECKIN_TIME: string;
+  CODEBUDDY_CREDENTIAL_LIMIT_HOURS: string;
   CODEBUDDY_INTERNET_ENVIRONMENT: 'ioa' | 'internal' | 'public';
   CODEBUDDY_LOG_LEVEL: string;
 }
 
 export const DEFAULT_CHECKIN_TIME = '00:30';
+export const DEFAULT_CREDENTIAL_LIMIT_HOURS = 12;
 
 export type ConfigLabelLocale = 'zh-CN' | 'en-US' | 'ja-JP';
 
@@ -33,6 +35,7 @@ const DEFAULT_CONFIG: RuntimeConfig = {
   CODEBUDDY_AUTH_MODE: 'auto',
   CODEBUDDY_AUTO_CHECKIN_ENABLED: 'false',
   CODEBUDDY_AUTO_CHECKIN_TIME: DEFAULT_CHECKIN_TIME,
+  CODEBUDDY_CREDENTIAL_LIMIT_HOURS: String(DEFAULT_CREDENTIAL_LIMIT_HOURS),
   CODEBUDDY_INTERNET_ENVIRONMENT: 'ioa',
   CODEBUDDY_LOG_LEVEL: 'INFO',
 };
@@ -49,6 +52,8 @@ const SETTING_LABELS_BY_LOCALE: Record<
     CODEBUDDY_AUTO_CHECKIN_ENABLED: 'Automatic daily check-in (true/false)',
     CODEBUDDY_AUTO_CHECKIN_TIME:
       'Automatic check-in time (HH:mm, server local)',
+    CODEBUDDY_CREDENTIAL_LIMIT_HOURS:
+      'Auto-release a rate limited credential after (hours)',
     CODEBUDDY_INTERNET_ENVIRONMENT: 'Network environment (internal/ioa/public)',
     CODEBUDDY_LOG_LEVEL: 'Log level',
   },
@@ -59,6 +64,8 @@ const SETTING_LABELS_BY_LOCALE: Record<
     CODEBUDDY_AUTO_CHECKIN_ENABLED: '毎日の自動チェックイン (true/false)',
     CODEBUDDY_AUTO_CHECKIN_TIME:
       '自動チェックイン時刻 (HH:mm・サーバーローカル)',
+    CODEBUDDY_CREDENTIAL_LIMIT_HOURS:
+      'レート制限されたアカウントの自動解除時間 (時間)',
     CODEBUDDY_INTERNET_ENVIRONMENT: 'ネットワーク環境 (internal/ioa/public)',
     CODEBUDDY_LOG_LEVEL: 'ログレベル',
   },
@@ -68,6 +75,7 @@ const SETTING_LABELS_BY_LOCALE: Record<
     CODEBUDDY_AUTH_MODE: '认证模式 (auto/token)',
     CODEBUDDY_AUTO_CHECKIN_ENABLED: '每日自动签到 (true/false)',
     CODEBUDDY_AUTO_CHECKIN_TIME: '自动签到时间 (HH:mm，服务器本地时间)',
+    CODEBUDDY_CREDENTIAL_LIMIT_HOURS: '账户限流自动解除时长 (小时)',
     CODEBUDDY_INTERNET_ENVIRONMENT: '网络环境 (internal/ioa/public)',
     CODEBUDDY_LOG_LEVEL: '日志级别',
   },
@@ -143,6 +151,11 @@ export const getActiveConfig = async (): Promise<RuntimeConfig> => {
       persisted.CODEBUDDY_AUTO_CHECKIN_TIME ??
         process.env.CODEBUDDY_AUTO_CHECKIN_TIME,
     ),
+    CODEBUDDY_CREDENTIAL_LIMIT_HOURS: normalizeValue(
+      'CODEBUDDY_CREDENTIAL_LIMIT_HOURS',
+      persisted.CODEBUDDY_CREDENTIAL_LIMIT_HOURS ??
+        process.env.CODEBUDDY_CREDENTIAL_LIMIT_HOURS,
+    ),
     CODEBUDDY_INTERNET_ENVIRONMENT: normalizeValue(
       'CODEBUDDY_INTERNET_ENVIRONMENT',
       persisted.CODEBUDDY_INTERNET_ENVIRONMENT ??
@@ -194,6 +207,25 @@ export const getCodeBuddyApiEndpoint = async (): Promise<string> => {
   return config.CODEBUDDY_INTERNET_ENVIRONMENT === 'public'
     ? 'https://www.codebuddy.ai'
     : 'https://copilot.tencent.com';
+};
+
+/**
+ * Longest time a rate limited credential may stay excluded from rotation. The
+ * upstream usually reports its own reset instant; this is the ceiling applied
+ * on top of it (and the fallback when the report cannot be parsed).
+ */
+export const getCredentialLimitCooldownMs = async (): Promise<number> => {
+  const config = await getActiveConfig();
+  const hours = Number(config.CODEBUDDY_CREDENTIAL_LIMIT_HOURS);
+
+  return (
+    (Number.isFinite(hours) && hours > 0
+      ? hours
+      : DEFAULT_CREDENTIAL_LIMIT_HOURS) *
+    60 *
+    60 *
+    1000
+  );
 };
 
 export const getDefaultModel = async (

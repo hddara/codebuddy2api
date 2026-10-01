@@ -57,10 +57,13 @@ export class DrizzleSqliteDatabaseStorageAdapter implements DatabaseStorageAdapt
             cacheCreationTokens: number;
             cacheReadTokens: number;
             callCount: number;
+            completionChars: number;
+            conversationId: string | null;
             credentialFilename: string | null;
             inputTokens: number;
             model: string;
             outputTokens: number;
+            promptChars: number;
             route: string;
             totalTokens: number;
           }),
@@ -86,10 +89,13 @@ export class DrizzleSqliteDatabaseStorageAdapter implements DatabaseStorageAdapt
         cacheCreationTokens: row.cacheCreationTokens,
         cacheReadTokens: row.cacheReadTokens,
         callCount: row.callCount,
+        completionChars: row.completionChars,
+        conversationId: row.conversationId,
         credentialFilename: row.credentialFilename,
         inputTokens: row.inputTokens,
         model: row.model,
         outputTokens: row.outputTokens,
+        promptChars: row.promptChars,
         route: row.route,
         timestamp: row.occurredAt.toISOString(),
         totalTokens: row.totalTokens,

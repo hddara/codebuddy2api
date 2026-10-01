@@ -15,13 +15,15 @@ describe('storage schemas', () => {
     expect(getPostgresTableConfig(schema.documents).primaryKeys).toHaveLength(
       1,
     );
-    expect(getPostgresTableConfig(schema.usageEvents).indexes).toHaveLength(3);
+    // occurred_at, credential, access key, conversation (session grouping).
+    expect(getPostgresTableConfig(schema.usageEvents).indexes).toHaveLength(4);
     expect(getPostgresTableConfig(schema.debugLogs).indexes).toHaveLength(1);
   });
 
   it('defines SQLite documents and indexed event tables', () => {
     expect(getSqliteTableConfig(sqliteDocuments).primaryKeys).toHaveLength(1);
-    expect(getSqliteTableConfig(sqliteUsageEvents).indexes).toHaveLength(3);
+    // occurred_at, credential, access key, conversation (session grouping).
+    expect(getSqliteTableConfig(sqliteUsageEvents).indexes).toHaveLength(4);
     expect(getSqliteTableConfig(sqliteDebugLogs).indexes).toHaveLength(1);
   });
 });

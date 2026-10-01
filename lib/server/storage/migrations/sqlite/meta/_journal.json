@@ -15,6 +15,13 @@
       "when": 1784448000000,
       "tag": "0001_debug_log_metrics",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1785542400000,
+      "tag": "0002_usage_request_details",
+      "breakpoints": true
     }
   ]
 }

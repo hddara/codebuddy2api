@@ -52,3 +52,4 @@ docker run -d --name codebuddy2api --restart unless-stopped -p 8001:8001 \
 | `CODEBUDDY_ADMIN_PASSKEY_RP_ID`         | 管理者 Passkey の hostname                         | `example.com`                                    |
 | `CODEBUDDY_AUTO_CHECKIN_ENABLED`        | 毎日の自動チェックインを有効にする                 | `true` / `false`。既定値は `false`               |
 | `CODEBUDDY_AUTO_CHECKIN_TIME`           | 自動チェックイン時刻（サーバーローカル）           | `HH:mm`。既定値は `00:30`                        |
+| `CODEBUDDY_CREDENTIAL_LIMIT_HOURS`      | 制限されたアカウントの自動解除時間                 | 時間数。既定値は `12`                            |

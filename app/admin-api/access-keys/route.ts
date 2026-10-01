@@ -3,7 +3,16 @@ import {
   listAccessKeys,
 } from '@/lib/server/domain/access-keys';
 import { getAdminSessionErrorResponse } from '@/lib/server/admin/session';
-import { listCredentialFilenames } from '@/lib/server/domain/credentials';
+import {
+  getCredentialSupportedModels,
+  listCredentialFilenames,
+  readCredentialRecords,
+} from '@/lib/server/domain/credentials';
+import {
+  assertModelAliasTargets,
+  normalizeModelAliases,
+  type ModelAliases,
+} from '@/lib/server/domain/model-aliases';
 import { getJsonBody } from '@/lib/server/shared/http';
 
 export const runtime = 'nodejs';
@@ -30,6 +39,29 @@ const validateCredentialFilenames = (
   return normalized;
 };
 
+const collectSupportedModels = async (
+  credentialFilenames: string[],
+): Promise<string[]> => {
+  const selected = new Set(credentialFilenames);
+
+  return [
+    ...new Set(
+      (await readCredentialRecords())
+        .filter((record) => selected.has(record.filename))
+        .flatMap((record) => getCredentialSupportedModels(record.data)),
+    ),
+  ];
+};
+
+const validateModelAliases = (
+  modelAliases: unknown,
+  supportedModels: string[],
+): ModelAliases => {
+  const aliases = normalizeModelAliases(modelAliases);
+  assertModelAliasTargets(aliases, supportedModels);
+  return aliases;
+};
+
 export const GET = async (request: Request): Promise<Response> => {
   const authError = await getAdminSessionErrorResponse(request);
 
@@ -49,15 +81,21 @@ export const POST = async (request: Request): Promise<Response> => {
 
   const body = await getJsonBody<{
     credential_filenames?: unknown;
+    model_aliases?: unknown;
     name?: unknown;
   }>(request);
   const availableCredentialFilenames = await listCredentialFilenames();
 
   try {
+    const credentialFilenames = validateCredentialFilenames(
+      body.credential_filenames,
+      availableCredentialFilenames,
+    );
     const created = await createAccessKey({
-      credentialFilenames: validateCredentialFilenames(
-        body.credential_filenames,
-        availableCredentialFilenames,
+      credentialFilenames,
+      modelAliases: validateModelAliases(
+        body.model_aliases,
+        await collectSupportedModels(credentialFilenames),
       ),
       name: typeof body.name === 'string' ? body.name : '',
     });

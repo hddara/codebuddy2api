@@ -52,3 +52,4 @@ SQLite 文件默认位于容器内的 `/app/.codebuddy_data/storage.sqlite`。�
 | `CODEBUDDY_ADMIN_PASSKEY_RP_ID`         | 管理员 Passkey 使用的 hostname         | `example.com`                                    |
 | `CODEBUDDY_AUTO_CHECKIN_ENABLED`        | 是否每天自动签到                       | `true` / `false`，默认 `false`                   |
 | `CODEBUDDY_AUTO_CHECKIN_TIME`           | 自动签到时间（服务器本地时间）         | `HH:mm`，默认 `00:30`                            |
+| `CODEBUDDY_CREDENTIAL_LIMIT_HOURS`      | 账号被上游限流后的自动解除时长（小时） | 数字，默认 `12`                                  |

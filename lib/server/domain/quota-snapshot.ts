@@ -1,15 +1,18 @@
 import { logEvent } from '../shared/log';
 import { getAccountStatus } from './account-status';
+import { recordQuotaUsageDelta } from './usage';
 
 /**
  * Periodic quota sampling. The upstream quota endpoint is only queried when an
  * operator opens the account status page, which produces isolated observations
  * and makes the reset cadence impossible to read. Sampling every credential on
  * a fixed interval turns the raw payload captured by `account-status` into a
- * usable series.
+ * usable series, and the remainder of each package is what the credit estimate
+ * is derived from.
  *
- * Each run also emits one compact summary line per credential so the allowance
- * movement can be read without parsing the full payloads.
+ * Each run emits one compact summary line per credential so the allowance
+ * movement can be read without parsing the full payloads, plus the per-package
+ * breakdown that the account-level totals cannot express.
  */
 
 const ENABLED_ENV = 'CODEBUDDY_QUOTA_SNAPSHOT_ENABLED';
@@ -77,6 +80,78 @@ const clearTimer = (runtime: QuotaSnapshotRuntime): void => {
   }
 };
 
+/**
+ * Remainder observed on the previous run, keyed by credential and package.
+ * The upstream endpoint reports cumulative consumption only, so a request
+ * cannot be priced on its own; the change between two samples is the closest
+ * available measure of what was spent in between.
+ */
+const lastObservedRemainder = new Map<string, number>();
+
+const remainderKey = (filename: string, packageName: string | null): string =>
+  `${filename}::${packageName ?? 'unknown'}`;
+
+const packageSummary = (
+  packages:
+    | Array<{
+        capacityRemain: number | null;
+        packageName: string | null;
+      }>
+    | undefined
+    | null,
+): Record<string, number | null> => {
+  const summary: Record<string, number | null> = {};
+
+  for (const item of packages ?? []) {
+    const name = item.packageName ?? 'unknown';
+
+    summary[name] = item.capacityRemain;
+  }
+
+  return summary;
+};
+
+/**
+ * Credits spent since the previous sample, per credential. Packages are summed
+ * because a request does not record which package paid for it; the estimate is
+ * therefore an account-level figure and is labelled as such in the charts.
+ */
+const collectConsumedSinceLastSample = (
+  filename: string,
+  packages:
+    | Array<{
+        capacityRemain: number | null;
+        packageName: string | null;
+        status: number | null;
+      }>
+    | undefined
+    | null,
+): number => {
+  let consumed = 0;
+
+  // A snapshot can arrive without a package list (older stored shapes, mocked
+  // callers, a failed upstream parse). Treat that as "nothing observed" rather
+  // than letting the sampler throw and lose the whole run.
+  for (const item of packages ?? []) {
+    if (item.status === 3 || item.capacityRemain === null) {
+      continue;
+    }
+
+    const key = remainderKey(filename, item.packageName);
+    const previous = lastObservedRemainder.get(key);
+
+    // A negative delta means the package was topped up or rolled into a new
+    // cycle, which is not consumption and must not be counted as such.
+    if (previous !== undefined && previous > item.capacityRemain) {
+      consumed += previous - item.capacityRemain;
+    }
+
+    lastObservedRemainder.set(key, item.capacityRemain);
+  }
+
+  return consumed;
+};
+
 export const getQuotaSnapshotStatus = (): QuotaSnapshotStatus => {
   const runtime = getRuntime();
 
@@ -107,6 +182,19 @@ export const captureQuotaSnapshots = async (
     const snapshots = await getAccountStatus();
 
     for (const snapshot of snapshots) {
+      const consumedSinceLastSample = collectConsumedSinceLastSample(
+        snapshot.filename,
+        snapshot.credits.packages,
+      );
+
+      if (consumedSinceLastSample > 0) {
+        await recordQuotaUsageDelta({
+          credentialFilename: snapshot.filename,
+          credits: consumedSinceLastSample,
+          observedAt: snapshot.queriedAt,
+        });
+      }
+
       void logEvent({
         level: 'INFO',
         message: 'Quota snapshot',
@@ -118,6 +206,10 @@ export const captureQuotaSnapshots = async (
           remaining: snapshot.credits.remaining,
           plan: snapshot.credits.plan,
           resetAt: snapshot.credits.resetAt,
+          usablePackageCount: snapshot.credits.usablePackageCount ?? null,
+          packageCount: snapshot.credits.packages?.length ?? 0,
+          consumedSinceLastSample,
+          packages: packageSummary(snapshot.credits.packages),
           error: snapshot.error,
           queriedAt: snapshot.queriedAt,
         },
@@ -185,4 +277,8 @@ export const runQuotaSnapshotNow = async (): Promise<QuotaSnapshotStatus> => {
   await scheduleQuotaSnapshots();
 
   return getQuotaSnapshotStatus();
+};
+
+export const resetQuotaSnapshotObservation = (): void => {
+  lastObservedRemainder.clear();
 };

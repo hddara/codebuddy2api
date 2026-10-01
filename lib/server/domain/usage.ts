@@ -46,10 +46,16 @@ export interface UsageEventRecord {
   cacheCreationTokens: number;
   cacheReadTokens: number;
   callCount: number;
+  /** Characters of the outgoing prompt, measured before the upstream call. */
+  completionChars: number;
+  /** Upstream conversation id (`x-conversation-id`), the session grouping key. */
+  conversationId: string | null;
   credentialFilename: string | null;
   inputTokens: number;
   model: string;
   outputTokens: number;
+  /** Characters returned to the caller. */
+  promptChars: number;
   route: string;
   timestamp: string;
   totalTokens: number;
@@ -63,6 +69,17 @@ interface UsageBucketTotals {
   callCount: number;
   cacheHitTokens: number;
   totalTokens: number;
+}
+
+export interface UsageCreditPoint extends UsageBucket {
+  callCount: number;
+  credits: number;
+}
+
+export interface UsageCreditSeries {
+  color: string;
+  model: string;
+  points: UsageCreditPoint[];
 }
 
 interface UsageBucket {
@@ -98,6 +115,13 @@ export interface UsageFilterOptions {
 
 export interface UsageAnalyticsResponse {
   callSeries: UsageChartSeries[];
+  /**
+   * Credits consumed per bucket, derived from quota samples rather than from
+   * the requests themselves, so it is an estimate and only populated where
+   * sampling has run.
+   */
+  creditSeries: UsageCreditSeries[];
+  creditSummary: number;
   credentialCallCounts: Record<string, number>;
   credentialRows: CredentialUsageRow[];
   filters: UsageFilterOptions;
@@ -188,10 +212,13 @@ const normalizeUsage = (usage: UsageSnapshot): UsageEventRecord => {
     cacheCreationTokens,
     cacheReadTokens,
     callCount: 1,
+    completionChars: 0,
+    conversationId: null,
     credentialFilename: null,
     inputTokens,
     model: 'unknown',
     outputTokens,
+    promptChars: 0,
     route: '',
     timestamp: new Date().toISOString(),
     totalTokens,
@@ -222,6 +249,11 @@ const normalizeStoredEvent = (value: unknown): UsageEventRecord | null => {
     cacheCreationTokens: toNumber(record.cacheCreationTokens),
     cacheReadTokens: toNumber(record.cacheReadTokens),
     callCount: Math.max(1, Math.floor(toNumber(record.callCount) || 1)),
+    completionChars: toNumber(record.completionChars),
+    conversationId:
+      typeof record.conversationId === 'string' && record.conversationId
+        ? record.conversationId
+        : null,
     credentialFilename:
       typeof record.credentialFilename === 'string'
         ? record.credentialFilename
@@ -229,6 +261,7 @@ const normalizeStoredEvent = (value: unknown): UsageEventRecord | null => {
     inputTokens: toNumber(record.inputTokens),
     model: record.model.trim() || 'unknown',
     outputTokens: toNumber(record.outputTokens),
+    promptChars: toNumber(record.promptChars),
     route: record.route,
     timestamp: record.timestamp,
     totalTokens: toNumber(record.totalTokens),
@@ -565,16 +598,22 @@ const mergeFilterOptions = (
 export const recordUsageEvent = async ({
   accessKeyId,
   accessKeyName,
+  completionChars,
+  conversationId,
   credentialFilename,
   model,
+  promptChars,
   route,
   timestamp,
   usage,
 }: {
   accessKeyId?: string | null;
   accessKeyName?: string | null;
+  completionChars?: number;
+  conversationId?: string | null;
   credentialFilename?: string | null;
   model: string;
+  promptChars?: number;
   route: string;
   timestamp?: string;
   usage: UsageSnapshot | null | undefined;
@@ -588,8 +627,11 @@ export const recordUsageEvent = async ({
     ...base,
     accessKeyId: accessKeyId ?? null,
     accessKeyName: accessKeyName ?? null,
+    completionChars: Math.max(0, Math.floor(completionChars ?? 0)),
+    conversationId: conversationId ?? null,
     credentialFilename: credentialFilename ?? null,
     model: model.trim() || 'unknown',
+    promptChars: Math.max(0, Math.floor(promptChars ?? 0)),
     route,
     timestamp: timestamp ?? new Date().toISOString(),
   });
@@ -641,6 +683,8 @@ export const getUsageAnalytics = async ({
     const credentialRowsByFilename = new Map<string, UsageBucketTotals>();
     const credentialCallCounts: Record<string, number> = {};
     const rangeSummary = createEmptyTotals();
+    const creditBuckets = Array.from({ length: buckets.length }, () => 0);
+    let creditSummary = 0;
     const { endMs, startMs } = getRangeWindow(range, now);
 
     store.events.forEach((event) => {
@@ -667,6 +711,15 @@ export const getUsageAnalytics = async ({
       const bucketIndex = getBucketIndex(range, eventMs, now);
 
       if (bucketIndex < 0) {
+        return;
+      }
+
+      // Quota rows carry credits in `totalTokens` and must stay out of the
+      // request-shaped aggregates, or every call count and token total would be
+      // inflated by the sampling itself.
+      if (event.route === QUOTA_SNAPSHOT_ROUTE) {
+        creditBuckets[bucketIndex] += event.totalTokens;
+        creditSummary += event.totalTokens;
         return;
       }
 
@@ -779,6 +832,19 @@ export const getUsageAnalytics = async ({
 
     return {
       callSeries: toSeries(callSeriesByModel, modelColors),
+      creditSeries: [
+        {
+          color: '#a855f7',
+          model: 'credits',
+          points: creditBuckets.map((credits, index) => ({
+            callCount: 0,
+            credits,
+            label: buckets[index].label,
+            start: buckets[index].start,
+          })),
+        },
+      ],
+      creditSummary,
       credentialCallCounts,
       credentialRows: [...credentialRowsByFilename.entries()]
         .map(([credentialFilename, totals]) => ({
@@ -829,4 +895,45 @@ export const getUsageAnalytics = async ({
 
 export const resetUsageHistory = async (): Promise<void> => {
   await clearUsageHistory();
+};
+
+/**
+ * Credits spent, as observed by comparing two quota samples.
+ *
+ * The upstream quota endpoint reports cumulative package consumption and never
+ * a per-request figure, so a single call cannot be priced on its own. The
+ * difference between two samples is recorded as its own row instead of being
+ * written back onto the requests it covers: rows stay append-only, and the
+ * estimate is explicit rather than blended into the per-request data.
+ *
+ * Consumers must treat these rows as estimates and keep them out of the request
+ * totals, which is why they carry their own route.
+ */
+export const QUOTA_SNAPSHOT_ROUTE = 'quota-snapshot';
+
+export const recordQuotaUsageDelta = async ({
+  credentialFilename,
+  credits,
+  observedAt,
+}: {
+  credentialFilename: string;
+  credits: number;
+  observedAt: string;
+}): Promise<void> => {
+  if (!(credits > 0)) {
+    return;
+  }
+
+  await recordUsageEvent({
+    credentialFilename,
+    model: 'credits',
+    route: QUOTA_SNAPSHOT_ROUTE,
+    timestamp: observedAt,
+    usage: {
+      completion_tokens: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: Math.round(credits),
+    },
+  });
 };

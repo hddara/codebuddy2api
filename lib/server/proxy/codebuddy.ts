@@ -1,7 +1,11 @@
 import type { NextRequest } from 'next/server';
 
 import { resolveRequestAccessKey } from './auth';
-import { getCodeBuddyApiEndpoint, getDefaultModel } from '../domain/config';
+import {
+  getCodeBuddyApiEndpoint,
+  getCredentialLimitCooldownMs,
+  getDefaultModel,
+} from '../domain/config';
 import {
   type CredentialData,
   type CredentialRecord,
@@ -10,6 +14,7 @@ import {
   getCredentialSupportedModels,
   getCredentialProxySettings,
   listEligibleCredentialRecords,
+  markCredentialLimited,
   resolveCredentialForRequest,
 } from '../domain/credentials';
 import {
@@ -19,8 +24,10 @@ import {
   setDebugUpstreamRequest,
   type DebugTrace,
 } from '../domain/debug';
+import { resolveModelAlias } from '../domain/model-aliases';
 import { createErrorResponse, getRequestHeaderMap } from '../shared/http';
 import { logEvent, summarizeLogHeaders, truncateLogText } from '../shared/log';
+import { parseRateLimitSignal } from '../shared/rate-limit';
 import { recordUsageEvent, type UsageSnapshot } from '../domain/usage';
 
 interface OpenAIMessage {
@@ -38,6 +45,8 @@ interface CacheableTextBlock {
 
 const MIN_AUTO_CACHE_TEXT_LENGTH = 1024;
 const MAX_STREAM_FRAME_LENGTH = 1_000_000;
+/** One in-request rotation: original credential plus one alternative. */
+const MAX_UPSTREAM_ATTEMPTS = 2;
 const CODEBUDDY_CLI_VERSION = '2.137.1';
 const CODEBUDDY_USER_AGENT = `CLI/${CODEBUDDY_CLI_VERSION} CodeBuddy/${CODEBUDDY_CLI_VERSION}`;
 
@@ -117,12 +126,48 @@ export interface ProxyContext {
   accessKeyName: string | null;
   auth: ResolvedAuth;
   credentialFilename: string | null;
+  /**
+   * Model name the client asked for, before the access key alias table is
+   * applied. `null` when the caller sent no model at all.
+   */
+  requestedModel?: string | null;
+  /**
+   * Model name that must be sent upstream (the alias target when the access key
+   * declares one). Credential filtering and usage accounting both use this name.
+   */
+  resolvedModel?: string | null;
+  /**
+   * Measured once at the request entry point. The usage recorders run inside
+   * stream callbacks that no longer hold the request or body, so anything the
+   * usage rows need from the request has to travel on the context.
+   */
+  requestDetails: ProxyRequestDetails;
   preferences: {
     firstMessageRoleToSystem: boolean;
     firstSystemMessageRoleToUser: boolean;
     upstreamProtocol: 'chat' | 'responses';
   };
 }
+
+export interface ProxyRequestDetails {
+  /** Upstream conversation id, present when the caller sends `x-conversation-id`. */
+  conversationId: string | null;
+  /** Characters of the prompt as sent upstream. */
+  promptChars: number;
+}
+
+const toProxyRequestDetails = (
+  request: NextRequest,
+  body?: object,
+): ProxyRequestDetails => {
+  const incoming = getRequestHeaderMap(request.headers);
+  const conversationId = incoming['x-conversation-id']?.trim();
+
+  return {
+    conversationId: conversationId ? conversationId : null,
+    promptChars: body ? measurePromptChars(body) : 0,
+  };
+};
 
 export interface DiscoveredModel {
   displayName: string;
@@ -156,11 +201,13 @@ const toUsageSnapshot = (usage: unknown): UsageSnapshot | null => {
 };
 
 const recordProxyUsage = async ({
+  completionChars,
   model,
   proxyContext,
   route,
   usage,
 }: {
+  completionChars?: number;
   model: string;
   proxyContext: ProxyContext;
   route: string;
@@ -169,12 +216,55 @@ const recordProxyUsage = async ({
   await recordUsageEvent({
     accessKeyId: proxyContext.accessKeyId,
     accessKeyName: proxyContext.accessKeyName,
+    completionChars: completionChars ?? 0,
+    conversationId: proxyContext.requestDetails.conversationId,
     credentialFilename: proxyContext.credentialFilename,
     model,
+    promptChars: proxyContext.requestDetails.promptChars,
     route,
     usage: toUsageSnapshot(usage) ?? {},
   });
 };
+
+/**
+ * Counts the characters the caller sends and receives. Token counts come from
+ * upstream, but they carry no notion of the conversation, so the raw sizes are
+ * what ties a usage row back to a session.
+ */
+const countMessageChars = (value: unknown): number => {
+  if (typeof value === 'string') {
+    return value.length;
+  }
+
+  if (!Array.isArray(value)) {
+    return 0;
+  }
+
+  return value.reduce((total, item) => {
+    const record =
+      item && typeof item === 'object'
+        ? (item as Record<string, unknown>)
+        : null;
+
+    if (!record) {
+      return total;
+    }
+
+    return (
+      total + countMessageChars(record.text ?? record.content ?? record.data)
+    );
+  }, 0);
+};
+
+const measurePromptChars = (body: Record<string, unknown> | object): number => {
+  const record = body as Record<string, unknown>;
+  const messages = record.messages ?? record.input;
+
+  return countMessageChars(messages);
+};
+
+const measureCompletionChars = (text: unknown): number =>
+  typeof text === 'string' ? text.length : 0;
 
 const extractResponsesUsage = (value: unknown): unknown => {
   if (!value || typeof value !== 'object') {
@@ -506,6 +596,7 @@ const trackResponsesUsageStream = async ({
 };
 
 const logUpstreamFailure = ({
+  attempt,
   credentialFilename,
   detail,
   elapsedMs,
@@ -517,6 +608,7 @@ const logUpstreamFailure = ({
   stream,
   url,
 }: {
+  attempt?: number;
   credentialFilename?: string | null;
   detail?: string;
   elapsedMs?: number;
@@ -532,6 +624,10 @@ const logUpstreamFailure = ({
     route,
     url,
   };
+
+  if (typeof attempt === 'number') {
+    payload.attempt = attempt;
+  }
 
   if (credentialFilename) {
     payload.credentialFilename = credentialFilename;
@@ -572,6 +668,220 @@ const logUpstreamFailure = ({
     message: 'Upstream request failed',
     payload,
   });
+};
+
+/**
+ * Marks the credential behind a failed upstream call as rate limited so the
+ * next request rotates away from it. Only HTTP 429 counts: treating 5xx or
+ * network failures as limits would blacklist every credential on an upstream
+ * outage.
+ *
+ * When `allowRotation` is set, the same client request continues on another
+ * credential. The upstream answers 429 before any byte reaches the caller, so
+ * both streaming and non-streaming requests can be retried safely.
+ */
+const handleUpstreamRateLimit = async ({
+  allowRotation,
+  context,
+  detail,
+  model,
+  request,
+  requestBody,
+  responseHeaders,
+  status,
+  triedFilenames,
+}: {
+  allowRotation: boolean;
+  context: ProxyContext;
+  detail: string;
+  model?: string;
+  request: NextRequest;
+  requestBody?: object;
+  responseHeaders: Headers;
+  status: number;
+  triedFilenames: string[];
+}): Promise<ProxyContext | null> => {
+  const signal = parseRateLimitSignal({
+    detail,
+    maxCooldownMs: await getCredentialLimitCooldownMs(),
+    retryAfter: responseHeaders.get('retry-after'),
+    status,
+  });
+
+  if (!signal) {
+    return null;
+  }
+
+  if (context.credentialFilename) {
+    try {
+      await markCredentialLimited({
+        code: signal.code,
+        filename: context.credentialFilename,
+        kind: signal.kind,
+        reason: signal.reason,
+        resumeAt: signal.resumeAt,
+        status,
+      });
+    } catch (error) {
+      void logEvent({
+        level: 'WARN',
+        message: 'Failed to mark credential as rate limited',
+        payload: {
+          credentialFilename: context.credentialFilename,
+          error,
+          status,
+        },
+      });
+    }
+  }
+
+  if (!allowRotation) {
+    return null;
+  }
+
+  try {
+    const nextContext = await resolveProxyContext(request, model, requestBody, {
+      excludeCredentialFilenames: triedFilenames,
+    });
+
+    void logEvent({
+      level: 'WARN',
+      message: 'Retrying upstream request with another credential',
+      payload: {
+        fromCredentialFilename: context.credentialFilename,
+        resumeAt: new Date(signal.resumeAt).toISOString(),
+        triedCredentialFilenames: triedFilenames,
+        toCredentialFilename: nextContext.credentialFilename,
+      },
+    });
+
+    return nextContext;
+  } catch (error) {
+    void logEvent({
+      level: 'WARN',
+      message: 'No credential available for rotation retry',
+      payload: {
+        fromCredentialFilename: context.credentialFilename,
+        reason: error instanceof Error ? error.message : error,
+      },
+    });
+
+    return null;
+  }
+};
+
+interface UpstreamPlan {
+  body: unknown;
+  headers: Headers;
+  url: string;
+}
+
+interface UpstreamCallResult {
+  attempts: number;
+  context: ProxyContext;
+  detail?: string;
+  response: Response;
+}
+
+/**
+ * Calls the upstream and, while attempts remain, rotates to another credential
+ * whenever the answer is a rate limit. The result always carries the credential
+ * that produced the returned response, because the caller records usage and
+ * stream bindings against it.
+ */
+const fetchUpstreamWithRotation = async ({
+  buildPlan,
+  debugTrace,
+  initialContext,
+  model,
+  request,
+  requestBody,
+  rotationEnabled,
+  route,
+  stream,
+}: {
+  buildPlan: (context: ProxyContext) => Promise<UpstreamPlan>;
+  debugTrace?: DebugTrace;
+  initialContext: ProxyContext;
+  model?: string;
+  request: NextRequest;
+  requestBody?: object;
+  rotationEnabled: boolean;
+  route: string;
+  stream?: boolean;
+}): Promise<UpstreamCallResult> => {
+  const maxAttempts = rotationEnabled ? MAX_UPSTREAM_ATTEMPTS : 1;
+  const triedFilenames = initialContext.credentialFilename
+    ? [initialContext.credentialFilename]
+    : [];
+  let context = initialContext;
+  let attempts = 0;
+
+  for (;;) {
+    attempts += 1;
+    const plan = await buildPlan(context);
+    const startedAt = Date.now();
+    const response = enqueueUpstreamResponseSnapshot(
+      debugTrace,
+      await fetch(plan.url, {
+        body: JSON.stringify(plan.body),
+        cache: 'no-store',
+        headers: plan.headers,
+        method: 'POST',
+      }),
+    );
+
+    if (response.ok) {
+      logUpstreamSuccess({
+        credentialFilename: context.credentialFilename,
+        elapsedMs: Date.now() - startedAt,
+        model,
+        route,
+        status: response.status,
+        stream,
+        url: plan.url,
+      });
+
+      return { attempts, context, response };
+    }
+
+    const detail = await response.text();
+
+    logUpstreamFailure({
+      attempt: attempts,
+      credentialFilename: context.credentialFilename,
+      detail,
+      elapsedMs: Date.now() - startedAt,
+      model,
+      responseHeaders: response.headers,
+      route,
+      status: response.status,
+      stream,
+      url: plan.url,
+    });
+
+    const nextContext = await handleUpstreamRateLimit({
+      allowRotation: attempts < maxAttempts,
+      context,
+      detail,
+      model,
+      request,
+      requestBody,
+      responseHeaders: response.headers,
+      status: response.status,
+      triedFilenames,
+    });
+
+    if (!nextContext) {
+      return { attempts, context, detail, response };
+    }
+
+    if (nextContext.credentialFilename) {
+      triedFilenames.push(nextContext.credentialFilename);
+    }
+
+    context = nextContext;
+  }
 };
 
 const logUpstreamSuccess = ({
@@ -734,17 +1044,40 @@ const normalizeMessages = (
 export const resolveProxyContext = async (
   request: NextRequest,
   model?: string,
+  body?: object,
+  options?: { excludeCredentialFilenames?: string[] },
 ): Promise<ProxyContext> => {
   const accessKey = await resolveRequestAccessKey(request);
+  const requestedModel =
+    typeof model === 'string' && model.trim() ? model.trim() : null;
+  const resolvedModel = resolveModelAlias(accessKey?.modelAliases, model);
   const credential = await resolveCredentialForRequest({
     accessKeyId: accessKey?.id,
     affinityKey: getCredentialAffinityKey(request, accessKey?.id ?? null),
     allowedCredentialFilenames: accessKey?.credentialFilenames,
-    model,
+    excludeCredentialFilenames: options?.excludeCredentialFilenames,
+    model: resolvedModel,
   });
 
   if (!credential) {
     throw new Error('No valid CodeBuddy credentials found');
+  }
+
+  if (
+    requestedModel &&
+    resolvedModel &&
+    requestedModel !== resolvedModel.trim()
+  ) {
+    void logEvent({
+      level: 'INFO',
+      message: 'Model alias resolved',
+      payload: {
+        accessKeyId: accessKey?.id ?? null,
+        credentialFilename: credential.filename,
+        requestedModel,
+        resolvedModel,
+      },
+    });
   }
 
   const bearerToken = String(
@@ -766,6 +1099,9 @@ export const resolveProxyContext = async (
     },
     credentialFilename: credential.filename,
     preferences: getCredentialProxySettings(credential.data),
+    requestDetails: toProxyRequestDetails(request, body),
+    requestedModel,
+    resolvedModel: resolvedModel ?? null,
   };
 };
 
@@ -791,6 +1127,7 @@ export const createProxyContextFromCredential = (
     },
     credentialFilename: credential.filename,
     preferences: getCredentialProxySettings(credential.data),
+    requestDetails: { conversationId: null, promptChars: 0 },
   };
 };
 
@@ -959,9 +1296,10 @@ const buildUpstreamBody = async (
     context.auth.credentialData,
   );
   const model =
-    typeof body.model === 'string' && body.model.trim()
+    context.resolvedModel ??
+    (typeof body.model === 'string' && body.model.trim()
       ? body.model
-      : (credentialModels[0] ?? (await getDefaultModel()));
+      : (credentialModels[0] ?? (await getDefaultModel())));
 
   return {
     model,
@@ -2677,7 +3015,7 @@ export const proxyChatCompletions = async (
 
   try {
     const resolvedContext =
-      context ?? (await resolveProxyContext(request, body.model));
+      context ?? (await resolveProxyContext(request, body.model, body));
     setDebugTraceCredential(debugTrace, resolvedContext.credentialFilename);
     const upstreamBody = await buildUpstreamBody(body, resolvedContext);
 
@@ -2691,69 +3029,57 @@ export const proxyChatCompletions = async (
       }
       const apiEndpoint = await getCodeBuddyApiEndpoint();
       const upstreamUrl = `${apiEndpoint}/responses`;
-      const upstreamHeaders = new Headers(
-        await buildUpstreamHeaders(request, resolvedContext.auth),
-      );
-      const responsesBody = {
-        ...buildResponsesBodyFromChat(upstreamBody),
-        stream: Boolean(body.stream),
-      };
+      const upstreamCall = await fetchUpstreamWithRotation({
+        buildPlan: async (planContext) => {
+          const plan: UpstreamPlan = {
+            body: {
+              ...buildResponsesBodyFromChat(
+                await buildUpstreamBody(body, planContext),
+              ),
+              stream: Boolean(body.stream),
+            },
+            headers: new Headers(
+              await buildUpstreamHeaders(request, planContext.auth),
+            ),
+            url: upstreamUrl,
+          };
 
-      setDebugUpstreamRequest(debugTrace, {
-        body: responsesBody,
-        headers: headersToRecord(upstreamHeaders),
-        method: 'POST',
-        url: upstreamUrl,
-      });
+          setDebugUpstreamRequest(debugTrace, {
+            body: plan.body,
+            headers: headersToRecord(plan.headers),
+            method: 'POST',
+            url: plan.url,
+          });
 
-      const upstreamStartedAt = Date.now();
-      let upstreamResponse = await fetch(upstreamUrl, {
-        method: 'POST',
-        headers: upstreamHeaders,
-        body: JSON.stringify(responsesBody),
-        cache: 'no-store',
-      });
-      upstreamResponse = enqueueUpstreamResponseSnapshot(
+          return plan;
+        },
         debugTrace,
-        upstreamResponse,
-      );
+        initialContext: resolvedContext,
+        model: String(upstreamBody.model ?? '') || undefined,
+        request,
+        requestBody: body,
+        rotationEnabled: context === undefined,
+        route: usageRoute,
+        stream: Boolean(body.stream),
+      });
+      const activeContext = upstreamCall.context;
+      const upstreamResponse = upstreamCall.response;
+      setDebugTraceCredential(debugTrace, activeContext.credentialFilename);
 
       if (!upstreamResponse.ok) {
-        const detail = await upstreamResponse.text();
-        logUpstreamFailure({
-          credentialFilename: resolvedContext.credentialFilename,
-          detail,
-          elapsedMs: Date.now() - upstreamStartedAt,
-          model: String(upstreamBody.model ?? '') || undefined,
-          responseHeaders: upstreamResponse.headers,
-          route: usageRoute,
-          status: upstreamResponse.status,
-          stream: Boolean(body.stream),
-          url: upstreamUrl,
-        });
-        setDebugTraceError(debugTrace, detail);
+        setDebugTraceError(debugTrace, upstreamCall.detail);
         return createErrorResponse(
           upstreamResponse.status,
           'Upstream CodeBuddy request failed',
-          detail,
+          upstreamCall.detail,
         );
       }
-
-      logUpstreamSuccess({
-        credentialFilename: resolvedContext.credentialFilename,
-        elapsedMs: Date.now() - upstreamStartedAt,
-        model: String(upstreamBody.model ?? '') || undefined,
-        route: usageRoute,
-        status: upstreamResponse.status,
-        stream: Boolean(body.stream),
-        url: upstreamUrl,
-      });
 
       if (body.stream) {
         return mapResponsesStreamToChat(
           upstreamResponse,
           String(upstreamBody.model ?? 'unknown'),
-          resolvedContext,
+          activeContext,
           usageRoute,
           body.stop,
           Boolean(body.stream_options?.include_usage) ||
@@ -2767,7 +3093,7 @@ export const proxyChatCompletions = async (
       >;
       await recordProxyUsage({
         model: String(upstreamBody.model ?? 'unknown'),
-        proxyContext: resolvedContext,
+        proxyContext: activeContext,
         route: usageRoute,
         usage: payload.usage ?? null,
       });
@@ -2795,66 +3121,51 @@ export const proxyChatCompletions = async (
 
     const apiEndpoint = await getCodeBuddyApiEndpoint();
     const upstreamUrl = `${apiEndpoint}/v2/chat/completions`;
-    const upstreamHeaders = await buildUpstreamHeaders(
-      request,
-      resolvedContext.auth,
-    );
+    const upstreamCall = await fetchUpstreamWithRotation({
+      buildPlan: async (planContext) => {
+        const plan: UpstreamPlan = {
+          body: await buildUpstreamBody(body, planContext),
+          headers: new Headers(
+            await buildUpstreamHeaders(request, planContext.auth),
+          ),
+          url: upstreamUrl,
+        };
 
-    setDebugUpstreamRequest(debugTrace, {
-      body: upstreamBody,
-      headers: headersToRecord(upstreamHeaders),
-      method: 'POST',
-      url: upstreamUrl,
-    });
+        setDebugUpstreamRequest(debugTrace, {
+          body: plan.body,
+          headers: headersToRecord(plan.headers),
+          method: 'POST',
+          url: plan.url,
+        });
 
-    const upstreamStartedAt = Date.now();
-    let upstreamResponse = await fetch(upstreamUrl, {
-      method: 'POST',
-      headers: upstreamHeaders,
-      body: JSON.stringify(upstreamBody),
-      cache: 'no-store',
-    });
-
-    upstreamResponse = enqueueUpstreamResponseSnapshot(
+        return plan;
+      },
       debugTrace,
-      upstreamResponse,
-    );
+      initialContext: resolvedContext,
+      model: String(upstreamBody.model ?? '') || undefined,
+      request,
+      requestBody: body,
+      rotationEnabled: context === undefined,
+      route: usageRoute,
+      stream: Boolean(body.stream),
+    });
+    const activeContext = upstreamCall.context;
+    const upstreamResponse = upstreamCall.response;
+    setDebugTraceCredential(debugTrace, activeContext.credentialFilename);
 
     if (!upstreamResponse.ok) {
-      const detail = await upstreamResponse.text();
-      logUpstreamFailure({
-        credentialFilename: resolvedContext.credentialFilename,
-        detail,
-        elapsedMs: Date.now() - upstreamStartedAt,
-        model: String(upstreamBody.model ?? '') || undefined,
-        responseHeaders: upstreamResponse.headers,
-        route: usageRoute,
-        status: upstreamResponse.status,
-        stream: Boolean(body.stream),
-        url: upstreamUrl,
-      });
-      setDebugTraceError(debugTrace, detail);
+      setDebugTraceError(debugTrace, upstreamCall.detail);
       return createErrorResponse(
         upstreamResponse.status,
         'Upstream CodeBuddy request failed',
-        detail,
+        upstreamCall.detail,
       );
     }
-
-    logUpstreamSuccess({
-      credentialFilename: resolvedContext.credentialFilename,
-      elapsedMs: Date.now() - upstreamStartedAt,
-      model: String(upstreamBody.model ?? '') || undefined,
-      route: usageRoute,
-      status: upstreamResponse.status,
-      stream: Boolean(body.stream),
-      url: upstreamUrl,
-    });
 
     if (body.stream) {
       return normalizeStreamingResponse({
         model: String(upstreamBody.model ?? 'unknown'),
-        proxyContext: resolvedContext,
+        proxyContext: activeContext,
         route: usageRoute,
         upstreamResponse,
       });
@@ -2873,8 +3184,9 @@ export const proxyChatCompletions = async (
       }
 
       await recordProxyUsage({
+        completionChars: measureCompletionChars(payloadText),
         model: String(upstreamBody.model ?? 'unknown'),
-        proxyContext: resolvedContext,
+        proxyContext: activeContext,
         route: usageRoute,
         usage,
       });
@@ -2894,7 +3206,7 @@ export const proxyChatCompletions = async (
 
     await recordProxyUsage({
       model: aggregated.model,
-      proxyContext: resolvedContext,
+      proxyContext: activeContext,
       route: usageRoute,
       usage: aggregated.usage,
     });
@@ -2927,75 +3239,64 @@ export const proxyResponsesUpstream = async (
       (await resolveProxyContext(
         request,
         typeof body.model === 'string' ? body.model : undefined,
+        body,
       ));
     setDebugTraceCredential(debugTrace, resolvedContext.credentialFilename);
     const upstreamBody = {
       ...normalizeResponsesUpstreamBody(body),
       model:
-        typeof body.model === 'string' && body.model.trim()
+        resolvedContext.resolvedModel ??
+        (typeof body.model === 'string' && body.model.trim()
           ? body.model
-          : await getDefaultModel(),
+          : await getDefaultModel()),
     };
     const apiEndpoint = await getCodeBuddyApiEndpoint();
     const upstreamUrl = `${apiEndpoint}/responses`;
-    const upstreamHeaders = new Headers(
-      await buildUpstreamHeaders(request, resolvedContext.auth),
-    );
-
-    setDebugUpstreamRequest(debugTrace, {
-      body: upstreamBody,
-      headers: headersToRecord(upstreamHeaders),
-      method: 'POST',
-      url: upstreamUrl,
-    });
-
-    const upstreamStartedAt = Date.now();
     const upstreamStream = Boolean(
       (upstreamBody as { stream?: unknown }).stream,
     );
-    const upstreamModel = String(upstreamBody.model ?? '') || undefined;
-    let upstreamResponse = await fetch(upstreamUrl, {
-      method: 'POST',
-      headers: upstreamHeaders,
-      body: JSON.stringify(upstreamBody),
-      cache: 'no-store',
-    });
+    const upstreamCall = await fetchUpstreamWithRotation({
+      buildPlan: async (planContext) => {
+        const plan: UpstreamPlan = {
+          body: upstreamBody,
+          headers: new Headers(
+            await buildUpstreamHeaders(request, planContext.auth),
+          ),
+          url: upstreamUrl,
+        };
 
-    upstreamResponse = enqueueUpstreamResponseSnapshot(
+        setDebugUpstreamRequest(debugTrace, {
+          body: plan.body,
+          headers: headersToRecord(plan.headers),
+          method: 'POST',
+          url: plan.url,
+        });
+
+        return plan;
+      },
       debugTrace,
-      upstreamResponse,
+      initialContext: resolvedContext,
+      model: String(upstreamBody.model ?? '') || undefined,
+      request,
+      requestBody: body,
+      rotationEnabled: context === undefined,
+      route: '/v1/responses',
+      stream: upstreamStream,
+    });
+    const upstreamResponse = upstreamCall.response;
+    setDebugTraceCredential(
+      debugTrace,
+      upstreamCall.context.credentialFilename,
     );
 
     if (!upstreamResponse.ok) {
-      const detail = await upstreamResponse.text();
-      logUpstreamFailure({
-        credentialFilename: resolvedContext.credentialFilename,
-        detail,
-        elapsedMs: Date.now() - upstreamStartedAt,
-        model: upstreamModel,
-        responseHeaders: upstreamResponse.headers,
-        route: '/v1/responses',
-        status: upstreamResponse.status,
-        stream: upstreamStream,
-        url: upstreamUrl,
-      });
-      setDebugTraceError(debugTrace, detail);
+      setDebugTraceError(debugTrace, upstreamCall.detail);
       return createErrorResponse(
         upstreamResponse.status,
         'Upstream CodeBuddy request failed',
-        detail,
+        upstreamCall.detail,
       );
     }
-
-    logUpstreamSuccess({
-      credentialFilename: resolvedContext.credentialFilename,
-      elapsedMs: Date.now() - upstreamStartedAt,
-      model: upstreamModel,
-      route: '/v1/responses',
-      status: upstreamResponse.status,
-      stream: upstreamStream,
-      url: upstreamUrl,
-    });
 
     const model = String(upstreamBody.model ?? 'unknown');
     const fallbackUsage = parseUsageHeader(upstreamResponse);
@@ -3020,7 +3321,7 @@ export const proxyResponsesUpstream = async (
 
       await recordProxyUsage({
         model,
-        proxyContext: resolvedContext,
+        proxyContext: upstreamCall.context,
         route: '/v1/responses',
         usage,
       });
@@ -3036,14 +3337,14 @@ export const proxyResponsesUpstream = async (
         fallbackUsage,
         model,
         onResponseId,
-        proxyContext: resolvedContext,
+        proxyContext: upstreamCall.context,
         upstreamResponse,
       });
     }
 
     await recordProxyUsage({
       model,
-      proxyContext: resolvedContext,
+      proxyContext: upstreamCall.context,
       route: '/v1/responses',
       usage: fallbackUsage,
     });

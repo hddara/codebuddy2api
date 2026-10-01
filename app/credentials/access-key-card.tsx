@@ -1,4 +1,4 @@
-import { Block, Checkbox, Flexbox, Input, Tag } from '@lobehub/ui';
+import { Block, Checkbox, Flexbox, Input, Tag, TextArea } from '@lobehub/ui';
 import { Button } from '@lobehub/ui/base-ui';
 import { CalendarDays, Eye, Pencil, Save, Trash2, X } from 'lucide-react';
 import { useLocale, useTranslations } from 'next-intl';
@@ -24,6 +24,7 @@ interface AccessKeyCardProps {
   onRevealSecret?: () => void;
   onSaveAccessKey: () => void;
   onToggleCredentialSelection: (filename: string) => void;
+  onUpdateAccessKeyModelAliases: (value: string) => void;
   onUpdateAccessKeyName: (value: string) => void;
 }
 
@@ -41,6 +42,7 @@ export const AccessKeyCard = ({
   onRevealSecret,
   onSaveAccessKey,
   onToggleCredentialSelection,
+  onUpdateAccessKeyModelAliases,
   onUpdateAccessKeyName,
 }: AccessKeyCardProps) => {
   const locale = useLocale();
@@ -53,6 +55,9 @@ export const AccessKeyCard = ({
   const nameInputId = isCreating
     ? 'accessKeyName-new'
     : `accessKeyName-${accessKey.id}`;
+  const modelAliasesInputId = isCreating
+    ? 'accessKeyModelAliases-new'
+    : `accessKeyModelAliases-${accessKey.id}`;
 
   return (
     <Block
@@ -103,6 +108,21 @@ export const AccessKeyCard = ({
                 </Tag>
               ))}
             </Flexbox>
+            {Object.keys(accessKey.modelAliases ?? {}).length ? (
+              <Flexbox
+                className="access-key-model-alias-tags mt-2"
+                gap={8}
+                wrap="wrap"
+              >
+                {Object.entries(accessKey.modelAliases).map(
+                  ([alias, target]) => (
+                    <Tag className="access-key-model-alias-tag" key={alias}>
+                      {`${alias} → ${target}`}
+                    </Tag>
+                  ),
+                )}
+              </Flexbox>
+            ) : null}
           </div>
           <div className="access-key-card-actions flex gap-2 shrink-0">
             <Button disabled={isBusy} icon={Eye} onClick={onRevealSecret}>
@@ -198,6 +218,26 @@ export const AccessKeyCard = ({
                 </div>
               )}
             </div>
+          </div>
+          <div className="mt-4">
+            <label
+              className="block mb-2 font-medium text-text-light dark:text-text-dark"
+              htmlFor={modelAliasesInputId}
+            >
+              {text('credentials.accessKeyModelAliases')}
+            </label>
+            <div className="mb-2 text-sm text-secondary">
+              {text('credentials.accessKeyModelAliasesHelp')}
+            </div>
+            <TextArea
+              id={modelAliasesInputId}
+              placeholder={text('credentials.accessKeyModelAliasesPlaceholder')}
+              rows={3}
+              value={form.modelAliasesText}
+              onChange={(event) =>
+                onUpdateAccessKeyModelAliases(event.target.value)
+              }
+            />
           </div>
           <div className="mt-4 flex gap-2">
             <Button icon={X} onClick={onCancel ?? onResetAccessKeyForm}>

@@ -40,6 +40,10 @@ export interface CredentialSummary {
   index: number;
   is_expired: boolean;
   name: string | null;
+  rate_limited_hits: number;
+  rate_limited_kind: 'frequency' | 'quota' | null;
+  rate_limited_reason: string | null;
+  rate_limited_until: number | null;
   responses_passthrough: boolean;
   upstream_protocol: 'chat' | 'responses';
   scope: string | null;
@@ -56,6 +60,7 @@ export interface AccessKeySummary {
   credentialFilenames: string[];
   id: string;
   maskedSecret: string;
+  modelAliases: Record<string, string>;
   name: string;
   updatedAt: string;
 }
@@ -102,6 +107,8 @@ export interface CredentialFormState {
 export interface AccessKeyFormState {
   credentialFilenames: string[];
   editingId: string | null;
+  /** Raw text area content: one `alias=real-model` entry per line. */
+  modelAliasesText: string;
   name: string;
 }
 
@@ -139,7 +146,12 @@ export const authStateAtom = atom<AuthState>(defaultAuthState);
 export const defaultCredentialsState: CredentialsState = {
   accessKeyActionId: null,
   accessKeyCreating: false,
-  accessKeyForm: { credentialFilenames: [], editingId: null, name: '' },
+  accessKeyForm: {
+    credentialFilenames: [],
+    editingId: null,
+    modelAliasesText: '',
+    name: '',
+  },
   accessKeys: [],
   accessKeysLoading: true,
   actionIndex: null,
@@ -203,6 +215,7 @@ export interface CredentialsTabController {
   onPollAuth: () => void;
   onRefreshAccessKeys: () => void;
   onRefreshCredentialList: () => void;
+  onReleaseCredentialLimit: (filename: string) => void;
   onResetCredentialForm: () => void;
   onResetAccessKeyForm: () => void;
   onRevealAccessKeySecret: (id: string) => void;
@@ -210,6 +223,7 @@ export interface CredentialsTabController {
   onSubmitCallbackUrl: () => void;
   onToggleCallbackMode: (showManual: boolean) => void;
   onToggleCredentialSelection: (filename: string) => void;
+  onUpdateAccessKeyModelAliases: (value: string) => void;
   onUpdateAccessKeyName: (value: string) => void;
 }
 
@@ -251,6 +265,7 @@ const Credentials = () => {
     onPollAuth,
     onRefreshAccessKeys,
     onRefreshCredentialList,
+    onReleaseCredentialLimit,
     onResetAccessKeyForm,
     onResetCredentialForm,
     onRevealAccessKeySecret,
@@ -258,6 +273,7 @@ const Credentials = () => {
     onSubmitCallbackUrl,
     onToggleCallbackMode,
     onToggleCredentialSelection,
+    onUpdateAccessKeyModelAliases,
     onUpdateAccessKeyName,
   } = controller;
   const validCredentials = credentials.items.filter((item) => !item.is_expired);
@@ -539,6 +555,7 @@ const Credentials = () => {
               credentialFilenames: [],
               id: '__new__',
               maskedSecret: '',
+              modelAliases: {},
               name: credentialsText('credentials.accessKeyCreateTitle'),
               updatedAt: new Date().toISOString(),
             }}
@@ -551,6 +568,7 @@ const Credentials = () => {
             onResetAccessKeyForm={onResetAccessKeyForm}
             onSaveAccessKey={onSaveAccessKey}
             onToggleCredentialSelection={onToggleCredentialSelection}
+            onUpdateAccessKeyModelAliases={onUpdateAccessKeyModelAliases}
             onUpdateAccessKeyName={onUpdateAccessKeyName}
           />
         ) : null}
@@ -576,6 +594,7 @@ const Credentials = () => {
                   onRevealSecret={() => onRevealAccessKeySecret(accessKey.id)}
                   onSaveAccessKey={onSaveAccessKey}
                   onToggleCredentialSelection={onToggleCredentialSelection}
+                  onUpdateAccessKeyModelAliases={onUpdateAccessKeyModelAliases}
                   onUpdateAccessKeyName={onUpdateAccessKeyName}
                 />
               ))}
@@ -641,6 +660,7 @@ const Credentials = () => {
                 }
                 onDelete={onDeleteCredential}
                 onEdit={onEditCredential}
+                onReleaseCredentialLimit={onReleaseCredentialLimit}
                 onResetCredentialForm={onResetCredentialForm}
                 onSaveCredential={onAddCredential}
               />
@@ -659,6 +679,7 @@ const Credentials = () => {
                 }
                 onDelete={onDeleteCredential}
                 onEdit={onEditCredential}
+                onReleaseCredentialLimit={onReleaseCredentialLimit}
                 onResetCredentialForm={onResetCredentialForm}
                 onSaveCredential={onAddCredential}
                 title={credentialsText('credentials.credentialExpired')}

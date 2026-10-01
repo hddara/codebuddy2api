@@ -414,11 +414,17 @@ const loadAccountStatus = async (
       total: sum((item) => item.capacitySize),
       used: sum((item) => item.capacityUsed),
       remaining: sum((item) => item.capacityRemain),
+      // Several packages usually share one name, so de-duplicate: a free
+      // account otherwise renders its plan as the same name repeated a dozen
+      // times and the string carries no extra information.
       plan:
-        usablePackages
-          .map((item) => item.packageName)
-          .filter((value): value is string => Boolean(value))
-          .join(' + ') || null,
+        [
+          ...new Set(
+            usablePackages
+              .map((item) => item.packageName)
+              .filter((value): value is string => Boolean(value)),
+          ),
+        ].join(' + ') || null,
       resetAt: pickResetAt(usablePackages),
       packages: quotaPackages,
       usablePackageCount: usablePackages.length,

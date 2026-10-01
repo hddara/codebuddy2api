@@ -8,3 +8,9 @@ bun.lock
 *.tsbuildinfo
 .turbo
 .codebuddy_creds
+# Context tree is a separate git repository; its docs are formatted there.
+.brv
+# Browser automation artifacts.
+.playwright-mcp
+playwright-report
+test-results

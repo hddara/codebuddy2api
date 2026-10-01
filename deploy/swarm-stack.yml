@@ -1,0 +1,81 @@
+# Docker Swarm stack definition for the production deployment.
+#
+# Deployed on the server with:
+#   docker stack deploy -c swarm-stack.yml codebuddy2api
+#
+# Every secret is injected through the environment instead of being written
+# here, so this file is safe to keep in version control. Provide the values in
+# the shell that runs `docker stack deploy`, or switch the entries below to
+# `docker secret` references.
+#
+# Notes specific to `docker stack deploy`:
+#   - `container_name` and `restart` are compose-only keys and are ignored by
+#     swarm; `deploy.restart_policy` is used instead.
+#   - `depends_on` only affects startup order, it does not wait for the
+#     database to accept connections.
+#   - `env_file` is not supported by `docker stack deploy` (`docker compose`
+#     only), so the variables are listed explicitly below.
+
+version: '3.8'
+
+services:
+  app:
+    image: registry.cn-hangzhou.aliyuncs.com/hucx/codebuddy2api:1.3.0
+    ports:
+      - '8001:8001'
+    environment:
+      # Storage backend. Point it at Postgres to use the shared database, or
+      # set it to `file` to fall back to the plaintext JSON documents under
+      # /app/.codebuddy_creds.
+      - CODEBUDDY_STORAGE_BACKEND=${CODEBUDDY_STORAGE_BACKEND:-pg}
+      - DATABASE_URL=${DATABASE_URL}
+      # Key used to encrypt the documents stored in the database. Keep it in a
+      # password manager: without it the encrypted documents cannot be read
+      # back, and changing it makes the existing ones undecryptable.
+      - CODEBUDDY_STORAGE_ENCRYPTION_KEY=${CODEBUDDY_STORAGE_ENCRYPTION_KEY}
+      # Console password and gateway authentication mode.
+      - CODEBUDDY_PASSWORD=${CODEBUDDY_PASSWORD}
+      - CODEBUDDY_GATEWAY_AUTH=${CODEBUDDY_GATEWAY_AUTH:-password}
+      # Optional: raise the log level to INFO or DEBUG to see credential
+      # selection and successful upstream requests (defaults to WARN).
+      - CODEBUDDY_LOG_LEVEL=${CODEBUDDY_LOG_LEVEL:-WARN}
+    volumes:
+      - codebuddy_creds:/app/.codebuddy_creds
+      - codebuddy_data:/app/.codebuddy_data
+    logging:
+      driver: loki
+      options:
+        loki-url: 'http://10.1.0.10:3100/loki/api/v1/push'
+        max-size: '20m'
+        max-file: '5'
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+      update_config:
+        order: stop-first
+    networks:
+      - codebuddy-net
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-codebuddy}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB:-codebuddy}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+    networks:
+      - codebuddy-net
+
+volumes:
+  codebuddy_creds:
+  codebuddy_data:
+  postgres_data:
+
+networks:
+  codebuddy-net:
