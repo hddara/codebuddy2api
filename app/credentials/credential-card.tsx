@@ -13,6 +13,8 @@ import {
 } from 'lucide-react';
 import { useLocale, useTranslations } from 'next-intl';
 
+import { formatDateTime } from '@/lib/shared/datetime';
+
 import type {
   CredentialFormState,
   CredentialSummary,
@@ -76,9 +78,7 @@ export const CredentialCard = ({
       ? credential.rate_limited_until * 1000
       : null;
   const isRateLimited = rateLimitReleaseAt !== null;
-  const rateLimitReleaseTime = rateLimitReleaseAt
-    ? new Date(rateLimitReleaseAt).toLocaleString(locale)
-    : '';
+  const rateLimitReleaseTime = formatDateTime(rateLimitReleaseAt, locale);
 
   return (
     <Block
@@ -119,7 +119,7 @@ export const CredentialCard = ({
             <span className="flex items-center gap-1">
               <CalendarDays aria-hidden="true" size={14} />
               {credential.created_at
-                ? new Date(credential.created_at * 1000).toLocaleString(locale)
+                ? formatDateTime(credential.created_at * 1000, locale)
                 : text('credentials.unknown')}
             </span>
           </div>

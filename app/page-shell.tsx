@@ -4,6 +4,8 @@ import { type ReactNode, useCallback, useEffect, useMemo, useRef } from 'react';
 import { createStore, Provider, useAtom } from 'jotai';
 import { useHydrateAtoms } from 'jotai/utils';
 import { useLocale, useTranslations } from 'next-intl';
+
+import { formatTime } from '@/lib/shared/datetime';
 import { useRouter } from 'next/navigation';
 import type { Route } from 'next';
 import { Button, ToastHost, toast } from '@lobehub/ui/base-ui';
@@ -801,7 +803,7 @@ const AdminPageLayoutContent = ({
           credentials: result.data?.filters?.credentials ?? [],
         },
         hoveredPoint: null,
-        lastUpdatedAt: new Date().toLocaleTimeString(locale),
+        lastUpdatedAt: formatTime(Date.now(), locale),
         loading: false,
         request: resolvedRequest,
         tableRows: (result.data?.tableRows ?? []).map((row) => ({

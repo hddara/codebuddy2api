@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 
+import { DISPLAY_TIME_ZONE } from '@/lib/shared/datetime';
+
 import { listAccessKeys } from './access-keys';
 import {
   getCredentialSupportedModels,
@@ -478,14 +480,22 @@ const getRangeWindow = (
 };
 
 const formatBucketLabel = (date: Date, bucketSizeMs: number): string => {
+  // The bucket boundaries are computed in UTC, but operators read the axis
+  // against the Beijing reset windows, so pin the zone explicitly. Leaving it
+  // to the ambient zone would also make the label depend on where the server
+  // happens to run.
+  const timeZone = DISPLAY_TIME_ZONE;
+
   return bucketSizeMs === DAY_MS
     ? date.toLocaleDateString('zh-CN', {
         month: '2-digit',
         day: '2-digit',
+        timeZone,
       })
     : date.toLocaleTimeString('zh-CN', {
         hour: '2-digit',
         minute: '2-digit',
+        timeZone,
       });
 };
 

@@ -15,10 +15,11 @@ import {
 } from '@lobehub/ui';
 import { Button } from '@lobehub/ui/base-ui';
 import { Check, Copy, Info, RefreshCw } from 'lucide-react';
-import { useTranslations } from 'next-intl';
+import { useLocale, useTranslations } from 'next-intl';
 import { useCallback, useMemo, useState } from 'react';
 
 import type { CredentialSummary } from '@/app/credentials/credentials';
+import { formatDateTime } from '@/lib/shared/datetime';
 
 interface AccountStatusProps {
   autoCheckin?: AutoCheckinStatus | null;
@@ -192,11 +193,8 @@ const AccountStatusSkeleton = () => (
   </Block>
 );
 
-const formatMoment = (value: string | null): string => {
-  if (!value) return '';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString();
-};
+const formatMoment = (value: string | null, locale: string): string =>
+  formatDateTime(value, locale);
 
 const AutoCheckinBar = ({
   onRun,
@@ -208,6 +206,7 @@ const AutoCheckinBar = ({
   status: AutoCheckinStatus | null;
 }) => {
   const text = useTranslations('Admin');
+  const locale = useLocale();
   const enabled = Boolean(status?.enabled);
   const parts: string[] = [];
 
@@ -217,7 +216,7 @@ const AutoCheckinBar = ({
     if (status.nextRunAt) {
       parts.push(
         text('accountStatus.autoCheckinNext', {
-          time: formatMoment(status.nextRunAt),
+          time: formatMoment(status.nextRunAt, locale),
         }),
       );
     }

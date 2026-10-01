@@ -1,5 +1,7 @@
 import { headers } from 'next/headers';
 
+import { formatTime } from '@/lib/shared/datetime';
+
 import type {
   AccessKeySummary,
   CredentialSummary,
@@ -122,7 +124,7 @@ export const getInitialData = async ({
           ...usage,
           autoRefreshSeconds: usagePreferences?.autoRefreshSeconds ?? 15,
           request: usageRequest,
-          updatedAtLabel: new Date(timestamp).toLocaleTimeString(locale),
+          updatedAtLabel: formatTime(timestamp, locale),
         },
       };
     }

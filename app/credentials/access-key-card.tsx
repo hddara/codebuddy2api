@@ -3,6 +3,8 @@ import { Button } from '@lobehub/ui/base-ui';
 import { CalendarDays, Eye, Pencil, Save, Trash2, X } from 'lucide-react';
 import { useLocale, useTranslations } from 'next-intl';
 
+import { formatDateTime } from '@/lib/shared/datetime';
+
 import type {
   AccessKeyFormState,
   AccessKeySummary,
@@ -87,13 +89,13 @@ export const AccessKeyCard = ({
               <span className="flex items-center gap-1">
                 <CalendarDays aria-hidden="true" size={14} />
                 {text('credentials.accessKeyCreatedAt', {
-                  value: new Date(accessKey.createdAt).toLocaleString(locale),
+                  value: formatDateTime(accessKey.createdAt, locale),
                 })}
               </span>
               <span className="flex items-center gap-1">
                 <Pencil aria-hidden="true" size={14} />
                 {text('credentials.accessKeyUpdatedAt', {
-                  value: new Date(accessKey.updatedAt).toLocaleString(locale),
+                  value: formatDateTime(accessKey.updatedAt, locale),
                 })}
               </span>
             </div>
