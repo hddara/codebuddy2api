@@ -426,6 +426,92 @@ describe('credential rate limit tracking', () => {
     expect(await listCredentialLimits()).toHaveLength(2);
   });
 
+  it('rotates to another credential when the upstream stops responding', async () => {
+    process.env.CODEBUDDY_UPSTREAM_TIMEOUT_MS = '1000';
+
+    try {
+      await addCredential({ bearer_token: 'token-a' }, 'a');
+      await addCredential({ bearer_token: 'token-b' }, 'b');
+
+      let call = 0;
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation((_input, init) => {
+          call += 1;
+
+          if (call === 1) {
+            // The first account never answers: the gateway has to time out and
+            // continue on the next one instead of leaving the caller waiting.
+            return new Promise<Response>((_resolve, reject) => {
+              (init as RequestInit | undefined)?.signal?.addEventListener(
+                'abort',
+                () =>
+                  reject(
+                    Object.assign(new Error('This operation was aborted'), {
+                      name: 'AbortError',
+                    }),
+                  ),
+              );
+            });
+          }
+
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                choices: [{ message: { content: 'ok', role: 'assistant' } }],
+                usage: {
+                  completion_tokens: 2,
+                  prompt_tokens: 1,
+                  total_tokens: 3,
+                },
+              }),
+              {
+                headers: { 'Content-Type': 'application/json; charset=utf-8' },
+                status: 200,
+              },
+            ),
+          );
+        });
+
+      const response = await proxyChatCompletions(
+        makeNextRequest('http://localhost/v1/chat/completions'),
+        {
+          messages: [{ content: 'hi', role: 'user' }],
+          model: 'deepseek-v4.1-flash',
+        },
+      );
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(response.status).toBe(200);
+
+      const bearerOf = (index: number): string | null =>
+        new Headers(
+          (fetchMock.mock.calls[index]?.[1] as RequestInit).headers,
+        ).get('authorization');
+
+      // The retry leaves on a different account, and the model is unchanged.
+      expect(bearerOf(0)).not.toBe(bearerOf(1));
+      expect(console.warn).toHaveBeenCalledWith(
+        '[CodeBuddy2API][WARN] Upstream request timed out while waiting for response headers',
+        expect.objectContaining({
+          credentialFilename: expect.any(String),
+          timeoutMs: 1000,
+        }),
+      );
+      expect(console.warn).toHaveBeenCalledWith(
+        '[CodeBuddy2API][WARN] Retrying upstream request with another credential',
+        expect.objectContaining({
+          fromCredentialFilename: expect.any(String),
+          toCredentialFilename: expect.any(String),
+        }),
+      );
+      // A timeout is not a rate limit: the account must stay in rotation.
+      expect(await listCredentialLimits()).toHaveLength(0);
+    } finally {
+      delete process.env.CODEBUDDY_UPSTREAM_TIMEOUT_MS;
+    }
+  });
+
   it('keeps the upstream 429 when no other credential is available', async () => {
     await addCredential({ bearer_token: 'token-a' }, 'a');
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(

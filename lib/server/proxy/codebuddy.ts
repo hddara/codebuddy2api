@@ -677,6 +677,79 @@ const logUpstreamFailure = ({
 };
 
 /**
+ * Continues the same client request on another credential while keeping the
+ * requested model unchanged. Returns null when rotation is disabled or when the
+ * pool holds no untried credential left, which ends the retry loop.
+ */
+const rotateToNextCredential = async ({
+  allowRotation,
+  context,
+  model,
+  reason,
+  request,
+  requestBody,
+  triedFilenames,
+}: {
+  allowRotation: boolean;
+  context: ProxyContext;
+  model?: string;
+  reason: string;
+  request: NextRequest;
+  requestBody?: object;
+  triedFilenames: string[];
+}): Promise<ProxyContext | null> => {
+  if (!allowRotation) {
+    return null;
+  }
+
+  try {
+    const nextContext = await resolveProxyContext(request, model, requestBody, {
+      excludeCredentialFilenames: triedFilenames,
+    });
+    const nextFilename = nextContext.credentialFilename;
+
+    // Rotation has to land on a genuinely different account: retrying the one
+    // that just failed would burn an attempt without changing the outcome.
+    if (!nextFilename || nextFilename === context.credentialFilename) {
+      void logEvent({
+        level: 'WARN',
+        message: 'No credential available for rotation retry',
+        payload: {
+          fromCredentialFilename: context.credentialFilename,
+          reason,
+        },
+      });
+
+      return null;
+    }
+
+    void logEvent({
+      level: 'WARN',
+      message: 'Retrying upstream request with another credential',
+      payload: {
+        fromCredentialFilename: context.credentialFilename,
+        reason,
+        triedCredentialFilenames: triedFilenames,
+        toCredentialFilename: nextFilename,
+      },
+    });
+
+    return nextContext;
+  } catch (error) {
+    void logEvent({
+      level: 'WARN',
+      message: 'No credential available for rotation retry',
+      payload: {
+        fromCredentialFilename: context.credentialFilename,
+        reason: error instanceof Error ? error.message : error,
+      },
+    });
+
+    return null;
+  }
+};
+
+/**
  * Marks the credential behind a failed upstream call as rate limited so the
  * next request rotates away from it. Only HTTP 429 counts: treating 5xx or
  * network failures as limits would blacklist every credential on an upstream
@@ -741,55 +814,15 @@ const handleUpstreamRateLimit = async ({
     }
   }
 
-  if (!allowRotation) {
-    return null;
-  }
-
-  try {
-    const nextContext = await resolveProxyContext(request, model, requestBody, {
-      excludeCredentialFilenames: triedFilenames,
-    });
-    const nextFilename = nextContext.credentialFilename;
-
-    // Rotation has to land on a genuinely different account: retrying the one
-    // that just failed would burn an attempt without changing the outcome.
-    if (!nextFilename || nextFilename === context.credentialFilename) {
-      void logEvent({
-        level: 'WARN',
-        message: 'No credential available for rotation retry',
-        payload: {
-          fromCredentialFilename: context.credentialFilename,
-          reason: 'the selection pool has no untried credential',
-        },
-      });
-
-      return null;
-    }
-
-    void logEvent({
-      level: 'WARN',
-      message: 'Retrying upstream request with another credential',
-      payload: {
-        fromCredentialFilename: context.credentialFilename,
-        resumeAt: new Date(signal.resumeAt).toISOString(),
-        triedCredentialFilenames: triedFilenames,
-        toCredentialFilename: nextContext.credentialFilename,
-      },
-    });
-
-    return nextContext;
-  } catch (error) {
-    void logEvent({
-      level: 'WARN',
-      message: 'No credential available for rotation retry',
-      payload: {
-        fromCredentialFilename: context.credentialFilename,
-        reason: error instanceof Error ? error.message : error,
-      },
-    });
-
-    return null;
-  }
+  return rotateToNextCredential({
+    allowRotation,
+    context,
+    model,
+    reason: `rate limited until ${new Date(signal.resumeAt).toISOString()}`,
+    request,
+    requestBody,
+    triedFilenames,
+  });
 };
 
 interface UpstreamPlan {
@@ -806,10 +839,45 @@ interface UpstreamCallResult {
 }
 
 /**
+ * Upper bound for waiting on the upstream response headers. Only the header
+ * wait is bounded: once the upstream starts answering, a streaming body may
+ * legitimately run for minutes, so the timer is cleared as soon as `fetch`
+ * resolves.
+ */
+const DEFAULT_UPSTREAM_RESPONSE_TIMEOUT_MS = 60_000;
+const UPSTREAM_RESPONSE_TIMEOUT_ENV = 'CODEBUDDY_UPSTREAM_TIMEOUT_MS';
+
+const getUpstreamResponseTimeoutMs = (): number => {
+  const raw = Number(process.env[UPSTREAM_RESPONSE_TIMEOUT_ENV] ?? '');
+
+  return Number.isFinite(raw) && raw >= 1_000
+    ? Math.round(raw)
+    : DEFAULT_UPSTREAM_RESPONSE_TIMEOUT_MS;
+};
+
+/** Our own abort timer is the only source of an AbortError on this path. */
+const isUpstreamTimeout = (error: unknown): boolean =>
+  error instanceof Error && error.name === 'AbortError';
+
+const buildUpstreamTimeoutResponse = (timeoutMs: number): Response =>
+  new Response(
+    JSON.stringify({
+      error: {
+        message: `Upstream did not respond within ${timeoutMs}ms`,
+        type: 'upstream_timeout',
+      },
+    }),
+    {
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      status: 504,
+    },
+  );
+
+/**
  * Calls the upstream and, while attempts remain, rotates to another credential
- * whenever the answer is a rate limit. The result always carries the credential
- * that produced the returned response, because the caller records usage and
- * stream bindings against it.
+ * whenever the answer is a rate limit or the upstream stops responding. The
+ * result always carries the credential that produced the returned response,
+ * because the caller records usage and stream bindings against it.
  */
 const fetchUpstreamWithRotation = async ({
   buildPlan,
@@ -833,6 +901,7 @@ const fetchUpstreamWithRotation = async ({
   stream?: boolean;
 }): Promise<UpstreamCallResult> => {
   const maxAttempts = rotationEnabled ? MAX_UPSTREAM_ATTEMPTS : 1;
+  const timeoutMs = getUpstreamResponseTimeoutMs();
   const triedFilenames = initialContext.credentialFilename
     ? [initialContext.credentialFilename]
     : [];
@@ -843,15 +912,79 @@ const fetchUpstreamWithRotation = async ({
     attempts += 1;
     const plan = await buildPlan(context);
     const startedAt = Date.now();
-    const response = enqueueUpstreamResponseSnapshot(
-      debugTrace,
-      await fetch(plan.url, {
-        body: JSON.stringify(plan.body),
-        cache: 'no-store',
-        headers: plan.headers,
-        method: 'POST',
-      }),
-    );
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    let response: Response;
+
+    try {
+      response = enqueueUpstreamResponseSnapshot(
+        debugTrace,
+        await fetch(plan.url, {
+          body: JSON.stringify(plan.body),
+          cache: 'no-store',
+          headers: plan.headers,
+          method: 'POST',
+          signal: controller.signal,
+        }),
+      );
+    } catch (error) {
+      if (!isUpstreamTimeout(error)) {
+        // Connection errors keep their historical behaviour: surface them as an
+        // unexpected upstream failure instead of silently rotating away.
+        throw error;
+      }
+
+      const elapsedMs = Date.now() - startedAt;
+
+      void logEvent({
+        level: 'WARN',
+        message:
+          'Upstream request timed out while waiting for response headers',
+        payload: {
+          attempt: attempts,
+          credentialFilename: context.credentialFilename,
+          elapsedMs,
+          error: error instanceof Error ? error.message : error,
+          model,
+          route,
+          stream,
+          timeoutMs,
+          url: plan.url,
+        },
+      });
+
+      // A hung account is exactly what rotation exists for: keep the model and
+      // continue on another credential instead of leaving the caller waiting.
+      const retryContext = await rotateToNextCredential({
+        allowRotation: attempts < maxAttempts,
+        context,
+        model,
+        reason: `upstream timeout after ${elapsedMs}ms`,
+        request,
+        requestBody,
+        triedFilenames,
+      });
+
+      if (!retryContext) {
+        return {
+          attempts,
+          context,
+          detail: `Upstream did not respond within ${timeoutMs}ms`,
+          response: buildUpstreamTimeoutResponse(timeoutMs),
+        };
+      }
+
+      if (retryContext.credentialFilename) {
+        triedFilenames.push(retryContext.credentialFilename);
+      }
+
+      context = retryContext;
+      continue;
+    } finally {
+      // Clearing here keeps long streaming bodies alive: the abort timer only
+      // covers the wait for response headers.
+      clearTimeout(timeoutId);
+    }
 
     if (response.ok) {
       logUpstreamSuccess({
