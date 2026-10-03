@@ -358,6 +358,74 @@ describe('credential rate limit tracking', () => {
     expect(bearerOf(1)).toContain('token-');
   });
 
+  it('rotates across every eligible account while keeping the same model', async () => {
+    await addCredential(
+      { bearer_token: 'token-a', user_id: 'a@example.com' },
+      'a',
+    );
+    await addCredential(
+      { bearer_token: 'token-b', user_id: 'b@example.com' },
+      'b',
+    );
+    await addCredential(
+      { bearer_token: 'token-c', user_id: 'c@example.com' },
+      'c',
+    );
+    const rateLimited = (): Response =>
+      new Response(PRODUCTION_QUOTA_DETAIL, {
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        status: 429,
+      });
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(rateLimited())
+      .mockResolvedValueOnce(rateLimited())
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: 'ok', role: 'assistant' } }],
+            usage: { completion_tokens: 2, prompt_tokens: 1, total_tokens: 3 },
+          }),
+          {
+            headers: { 'Content-Type': 'application/json; charset=utf-8' },
+            status: 200,
+          },
+        ),
+      );
+
+    const response = await proxyChatCompletions(
+      makeNextRequest('http://localhost/v1/chat/completions'),
+      {
+        messages: [{ content: 'hi', role: 'user' }],
+        model: 'deepseek-v4.1-flash',
+      },
+    );
+
+    // Every account in the pool gets a turn before the request is failed.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(response.status).toBe(200);
+
+    const bearerOf = (index: number): string | null =>
+      new Headers(
+        (fetchMock.mock.calls[index]?.[1] as RequestInit).headers,
+      ).get('authorization');
+    const modelOf = (index: number): unknown =>
+      (
+        JSON.parse(
+          String((fetchMock.mock.calls[index]?.[1] as RequestInit).body),
+        ) as { model?: unknown }
+      ).model;
+
+    expect(new Set([bearerOf(0), bearerOf(1), bearerOf(2)]).size).toBe(3);
+    expect([modelOf(0), modelOf(1), modelOf(2)]).toEqual([
+      'deepseek-v4.1-flash',
+      'deepseek-v4.1-flash',
+      'deepseek-v4.1-flash',
+    ]);
+    // The two accounts that answered 429 are marked; the working one is not.
+    expect(await listCredentialLimits()).toHaveLength(2);
+  });
+
   it('keeps the upstream 429 when no other credential is available', async () => {
     await addCredential({ bearer_token: 'token-a' }, 'a');
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(

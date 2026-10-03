@@ -45,8 +45,14 @@ interface CacheableTextBlock {
 
 const MIN_AUTO_CACHE_TEXT_LENGTH = 1024;
 const MAX_STREAM_FRAME_LENGTH = 1_000_000;
-/** One in-request rotation: original credential plus one alternative. */
-const MAX_UPSTREAM_ATTEMPTS = 2;
+/**
+ * Hard ceiling for in-request credential rotation. Rotation keeps the requested
+ * model and only swaps the account, walking every untried credential: each retry
+ * excludes the accounts already used, and credential selection returns nothing
+ * once the pool is exhausted. The real attempt count is therefore the number of
+ * eligible credentials; this constant only guards against an unbounded loop.
+ */
+const MAX_UPSTREAM_ATTEMPTS = 16;
 const CODEBUDDY_CLI_VERSION = '2.137.1';
 const CODEBUDDY_USER_AGENT = `CLI/${CODEBUDDY_CLI_VERSION} CodeBuddy/${CODEBUDDY_CLI_VERSION}`;
 
@@ -743,6 +749,22 @@ const handleUpstreamRateLimit = async ({
     const nextContext = await resolveProxyContext(request, model, requestBody, {
       excludeCredentialFilenames: triedFilenames,
     });
+    const nextFilename = nextContext.credentialFilename;
+
+    // Rotation has to land on a genuinely different account: retrying the one
+    // that just failed would burn an attempt without changing the outcome.
+    if (!nextFilename || nextFilename === context.credentialFilename) {
+      void logEvent({
+        level: 'WARN',
+        message: 'No credential available for rotation retry',
+        payload: {
+          fromCredentialFilename: context.credentialFilename,
+          reason: 'the selection pool has no untried credential',
+        },
+      });
+
+      return null;
+    }
 
     void logEvent({
       level: 'WARN',
