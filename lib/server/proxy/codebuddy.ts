@@ -2726,6 +2726,36 @@ const normalizeStreamingResponse = ({
     reader = null;
   };
 
+  // Observability tee for the chat passthrough path: the frames below are what
+  // the caller receives, so mirroring the text deltas here is how a remote
+  // viewer follows the reply. Purely a side channel — the returned frame is
+  // built independently of the publish call.
+  const teeConversationId = proxyContext.requestDetails.conversationId ?? '';
+  let teeStarted = false;
+  let teeCompleted = false;
+
+  const teeContent = (delta: unknown): void => {
+    if (!teeConversationId || typeof delta !== 'string' || !delta) return;
+
+    if (!teeStarted) {
+      teeStarted = true;
+      publishSessionStarted({
+        accessKeyId: proxyContext.accessKeyId,
+        conversationId: teeConversationId,
+        model,
+      });
+    }
+
+    publishSessionDelta({ conversationId: teeConversationId, delta });
+  };
+
+  const teeFinish = (error?: string): void => {
+    if (!teeConversationId || teeCompleted) return;
+    teeCompleted = true;
+    if (!teeStarted) return;
+    publishSessionCompleted({ conversationId: teeConversationId, error });
+  };
+
   const stream = new ReadableStream<Uint8Array>({
     start: (controller) => {
       const upstreamReader = upstreamResponse.body!.getReader();
@@ -2751,6 +2781,18 @@ const normalizeStreamingResponse = ({
           const chunk = JSON.parse(raw) as ChatStreamChunk;
           if (chunk.usage !== undefined) {
             latestUsage = chunk.usage;
+          }
+          // Mirror the text the model produced (reasoning included) so the live
+          // view shows progress even before the final answer starts.
+          const choice = (
+            chunk as { choices?: Array<{ delta?: Record<string, unknown> }> }
+          ).choices?.[0];
+          const delta = choice?.delta;
+          if (delta) {
+            teeContent(delta.content);
+            if (typeof delta.content !== 'string' || !delta.content) {
+              teeContent(delta.reasoning_content);
+            }
           }
           if (chunk.error !== undefined) {
             void logEvent({
@@ -2807,6 +2849,7 @@ const normalizeStreamingResponse = ({
             });
 
             releaseReader();
+            teeFinish();
             try {
               controller.close();
             } catch {
