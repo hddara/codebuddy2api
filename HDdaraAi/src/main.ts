@@ -11,7 +11,8 @@ export function createApp() {
   const pinia = createPinia()
 
   // Persist stores across cold starts (auth credentials especially).
-  pinia.use(context => persistPlugin(context, []))
+  // `persistPlugin` owns the exclusion list itself, so it takes only the context.
+  pinia.use(persistPlugin)
   app.use(pinia)
 
   return { app }

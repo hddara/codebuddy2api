@@ -1,4 +1,5 @@
 import { useAuthStore } from '@/store/authStore'
+import { createUtf8Decoder } from '@/utils/utf8-stream'
 import { getApiBaseUrl } from './core/base-url'
 import { alovaInstance } from './core/instance'
 
@@ -112,6 +113,9 @@ export function openSessionStream({
     : ''
   let buffer = ''
   let closed = false
+  // Stateful: a Chinese glyph split across two chunks must not decode to
+  // replacement characters.
+  const decodeChunk = createUtf8Decoder()
 
   const request = uni.request({
     enableChunked: true,
@@ -122,7 +126,7 @@ export function openSessionStream({
     method: 'GET',
     timeout: 0 as never,
     url: `${base}/admin-api/sessions/stream${query}`,
-    fail: (error) => {
+    fail: (error: { errMsg?: string }) => {
       if (!closed) {
         onError?.(String(error?.errMsg ?? 'stream failed'))
       }
@@ -136,9 +140,7 @@ export function openSessionStream({
   }
 
   request.onChunkReceived?.((result) => {
-    const text = new TextDecoder('utf-8').decode(result.data)
-
-    buffer += text
+    buffer += decodeChunk(result.data)
 
     const frames = buffer.split(/\n\n/)
 

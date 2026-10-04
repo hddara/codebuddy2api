@@ -62,6 +62,17 @@ function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+/**
+ * Plain-object check used when decorating query params.
+ *
+ * Deliberately local: the mall scaffold called `CommonUtil.isObj` here, but that
+ * global does not exist in this project, so every request threw a ReferenceError
+ * before it was sent.
+ */
+function isPlainObject(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 export const alovaInstance = createAlova({
   baseURL: getApiBaseUrl(),
   requestAdapter: uniappRequestAdapter,
@@ -107,8 +118,9 @@ export const alovaInstance = createAlova({
     method.config.headers['device-info'] = encodeURIComponent(getDeviceInfo())
 
     // Add timestamp to prevent caching for GET requests
-    if (method.type === 'GET' && CommonUtil.isObj(method.config.params)) {
-      method.config.params._t = Date.now()
+    if (method.type === 'GET' && isPlainObject(method.config.params)) {
+      // `params` is declared as a union with string, so widen for the extra key.
+      ;(method.config.params as Record<string, unknown>)._t = Date.now()
     }
 
     // Log request in development
@@ -125,8 +137,10 @@ export const alovaInstance = createAlova({
     onSuccess: handleAlovaResponse,
 
     // Error handler
-    onError: async (error: any, method?: Method) => {
-      const cfg = method.config as Record<string, any>
+    onError: async (error: any, failingMethod?: Method) => {
+      // 绑定成 const：下面的 await 会让 TS 丢掉「已排除 undefined」的收窄结果
+      const method = failingMethod
+      const cfg = (method?.config ?? {}) as Record<string, any>
       // 网络类错误自动重试（见 RETRY_DELAYS 注释）：覆盖 iOS「本地网络」授权弹窗期间请求必失败、
       // 以及弱网抖动。重试成功后直接把业务数据交给页面，用户无需手动下拉刷新。
       // NO_RETRY_FLAG：调用方显式声明「快速失败」（检查更新），不参与重试。

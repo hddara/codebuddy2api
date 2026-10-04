@@ -10,11 +10,21 @@ import { subscribeToSessionEvents, type SessionEvent } from './session-stream';
 /**
  * Durable question/answer log for conversations the gateway served.
  *
- * Each turn is stored as its own document (`namespace/key`) so recording is O(1):
- * rewriting a single array document would cost a full rewrite of every stored
- * turn on every request. Retention is governed by **two independent limits** —
- * age and count — and whichever is hit first wins, because count alone cannot
- * express "keep 30 days" and age alone cannot bound a traffic spike.
+ * Layout, and why it is split across two namespaces:
+ *
+ *  - `session-transcripts` holds one **metadata** document per turn: prompt,
+ *    timestamps, status, sizes. Small and bounded.
+ *  - `session-transcript-answers` holds the model output, keyed by the same id.
+ *
+ * Retention has to inspect every stored turn to decide what to drop, and the
+ * store can only list whole documents. Keeping answer bodies out of the listing
+ * namespace means a prune costs O(number of turns) instead of O(total answer
+ * bytes) — with answers up to 100 KB each, the difference is megabytes of JSON
+ * parsed on every sweep.
+ *
+ * Retention is governed by **two independent limits** — age and count — and
+ * whichever is hit first wins, because count alone cannot express "keep 30 days"
+ * and age alone cannot bound a traffic spike.
  *
  * Content is stored as plain JSON text. Callers that treat the gateway as a
  * trusted boundary can rely on that; anyone exposing these endpoints should
@@ -22,11 +32,16 @@ import { subscribeToSessionEvents, type SessionEvent } from './session-stream';
  */
 
 const NAMESPACE = 'session-transcripts';
+const ANSWER_NAMESPACE = 'session-transcript-answers';
 const SETTINGS_KEY = 'settings';
 
 /** Turns kept per conversation prompt/answer, mirroring the debug snapshot cap. */
 const MAX_QUESTION_CHARS = 4_000;
 const MAX_ANSWER_CHARS = 100_000;
+
+/** Bounds how many documents a single sweep touches at once. */
+const DELETE_BATCH_SIZE = 50;
+const ANSWER_READ_CONCURRENCY = 8;
 
 export const SESSION_TRANSCRIPT_LIMITS = {
   maxEntries: { hard: 20_000, min: 10 },
@@ -49,6 +64,22 @@ export const DEFAULT_SESSION_TRANSCRIPT_SETTINGS: SessionTranscriptSettings = {
 
 export type SessionTranscriptStatus = 'completed' | 'failed';
 
+/** Stored metadata document; the answer lives in its own namespace. */
+interface SessionTranscriptMeta {
+  accessKeyId: string | null;
+  answerChars: number;
+  completedAt: string;
+  conversationId: string;
+  error?: string;
+  id: string;
+  model: string | null;
+  question: string;
+  questionChars: number;
+  startedAt: string;
+  status: SessionTranscriptStatus;
+}
+
+/** API-facing turn, metadata joined with its answer body. */
 export interface SessionTranscriptRecord {
   accessKeyId: string | null;
   /** Model output as accumulated by the gateway, truncated to the storage cap. */
@@ -231,23 +262,89 @@ const canEnumerateTurns = (): boolean =>
   getStorageBackendMeta().backend !== 'file';
 
 /**
- * Storage documents are keyed per turn; the settings document is skipped when
- * reading turns back so it can share the namespace.
+ * Runs `worker` over `items` with a fixed ceiling on in-flight work, so a large
+ * page cannot open hundreds of simultaneous storage reads.
  */
-const listStoredTurns = async (): Promise<SessionTranscriptRecord[]> => {
+const mapWithConcurrency = async <TItem, TResult>(
+  items: TItem[],
+  concurrency: number,
+  worker: (item: TItem) => Promise<TResult>,
+): Promise<TResult[]> => {
+  const results: TResult[] = new Array(items.length);
+  let cursor = 0;
+
+  const runners = Array.from(
+    { length: Math.min(concurrency, items.length) },
+    async () => {
+      for (;;) {
+        const index = cursor;
+        cursor += 1;
+
+        if (index >= items.length) return;
+
+        results[index] = await worker(items[index] as TItem);
+      }
+    },
+  );
+
+  await Promise.all(runners);
+
+  return results;
+};
+
+/** Reads the metadata documents only; answer bodies are never loaded here. */
+const listStoredTurns = async (): Promise<SessionTranscriptMeta[]> => {
   if (!canEnumerateTurns()) {
     return [];
   }
 
-  const documents = await listStorageJson<SessionTranscriptRecord>(NAMESPACE);
+  const documents = await listStorageJson<SessionTranscriptMeta>(NAMESPACE);
 
   return documents
     .filter((document) => document.key !== SETTINGS_KEY)
     .map((document) => document.value)
     .filter(
-      (value): value is SessionTranscriptRecord =>
+      (value): value is SessionTranscriptMeta =>
         Boolean(value) && typeof value === 'object' && 'id' in value,
     );
+};
+
+/**
+ * Loads one answer body.
+ *
+ * Falls back to an `answer` field on the metadata document so turns written
+ * before the split are still readable.
+ */
+const readAnswer = async (turn: SessionTranscriptMeta): Promise<string> => {
+  const stored = await readStorageJson<{ answer?: unknown }>(
+    ANSWER_NAMESPACE,
+    turn.id,
+  );
+
+  if (typeof stored?.answer === 'string') {
+    return stored.answer;
+  }
+
+  const legacy = await readStorageJson<{ answer?: unknown }>(
+    NAMESPACE,
+    turn.id,
+  );
+
+  return typeof legacy?.answer === 'string' ? legacy.answer : '';
+};
+
+/** Deletes turns in bounded batches so one sweep cannot saturate the pool. */
+const deleteTurns = async (ids: string[]): Promise<void> => {
+  for (let index = 0; index < ids.length; index += DELETE_BATCH_SIZE) {
+    const batch = ids.slice(index, index + DELETE_BATCH_SIZE);
+
+    await Promise.all(
+      batch.flatMap((id) => [
+        deleteStorageJson(NAMESPACE, id),
+        deleteStorageJson(ANSWER_NAMESPACE, id),
+      ]),
+    );
+  }
 };
 
 /**
@@ -279,13 +376,12 @@ export const pruneSessionTranscripts = async (
         Date.parse(right.completedAt) - Date.parse(left.completedAt),
     );
 
-  const expired = turns.filter((turn) => expiredIds.has(turn.id));
-  const overflow = survivors.slice(effective.maxEntries);
-  const removable = [...expired, ...overflow];
+  const removable = [
+    ...expiredIds,
+    ...survivors.slice(effective.maxEntries).map((turn) => turn.id),
+  ];
 
-  await Promise.all(
-    removable.map((turn) => deleteStorageJson(NAMESPACE, turn.id)),
-  );
+  await deleteTurns(removable);
 
   return removable.length;
 };
@@ -352,13 +448,13 @@ export const recordSessionTurn = async ({
 
     const storedAnswer = truncate(answer ?? '', MAX_ANSWER_CHARS);
     const storedQuestion = truncate(question ?? '', MAX_QUESTION_CHARS);
-    const record: SessionTranscriptRecord = {
+    const id = buildRecordId(completedAt, conversationId);
+    const meta: SessionTranscriptMeta = {
       accessKeyId: accessKeyId ?? null,
-      answer: storedAnswer,
       answerChars: storedAnswer.length,
       completedAt,
       conversationId,
-      id: buildRecordId(completedAt, conversationId),
+      id,
       model: model ?? null,
       question: storedQuestion,
       questionChars: storedQuestion.length,
@@ -367,13 +463,17 @@ export const recordSessionTurn = async ({
     };
 
     if (error) {
-      record.error = error;
+      meta.error = error;
     }
 
-    await writeStorageJson(NAMESPACE, record.id, record);
+    // Metadata first: a prune reading between the two writes sees a turn that is
+    // listed but has no body yet, which readAnswer reports as empty rather than
+    // as a failure.
+    await writeStorageJson(NAMESPACE, id, meta);
+    await writeStorageJson(ANSWER_NAMESPACE, id, { answer: storedAnswer });
     await pruneIfDue(settings);
 
-    return record;
+    return { ...meta, answer: storedAnswer };
   } catch {
     return null;
   }
@@ -395,7 +495,18 @@ export const listSessionTranscripts = async ({
     (left, right) =>
       Date.parse(right.completedAt) - Date.parse(left.completedAt),
   );
-  const entries = sorted.slice(0, clamp(limit, 1, 500));
+  const page = sorted.slice(0, clamp(limit, 1, 500));
+  // Bodies are fetched only for the page being returned, never for the whole
+  // store.
+  const answers = await mapWithConcurrency(
+    page,
+    ANSWER_READ_CONCURRENCY,
+    readAnswer,
+  );
+  const entries = page.map((turn, index) => ({
+    ...turn,
+    answer: answers[index] ?? '',
+  }));
 
   return {
     entries,
@@ -411,7 +522,7 @@ export const listSessionTranscripts = async ({
 export const clearSessionTranscripts = async (): Promise<number> => {
   const turns = await listStoredTurns();
 
-  await Promise.all(turns.map((turn) => deleteStorageJson(NAMESPACE, turn.id)));
+  await deleteTurns(turns.map((turn) => turn.id));
 
   return turns.length;
 };

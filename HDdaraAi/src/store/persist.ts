@@ -9,6 +9,24 @@
  */
 import type { PiniaPluginContext } from 'pinia'
 
+/**
+ * Snapshot of a store state that is safe to hand to `uni.setStorageSync`.
+ *
+ * Replaces the scaffold's `CommonUtil.deepClone`, which does not exist in this
+ * project: the resulting ReferenceError fired inside `$subscribe` on every
+ * state change, so nothing was ever written and the app lost its credentials on
+ * each cold start. `JSON` round-trip is enough because these states are plain
+ * data, and `structuredClone` is not guaranteed in the App JS runtime.
+ */
+function snapshotState(state: unknown): unknown {
+  try {
+    return JSON.parse(JSON.stringify(state))
+  }
+  catch {
+    return state
+  }
+}
+
 function persist({ store }: PiniaPluginContext, excludedIds: string[]) {
   // 检查当前store的id是否在排除列表中
   const isExcluded = excludedIds.includes(store.$id)
@@ -46,7 +64,7 @@ function persist({ store }: PiniaPluginContext, excludedIds: string[]) {
 
   store.$subscribe(() => {
     // 在存储变化的时候将store缓存
-    uni.setStorageSync(store.$id, CommonUtil.deepClone(store.$state))
+    uni.setStorageSync(store.$id, snapshotState(store.$state))
   })
 }
 
@@ -54,6 +72,6 @@ export function persistPlugin(context: PiniaPluginContext) {
   // 调用persist函数，并传入排除列表
   // 'temp' - 临时数据不持久化
   // 'network-status' - 网络状态是运行时瞬时值，持久化会让下次冷启动读到过期的 isOffline
-  // 'app-update-popup' - 更新弹窗的 visible/phase/进度都是瞬时值，持久化会导致冷启动凭空弹窗
-  persist(context, ['temp', 'shoppingCart', 'network-status', 'app-update-popup'])
+  // 说明：mall 的 'shoppingCart' / 'app-update-popup' 已随业务剥离，本项目无这些 store
+  persist(context, ['temp', 'network-status'])
 }

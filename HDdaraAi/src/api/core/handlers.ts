@@ -98,7 +98,9 @@ export async function handleAlovaResponse(response: unknown): Promise<unknown> {
   return data
 }
 
-export function handleAlovaError(error: unknown, method: Method): never {
+// `method` is optional because the alova `onError` hook types it as possibly
+// absent; it is only used for development logging.
+export function handleAlovaError(error: unknown, method?: Method): never {
   if (import.meta.env.MODE === 'development') {
     console.error('[Alova Error]', error, method)
   }

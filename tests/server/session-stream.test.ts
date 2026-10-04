@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   MAX_SESSION_SUBSCRIBERS,
-  getAccumulatedText,
+  getSessionSnapshot,
   getSessionSubscriberCount,
   publishSessionCompleted,
   publishSessionDelta,
@@ -54,8 +54,11 @@ describe('session stream', () => {
       'session.completed',
     ]);
     expect(events[1]?.delta).toBe('你');
-    // The accumulated text lets a late subscriber render the reply in full.
-    expect(events[2]?.text).toBe('你好');
+    // Deltas must stay O(delta): resending the whole reply on every chunk is
+    // what turns a long answer quadratic.
+    expect(events[1]?.text).toBeUndefined();
+    expect(events[2]?.text).toBeUndefined();
+    // The full text rides on the terminal event so a recorder can persist it.
     expect(events[3]?.text).toBe('你好');
     expect(events[0]?.accessKeyId).toBe('key-1');
     expect(events[0]?.model).toBe('deepseek-v4.1-flash');
@@ -127,20 +130,72 @@ describe('session stream', () => {
     ).toBeNull();
   });
 
-  it('unsubscribes and exposes accumulated text', () => {
+  it('exposes a snapshot so a late subscriber can render the live reply', () => {
     const { subscriber } = collect();
     const entry = subscribeToSessionEvents(subscriber);
 
-    publishSessionStarted({ conversationId: 'conv-a' });
-    publishSessionDelta({ conversationId: 'conv-a', delta: 'hi' });
+    publishSessionStarted({
+      conversationId: 'conv-a',
+      model: 'deepseek-v4.1-flash',
+      question: 'how are you',
+    });
+    publishSessionDelta({ conversationId: 'conv-a', delta: 'h' });
+    publishSessionDelta({ conversationId: 'conv-a', delta: 'i' });
 
-    expect(getAccumulatedText('conv-a')).toBe('hi');
-    // An unknown conversation has no accumulated text.
-    expect(getAccumulatedText('conv-missing')).toBe('');
+    expect(getSessionSnapshot('conv-a')).toEqual({
+      accessKeyId: null,
+      model: 'deepseek-v4.1-flash',
+      question: 'how are you',
+      text: 'hi',
+    });
+    // An unknown conversation has no live turn.
+    expect(getSessionSnapshot('conv-missing')).toBeNull();
 
     unsubscribeFromSessionEvents(entry!.id);
 
     expect(getSessionSubscriberCount()).toBe(0);
+  });
+
+  it('releases the accumulated reply once the turn completes', () => {
+    const { subscriber } = collect();
+
+    subscribeToSessionEvents(subscriber);
+    publishSessionStarted({ conversationId: 'conv-a' });
+    publishSessionDelta({ conversationId: 'conv-a', delta: 'done' });
+
+    expect(getSessionSnapshot('conv-a')?.text).toBe('done');
+
+    publishSessionCompleted({ conversationId: 'conv-a' });
+
+    // The completed text travelled on the event (and into the transcript), so
+    // holding it here would only keep memory until the idle sweep.
+    expect(getSessionSnapshot('conv-a')).toBeNull();
+  });
+
+  it('bounds the accumulated text without losing the newest chunks', () => {
+    const { subscriber } = collect();
+    const chunkSize = 20_000;
+
+    subscribeToSessionEvents(subscriber);
+    publishSessionStarted({ conversationId: 'conv-a' });
+
+    // 20 x 20k = 400k into a 200k buffer: the oldest chunks are dropped and the
+    // tail must survive byte-for-byte.
+    for (let index = 1; index <= 20; index += 1) {
+      publishSessionDelta({
+        conversationId: 'conv-a',
+        delta: `${String(index).padStart(4, '0')}${'y'.repeat(chunkSize - 4)}`,
+      });
+    }
+
+    const snapshot = getSessionSnapshot('conv-a');
+
+    expect(snapshot?.text).toHaveLength(200_000);
+    // The last chunk is intact at the tail...
+    expect(snapshot?.text.endsWith('y'.repeat(chunkSize - 4))).toBe(true);
+    expect(snapshot?.text.includes('0020')).toBe(true);
+    // ...and the very first chunk is gone.
+    expect(snapshot?.text.includes('0001')).toBe(false);
   });
 
   it('never throws when a subscriber send blows up', () => {

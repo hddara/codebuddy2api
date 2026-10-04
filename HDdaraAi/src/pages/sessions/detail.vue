@@ -80,9 +80,20 @@ function applyEvent(event: Record<string, unknown>) {
     return
   }
 
+  if (type === 'session.snapshot') {
+    // Sent when this client connected mid-reply: the deltas that produced the
+    // text so far were published before we were listening.
+    model.value = String(event.model ?? '')
+    replyText.value = String(event.text ?? '')
+    status.value = 'live'
+    statusLabel.value = '正在输出…'
+    return
+  }
+
   if (type === 'session.delta') {
-    // The server sends accumulated text, which avoids a dropped delta leaving a
-    // hole in the reply; falling back to the delta keeps older servers working.
+    // Deltas carry only the new text, so the reply is assembled locally. A
+    // legacy server that still sends the accumulated text wins when present,
+    // which also repairs any delta lost in transit.
     const text = event.text
 
     replyText.value

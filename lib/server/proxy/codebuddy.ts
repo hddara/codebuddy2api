@@ -1052,6 +1052,17 @@ const fetchUpstreamWithRotation = async ({
   }
 };
 
+/**
+ * Response headers slower than this are reported at WARN.
+ *
+ * `elapsedMs` here is time-to-first-byte: for a streaming reply the caller sees
+ * its first token at roughly this moment, so it is the number that explains
+ * "the answer takes forever to start". Recording it only when it is bad keeps
+ * normal traffic quiet while making a slow period diagnosable without raising
+ * the log level to DEBUG.
+ */
+const SLOW_UPSTREAM_HEADER_MS = 5_000;
+
 const logUpstreamSuccess = ({
   credentialFilename,
   elapsedMs,
@@ -1082,6 +1093,23 @@ const logUpstreamSuccess = ({
       url,
     },
   });
+
+  if (elapsedMs >= SLOW_UPSTREAM_HEADER_MS) {
+    void logEvent({
+      level: 'WARN',
+      message: 'Upstream response headers were slow',
+      payload: {
+        credentialFilename: credentialFilename ?? null,
+        elapsedMs,
+        model: model ?? null,
+        route,
+        status,
+        stream: typeof stream === 'boolean' ? stream : null,
+        thresholdMs: SLOW_UPSTREAM_HEADER_MS,
+        url,
+      },
+    });
+  }
 };
 
 const hasPromptCacheControl = (content: unknown): boolean => {

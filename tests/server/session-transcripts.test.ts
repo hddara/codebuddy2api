@@ -376,6 +376,80 @@ describe('session transcripts', () => {
     expect((await listSessionTranscripts()).entries).toHaveLength(0);
   });
 
+  it('stores answer bodies outside the listed namespace', async () => {
+    await recordSessionTurn({
+      answer: 'the body',
+      completedAt: '2026-10-04T01:00:00.000Z',
+      conversationId: 'conv-a',
+      question: 'the question',
+    });
+
+    const meta = [...storage.bucket('session-transcripts').values()];
+    const bodies = [...storage.bucket('session-transcript-answers').values()];
+
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toEqual({ answer: 'the body' });
+    // Retention lists only this namespace, so the answer must not be here —
+    // otherwise every sweep parses the full reply of every stored turn.
+    expect(meta).toHaveLength(1);
+    expect(meta[0]).not.toHaveProperty('answer');
+  });
+
+  it('deletes the matching answer when a turn is pruned', async () => {
+    const old = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString();
+
+    // Recording prunes with the stored settings, so widen retention first to
+    // keep the aged turn available for the explicit prune below.
+    await updateSessionTranscriptSettings({
+      maxEntries: 1_000,
+      retentionDays: 365,
+    });
+
+    await recordSessionTurn({
+      answer: 'stale body',
+      completedAt: old,
+      conversationId: 'conv-old',
+    });
+
+    expect(storage.bucket('session-transcript-answers').size).toBe(1);
+
+    await pruneSessionTranscripts({
+      ...DEFAULT_SESSION_TRANSCRIPT_SETTINGS,
+      maxEntries: 1_000,
+      retentionDays: 30,
+    });
+
+    // The settings document shares the metadata namespace, so assert on the
+    // turn's own key rather than on the bucket size.
+    const turnId = `${old}-conv-old`;
+
+    expect(storage.bucket('session-transcripts').has(turnId)).toBe(false);
+    // Leaving the body behind would leak storage with no metadata to find it.
+    expect(storage.bucket('session-transcript-answers').size).toBe(0);
+  });
+
+  it('still reads turns stored before the answer split', async () => {
+    // Shape written by the previous layout: answer embedded in the metadata.
+    storage.bucket('session-transcripts').set('legacy-id', {
+      accessKeyId: null,
+      answer: 'legacy body',
+      answerChars: 11,
+      completedAt: '2026-10-04T01:00:00.000Z',
+      conversationId: 'conv-legacy',
+      id: 'legacy-id',
+      model: null,
+      question: 'legacy question',
+      questionChars: 14,
+      startedAt: '2026-10-04T01:00:00.000Z',
+      status: 'completed',
+    });
+
+    const [entry] = (await listSessionTranscripts()).entries;
+
+    expect(entry?.id).toBe('legacy-id');
+    expect(entry?.answer).toBe('legacy body');
+  });
+
   it('degrades to not-collected on the file backend', async () => {
     storage.backendKind = 'file';
 

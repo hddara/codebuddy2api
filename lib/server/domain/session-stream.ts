@@ -13,10 +13,18 @@
  *    subscriber is dropped instead of applying backpressure to a live reply.
  *  - Only text/reasoning deltas and lifecycle transitions are published; raw
  *    upstream payloads are never forwarded.
+ *  - `session.delta` carries **only the new text**. The accumulated reply rides
+ *    on lifecycle events and on `session.snapshot`, so a per-chunk publish stays
+ *    O(delta) instead of O(reply length) — a full-text field on every chunk
+ *    would make a long answer quadratic on both CPU and wire size.
  */
 
 export type SessionEventType =
-  'session.started' | 'session.delta' | 'session.completed' | 'session.failed';
+  | 'session.started'
+  | 'session.delta'
+  | 'session.completed'
+  | 'session.failed'
+  | 'session.snapshot';
 
 export interface SessionEvent {
   /** Conversation id as sent by the client (`x-conversation-id`). */
@@ -37,8 +45,9 @@ export interface SessionEvent {
    */
   question?: string;
   /**
-   * Text accumulated so far for this turn. Lets a late subscriber render the
-   * current reply without replaying every delta.
+   * Text accumulated so far for this turn. Present on `session.started`,
+   * `session.completed`, `session.failed` and `session.snapshot` — never on
+   * `session.delta`, where it would be resent in full for every chunk.
    */
   text?: string;
   type: SessionEventType;
@@ -61,12 +70,26 @@ const MAX_ACCUMULATED_TEXT = 200_000;
 /** Conversations idle longer than this are dropped from the accumulator. */
 const ACCUMULATED_TTL_MS = 30 * 60 * 1000;
 
+/**
+ * Deltas are held as a list of chunks rather than one concatenated string.
+ * Appending then becomes O(1); the join happens only when a full snapshot is
+ * actually needed (turn start/end, or a subscriber connecting mid-reply).
+ */
 interface AccumulatedTurn {
+  accessKeyId: string | null;
+  chunks: string[];
+  model: string | null;
+  question: string;
+  totalChars: number;
+  updatedAt: number;
+}
+
+/** A rendered view of the live turn, used to seed late subscribers. */
+export interface SessionSnapshot {
   accessKeyId: string | null;
   model: string | null;
   question: string;
   text: string;
-  updatedAt: number;
 }
 
 interface SessionStreamState {
@@ -98,9 +121,61 @@ const pruneAccumulated = (now: number): void => {
   }
 };
 
-/** Current accumulated reply text for a conversation, if any. */
-export const getAccumulatedText = (conversationId: string): string =>
-  getAccumulated().get(conversationId)?.text ?? '';
+/** Joins the held chunks, dropping the oldest text beyond the memory cap. */
+const joinChunks = (turn: AccumulatedTurn): string => {
+  const text = turn.chunks.join('');
+
+  if (text.length <= MAX_ACCUMULATED_TEXT) {
+    return text;
+  }
+
+  return text.slice(-MAX_ACCUMULATED_TEXT);
+};
+
+const appendChunk = (turn: AccumulatedTurn, text: string): void => {
+  turn.chunks.push(text);
+  turn.totalChars += text.length;
+
+  // Drop whole chunks from the front so the live buffer stays bounded without
+  // touching the newly appended text.
+  while (
+    turn.totalChars > MAX_ACCUMULATED_TEXT &&
+    turn.chunks.length > 1 &&
+    (turn.chunks[0]?.length ?? 0) <= turn.totalChars - MAX_ACCUMULATED_TEXT
+  ) {
+    const dropped = turn.chunks.shift();
+
+    turn.totalChars -= dropped?.length ?? 0;
+  }
+};
+
+/**
+ * Current live turn for a conversation, or null when nothing is streaming.
+ *
+ * Used to seed a subscriber that connects mid-reply so it can render without
+ * replaying the deltas it missed.
+ */
+export const getSessionSnapshot = (
+  conversationId: string,
+): SessionSnapshot | null => {
+  const turn = getAccumulated().get(conversationId);
+
+  if (!turn) {
+    return null;
+  }
+
+  return {
+    accessKeyId: turn.accessKeyId,
+    model: turn.model,
+    question: turn.question,
+    text: joinChunks(turn),
+  };
+};
+
+/** Conversation ids with a live or recently finished turn. */
+export const listSessionSnapshotIds = (): string[] => [
+  ...getAccumulated().keys(),
+];
 
 export const getSessionSubscriberCount = (): number => getSubscribers().size;
 
@@ -187,9 +262,10 @@ export const publishSessionStarted = ({
   pruneAccumulated(now);
   getAccumulated().set(conversationId, {
     accessKeyId: accessKeyId ?? null,
+    chunks: [],
     model: model ?? null,
     question: prompt,
-    text: '',
+    totalChars: 0,
     updatedAt: now,
   });
 
@@ -205,8 +281,10 @@ export const publishSessionStarted = ({
 };
 
 /**
- * Appends a model delta and publishes it. `delta` may be empty, in which case
- * nothing is published (keeps the wire quiet between meaningful chunks).
+ * Appends a model delta and publishes it.
+ *
+ * The event carries only the new text: subscribers append it themselves, and a
+ * client that joined mid-reply is seeded once via `session.snapshot`.
  */
 export const publishSessionDelta = ({
   conversationId,
@@ -224,30 +302,34 @@ export const publishSessionDelta = ({
   const accumulated = getAccumulated();
   const existing = accumulated.get(conversationId);
   const now = Date.now();
-  const nextText = `${existing?.text ?? ''}${text}`.slice(
-    -MAX_ACCUMULATED_TEXT,
-  );
-
-  accumulated.set(conversationId, {
-    accessKeyId: existing?.accessKeyId ?? null,
-    model: existing?.model ?? null,
-    question: existing?.question ?? '',
-    text: nextText,
+  const turn: AccumulatedTurn = existing ?? {
+    accessKeyId: null,
+    chunks: [],
+    model: null,
+    question: '',
+    totalChars: 0,
     updatedAt: now,
-  });
+  };
+
+  appendChunk(turn, text);
+  turn.updatedAt = now;
+  accumulated.set(conversationId, turn);
 
   publish({
-    accessKeyId: existing?.accessKeyId ?? null,
+    accessKeyId: turn.accessKeyId,
     conversationId,
     delta: text,
-    model: existing?.model ?? null,
+    model: turn.model,
     occurredAt: now,
-    question: existing?.question ?? '',
-    text: nextText,
     type: 'session.delta',
   });
 };
 
+/**
+ * Publishes the terminal event with the full reply text, then releases the
+ * accumulated turn: the text now lives in the event (and in the transcript
+ * store), so keeping it here would only hold memory until the idle sweep.
+ */
 export const publishSessionCompleted = ({
   conversationId,
   error,
@@ -257,8 +339,10 @@ export const publishSessionCompleted = ({
 }): void => {
   if (!conversationId) return;
 
-  const existing = getAccumulated().get(conversationId);
+  const accumulated = getAccumulated();
+  const existing = accumulated.get(conversationId);
   const now = Date.now();
+  const text = existing ? joinChunks(existing) : '';
 
   publish({
     accessKeyId: existing?.accessKeyId ?? null,
@@ -267,9 +351,11 @@ export const publishSessionCompleted = ({
     model: existing?.model ?? null,
     occurredAt: now,
     question: existing?.question ?? '',
-    text: existing?.text ?? '',
+    text,
     type: error ? 'session.failed' : 'session.completed',
   });
+
+  accumulated.delete(conversationId);
 };
 
 /** Test/teardown helper: clears subscribers and accumulated text. */
