@@ -1,0 +1,128 @@
+import type { Method } from 'alova'
+
+import { useAuthStore } from '@/store/authStore'
+import { markApiHealthy, reportApiFailure } from './base-url'
+
+/** Trace id echoed by the gateway, when present. */
+function pickTraceId(response: unknown): string | undefined {
+  const headers = (response as { header?: unknown, headers?: unknown })?.header
+    ?? (response as { headers?: unknown })?.headers
+
+  if (!headers || typeof headers !== 'object')
+    return undefined
+
+  const record = headers as Record<string, unknown>
+  const key = Object.keys(record).find(
+    name => name.toLowerCase() === 'x-trace-id',
+  )
+
+  return key ? String(record[key]) : undefined
+}
+
+export class ApiError extends Error {
+  code: number
+  data?: unknown
+
+  constructor(message: string, code: number, data?: unknown) {
+    super(message)
+    this.name = 'ApiError'
+    this.code = code
+    this.data = data
+  }
+}
+
+/** Same toast repeated within this window is shown once. */
+const ERROR_TOAST_DEDUPE_MS = 2000
+let lastErrorToast = { at: 0, msg: '' }
+
+function toastErrorOnce(msg: string): void {
+  const now = Date.now()
+
+  if (lastErrorToast.msg === msg && now - lastErrorToast.at < ERROR_TOAST_DEDUPE_MS) {
+    return
+  }
+
+  lastErrorToast = { at: now, msg }
+  uni.showToast({ icon: 'none', title: msg })
+}
+
+/**
+ * Success path.
+ *
+ * The gateway answers with bare JSON (no `code`/`msg` envelope on `/admin-api`
+ * and `/v1`), so the body is returned as-is. HTTP failures raise `ApiError`,
+ * which is what the app's pages catch.
+ */
+export async function handleAlovaResponse(response: unknown): Promise<unknown> {
+  const { statusCode, data } = response as {
+    statusCode?: number
+    data?: unknown
+  }
+  const status = Number(statusCode ?? 0)
+
+  // Reaching the gateway at all proves the base URL works, even for 4xx.
+  // 5xx is excluded: a broken node typically answers 502/503/504.
+  if (status && status < 500) {
+    markApiHealthy()
+  }
+
+  if (status >= 400) {
+    const message
+      = (data as { error?: { message?: string } })?.error?.message
+        ?? `HTTP ${status}`
+
+    if (status === 401 || status === 403) {
+      // The stored console cookie is no longer accepted; drop it so the settings
+      // page can prompt for a fresh one instead of looping on failures.
+      useAuthStore().setAdminCookie('')
+      toastErrorOnce('登录已失效，请到「设置」重新填写凭据')
+
+      throw new ApiError(message, status, data)
+    }
+
+    if (status >= 500) {
+      reportApiFailure('server', `HTTP ${status}`)
+      toastErrorOnce('网关暂时不可用，请稍后重试')
+    }
+    else {
+      toastErrorOnce(message)
+    }
+
+    throw new ApiError(message, status, data)
+  }
+
+  if (import.meta.env.MODE === 'development') {
+    console.log('[Alova Response]', pickTraceId(response), data)
+  }
+
+  return data
+}
+
+export function handleAlovaError(error: unknown, method: Method): never {
+  if (import.meta.env.MODE === 'development') {
+    console.error('[Alova Error]', error, method)
+  }
+
+  const candidate = error as { message?: string, name?: string, errMsg?: string }
+  const message = candidate?.message ?? candidate?.errMsg ?? ''
+  const name = candidate?.name ?? ''
+
+  if (name === 'NetworkError' || message.includes('request:fail')) {
+    toastErrorOnce('网络连接失败，请稍后重试')
+    // A reachable network that still cannot reach this base URL means the node
+    // itself is bad, so the next request re-resolves it.
+    reportApiFailure('network', message || 'NetworkError')
+  }
+  else if (name === 'TimeoutError' || message.toLowerCase().includes('timeout')) {
+    toastErrorOnce('请求超时，请重试')
+    reportApiFailure('timeout', message || 'TimeoutError')
+  }
+  else if (error instanceof ApiError) {
+    // Already reported by the response handler; avoid duplicating the toast.
+  }
+  else {
+    toastErrorOnce(message || '请求失败')
+  }
+
+  throw error
+}

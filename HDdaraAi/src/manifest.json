@@ -1,0 +1,64 @@
+{
+  "name": "HDdaraAi",
+  "appid": "__UNI__HDDARA_AI",
+  "description": "随时查看 AI 会话状态并回复",
+  "versionName": "0.1.0",
+  "versionCode": "100",
+  "transformPx": false,
+  "app-plus": {
+    "usingComponents": true,
+    "nvueStyleCompiler": "uni-app",
+    "compilerVersion": 3,
+    "splashscreen": {
+      "alwaysShowBeforeRender": true,
+      "waiting": true,
+      "autoclose": true,
+      "delay": 0
+    },
+    "modules": {},
+    "distribute": {
+      "android": {
+        "permissions": [],
+        "package": "cn.hddara.ai",
+        "minSdkVersion": 23,
+        "targetSdkVersion": 34
+      },
+      "ios": {},
+      "sdkConfigs": {}
+    }
+  },
+  "app-harmony": {
+    "distribute": {}
+  },
+  "mp-harmony": {
+    "distribute": {}
+  },
+  "quickapp": {},
+  "mp-weixin": {
+    "appid": "",
+    "setting": {
+      "urlCheck": false
+    },
+    "usingComponents": true
+  },
+  "mp-alipay": {
+    "usingComponents": true
+  },
+  "mp-baidu": {
+    "usingComponents": true
+  },
+  "mp-toutiao": {
+    "usingComponents": true
+  },
+  "uniStatistics": {
+    "enable": false
+  },
+  "vueVersion": "3",
+  "h5": {
+    "router": {
+      "mode": "history",
+      "base": "/"
+    },
+    "title": "HDdaraAi"
+  }
+}

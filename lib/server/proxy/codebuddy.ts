@@ -25,6 +25,11 @@ import {
   type DebugTrace,
 } from '../domain/debug';
 import { resolveModelAlias } from '../domain/model-aliases';
+import {
+  publishSessionCompleted,
+  publishSessionDelta,
+  publishSessionStarted,
+} from '../domain/session-stream';
 import { createErrorResponse, getRequestHeaderMap } from '../shared/http';
 import { logEvent, summarizeLogHeaders, truncateLogText } from '../shared/log';
 import { parseRateLimitSignal } from '../shared/rate-limit';
@@ -1988,7 +1993,50 @@ const mapResponsesStreamToChat = (
     return index;
   };
 
+  // Observability tee: every chunk the caller receives also feeds the live
+  // session stream, so the mobile app can watch a reply as it is produced. This
+  // is a pure side channel — it cannot alter the bytes sent to the client, and
+  // a failure here is swallowed so a live reply is never interrupted.
+  const conversationId = proxyContext.requestDetails.conversationId ?? '';
+  let streamStarted = false;
+  let streamCompleted = false;
+
+  const teeStarted = (): void => {
+    if (streamStarted || !conversationId) return;
+    streamStarted = true;
+    publishSessionStarted({
+      accessKeyId: proxyContext.accessKeyId,
+      conversationId,
+      model,
+    });
+  };
+
+  const teeDelta = (delta: unknown): void => {
+    if (!conversationId) return;
+    teeStarted();
+    publishSessionDelta({ conversationId, delta });
+  };
+
+  const teeCompleted = (error?: string): void => {
+    if (streamCompleted || !conversationId) return;
+    streamCompleted = true;
+    if (!streamStarted) return;
+    publishSessionCompleted({ conversationId, error });
+  };
+
   const encodeChunk = (choice: Record<string, unknown>): Uint8Array => {
+    const delta = choice.delta as Record<string, unknown> | undefined;
+    const content = delta?.content;
+    const reasoning = delta?.reasoning_content;
+
+    // Text deltas are what a remote viewer needs; tool-call frames are skipped
+    // because argument fragments are meaningless without their definitions.
+    if (typeof content === 'string' && content) {
+      teeDelta(content);
+    } else if (typeof reasoning === 'string' && reasoning) {
+      teeDelta(reasoning);
+    }
+
     return encoder.encode(
       `data: ${JSON.stringify({
         choices: [choice],
@@ -2086,6 +2134,9 @@ const mapResponsesStreamToChat = (
           readResult = await reader.read();
         } catch (error) {
           await recordStreamUsage();
+          teeCompleted(
+            error instanceof Error ? error.message : 'stream read failed',
+          );
           reader.releaseLock();
           reader = null;
           controller.error(error);
@@ -2117,6 +2168,7 @@ const mapResponsesStreamToChat = (
           await recordStreamUsage();
           reader.releaseLock();
           reader = null;
+          teeCompleted();
           controller.close();
           return;
         }

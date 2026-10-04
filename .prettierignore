@@ -14,3 +14,6 @@ bun.lock
 .playwright-mcp
 playwright-report
 test-results
+
+# The mobile app is a separate uni-app project with its own Prettier setup.
+HDdaraAi
