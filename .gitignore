@@ -49,3 +49,6 @@ test-results/
 # OS / editor files
 .DS_Store
 .idea/
+
+# Browser automation artifacts (playwright-extension MCP).
+.playwright-mcp/

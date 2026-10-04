@@ -31,6 +31,12 @@ export interface SessionEvent {
   /** Monotonic publish time, epoch milliseconds. */
   occurredAt: number;
   /**
+   * The user prompt that started this turn, extracted from the request body.
+   * Carried on start/completion so a recorder can persist a readable Q&A pair
+   * without reaching back into the request.
+   */
+  question?: string;
+  /**
    * Text accumulated so far for this turn. Lets a late subscriber render the
    * current reply without replaying every delta.
    */
@@ -58,6 +64,7 @@ const ACCUMULATED_TTL_MS = 30 * 60 * 1000;
 interface AccumulatedTurn {
   accessKeyId: string | null;
   model: string | null;
+  question: string;
   text: string;
   updatedAt: number;
 }
@@ -165,19 +172,23 @@ export const publishSessionStarted = ({
   accessKeyId,
   conversationId,
   model,
+  question,
 }: {
   accessKeyId?: string | null;
   conversationId: string;
   model?: string | null;
+  question?: string;
 }): void => {
   if (!conversationId) return;
 
   const now = Date.now();
+  const prompt = sanitizeText(question);
 
   pruneAccumulated(now);
   getAccumulated().set(conversationId, {
     accessKeyId: accessKeyId ?? null,
     model: model ?? null,
+    question: prompt,
     text: '',
     updatedAt: now,
   });
@@ -187,6 +198,7 @@ export const publishSessionStarted = ({
     conversationId,
     model: model ?? null,
     occurredAt: now,
+    question: prompt,
     text: '',
     type: 'session.started',
   });
@@ -219,6 +231,7 @@ export const publishSessionDelta = ({
   accumulated.set(conversationId, {
     accessKeyId: existing?.accessKeyId ?? null,
     model: existing?.model ?? null,
+    question: existing?.question ?? '',
     text: nextText,
     updatedAt: now,
   });
@@ -229,6 +242,7 @@ export const publishSessionDelta = ({
     delta: text,
     model: existing?.model ?? null,
     occurredAt: now,
+    question: existing?.question ?? '',
     text: nextText,
     type: 'session.delta',
   });
@@ -252,6 +266,7 @@ export const publishSessionCompleted = ({
     error,
     model: existing?.model ?? null,
     occurredAt: now,
+    question: existing?.question ?? '',
     text: existing?.text ?? '',
     type: error ? 'session.failed' : 'session.completed',
   });

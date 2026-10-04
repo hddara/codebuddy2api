@@ -30,6 +30,7 @@ import {
   publishSessionDelta,
   publishSessionStarted,
 } from '../domain/session-stream';
+import { extractQuestionText } from '../domain/session-transcripts';
 import { createErrorResponse, getRequestHeaderMap } from '../shared/http';
 import { logEvent, summarizeLogHeaders, truncateLogText } from '../shared/log';
 import { parseRateLimitSignal } from '../shared/rate-limit';
@@ -165,6 +166,12 @@ export interface ProxyRequestDetails {
   conversationId: string | null;
   /** Characters of the prompt as sent upstream. */
   promptChars: number;
+  /**
+   * The user prompt that triggered this turn. Lifted onto the context because
+   * the stream callbacks that publish session events no longer hold the request
+   * body, and the transcript recorder needs a readable question.
+   */
+  question: string;
 }
 
 const toProxyRequestDetails = (
@@ -177,6 +184,7 @@ const toProxyRequestDetails = (
   return {
     conversationId: conversationId ? conversationId : null,
     promptChars: body ? measurePromptChars(body) : 0,
+    question: extractQuestionText(body),
   };
 };
 
@@ -1287,7 +1295,8 @@ export const createProxyContextFromCredential = (
     },
     credentialFilename: credential.filename,
     preferences: getCredentialProxySettings(credential.data),
-    requestDetails: { conversationId: null, promptChars: 0 },
+    // No request in hand on this path, so there is no prompt to attach.
+    requestDetails: { conversationId: null, promptChars: 0, question: '' },
   };
 };
 
@@ -2008,6 +2017,7 @@ const mapResponsesStreamToChat = (
       accessKeyId: proxyContext.accessKeyId,
       conversationId,
       model,
+      question: proxyContext.requestDetails.question,
     });
   };
 
@@ -2743,6 +2753,7 @@ const normalizeStreamingResponse = ({
         accessKeyId: proxyContext.accessKeyId,
         conversationId: teeConversationId,
         model,
+        question: proxyContext.requestDetails.question,
       });
     }
 
