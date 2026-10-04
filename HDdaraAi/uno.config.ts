@@ -1,10 +1,10 @@
-import { presetUni } from '@uni-helper/unocss-preset-uni';
+import { presetUni } from '@uni-helper/unocss-preset-uni'
 import {
   defineConfig,
   presetIcons,
   transformerDirectives,
   transformerVariantGroup,
-} from 'unocss';
+} from 'unocss'
 
 /**
  * UnoCSS configuration.
@@ -30,14 +30,14 @@ export default defineConfig({
       scale: 1.2,
       warn: true,
       extraProperties: {
-        display: 'inline-block',
+        'display': 'inline-block',
         'vertical-align': 'middle',
       },
       collections: {
         carbon: () =>
           import('@iconify-json/carbon/icons.json', {
             with: { type: 'json' },
-          }).then((icons) => icons.default),
+          }).then(icons => icons.default),
       },
     }),
   ],
@@ -54,4 +54,4 @@ export default defineConfig({
     // a phone. Raise it to the minimum comfortable size.
     'text-2': 'text-22rpx',
   },
-});
+})

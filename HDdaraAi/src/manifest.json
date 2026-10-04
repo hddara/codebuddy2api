@@ -28,7 +28,9 @@
     }
   },
   "app-harmony": {
-    "distribute": {}
+    "distribute": {
+      "bundleName": "cn.hddara.ai"
+    }
   },
   "mp-harmony": {
     "distribute": {}

@@ -43,6 +43,15 @@ export default defineManifestConfig({
     },
     title: 'HDdaraAi',
   },
+  // HarmonyOS bundleName. Deliberately identical to the Android package name and
+  // the iOS bundle id, so the three platforms share one identifier.
+  // The generated project is additionally overridden by `harmony-configs/`
+  // (permissions can only be declared in module.json5).
+  'app-harmony': {
+    distribute: {
+      bundleName: 'cn.hddara.ai',
+    },
+  },
   'mp-weixin': {
     // Replace with the mini-program appid before publishing.
     appid: '',
@@ -51,4 +60,7 @@ export default defineManifestConfig({
     },
     usingComponents: true,
   },
+  // Required, not cosmetic: HBuilderX refuses to compile the HarmonyOS target
+  // for a project it reads as Vue 2 ("目前 vue 2 项目尚不支持鸿蒙平台").
+  'vueVersion': '3',
 })

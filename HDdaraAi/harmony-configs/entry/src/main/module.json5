@@ -1,0 +1,131 @@
+{
+  // 本文件覆盖 HBuilderX 生成的鸿蒙工程 entry/src/main/module.json5（文件级覆盖，非合并）
+  // 基线：DevEco 26.0.0.821 + HBuilderX 5.24 生成的模板（2026-09-19）
+  // 与模板差异：仅补充 requestPermissions（权限只能在工程侧声明，无法用 manifest.config.ts 表达）
+  //   · INTERNET            —— 已在模板中（网络请求）
+  //   · GET_NETWORK_INFO    —— 网络状态（弱网提示/基址选路健康校验）
+  //   · CAMERA              —— 扫码（scanCode ×4）、拍照（chooseImage ×3）
+  //   · VIBRATE             —— 交互反馈
+  //   · READ_PASTEBOARD     —— 读取剪贴板识别好友分享的商品链接（受限权限，需 AGC 申请 ACL）
+  // 未加（待真机验证后再定）：相册读写（ohos.permission.READ_IMAGEVIDEO/WRITE_IMAGEVIDEO）、
+  //   定位（ohos.permission.LOCATION）、拨号（PLACE_CALL）—— 前两类属 ACL 受限权限，需白名单证书；
+  //   扫码/选图在鸿蒙默认走系统 Picker，多数场景无需声明
+  "module": {
+    "name": "entry",
+    "type": "entry",
+    "description": "$string:module_desc",
+    "mainElement": "EntryAbility",
+    "deviceTypes": [
+      "phone"
+    ],
+    "deliveryWithInstall": true,
+    "installationFree": false,
+    "pages": "$profile:main_pages",
+    // querySchemes：声明本应用「可能唤起」的外部 scheme（鸿蒙要求，否则 canOpenLink/openLink
+    // 对未声明的 scheme 直接报错 17700056「scheme 未在 querySchemes 字段下配置」）。
+    // 取值依据：支付宝鸿蒙版声明 alipays/alipayqr/alipayauth/alipay；微信鸿蒙版声明 weixin/wxopensdk。
+    // weixinULAPI —— 拉起微信（scheme 唤起 / openLink 兜底）；wxopensdk —— uni.share 微信分享跳转必需。
+    // 分享渠道预声明：后台「商城设置 → 分享渠道」新增渠道（飞书/钉钉/企业微信/QQ/微博等）时，
+    //   声明的 scheme 可直接唤起、无需重新发版；未预声明的第三方 scheme 需补声明后发版（鸿蒙安全机制）。
+    // 上限 50 个，此处只列支付与分享要用的。
+    "querySchemes": [
+      "alipays",
+      "alipay",
+      "alipayqr",
+      "weixin",
+      "weixinULAPI",
+      "wxopensdk",
+      "feishu",
+      "lark",
+      "dingtalk",
+      "wxwork",
+      "mqq",
+      "mqqapi",
+      "sinaweibo",
+      "sms",
+      "tel",
+      "mailto"
+    ],
+    // 网络安全管理配置：HarmonyOS NEXT（API 12+）默认**拦截明文 HTTP**，
+    // 未放行的 http 域名/IP 请求会被系统直接拒绝（表现为「连不上后端 → 客户端自动切备用节点」）。
+    // 本配置：全局禁止明文，仅放行「本机后端」用于开发调试（生产域名走 https，不受影响）。
+    // ⚠️ 换开发机后需把下面的 IP 改成当前 Mac 的局域网 IP（IP 会漂移）。
+    "metadata": [
+      {
+        "name": "ohos.net.network_security_config",
+        "resource": "$profile:network_config"
+      }
+    ],
+    "abilities": [
+      {
+        "name": "EntryAbility",
+        "srcEntry": "./ets/entryability/EntryAbility.ets",
+        "description": "$string:EntryAbility_desc",
+        "icon": "$media:layered_image",
+        "label": "$string:EntryAbility_label",
+        "startWindowIcon": "$media:startIcon",
+        "startWindowBackground": "$color:start_window_background",
+        "exported": true,
+        "skills": [
+          {
+            "entities": [
+              "entity.system.home"
+            ],
+            "actions": [
+              "action.system.home"
+            ]
+          }
+        ]
+      }
+    ],
+    "requestPermissions": [
+      {
+        "name": "ohos.permission.INTERNET"
+      },
+      {
+        "name": "ohos.permission.GET_NETWORK_INFO"
+      },
+      {
+        // user_grant 权限必须带 reason + usedScene（否则 hvigor 报
+        // 00303218：The reason and usedScene attributes are mandatory for user_grant permissions）
+        //
+        // ⚠️ 2026-10-02 排查结论：reason 只能用 $string: 资源引用 —— 写成字面文本会被
+        //    hvigor schema 校验拒绝（00303038，pattern 要求 ^[$]string:...）。
+        //    文案见 ../../resources/base/element/permission_string.json。
+        //    ⚠️ 但须确认该资源确实被打进 HAP 的 resources.index，否则 AGC 上架会报
+        //    「请在包体中声明权限使用理由」。
+        "name": "ohos.permission.CAMERA",
+        "reason": "$string:permission_reason_camera",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "inuse"
+        }
+      },
+      {
+        "name": "ohos.permission.VIBRATE"
+      }
+      /* 2026-10-02 暂时移出 READ_PASTEBOARD —— 华为 AGC 上架检测「不通过」：
+         「ACL权限声明一致性：检测鸿蒙应用申请的 acl 权限在 profile 和软件包的配置文件中是否同时具备」。
+         根因：本项是受限 user_grant 权限，必须在 AGC 后台为该应用申请 ACL 并重新签发 Profile；
+         而当前 Profile 里 "acls":{"allowed-acls":[]} 为空 ⇒ HAP 声明了 ACL 权限但 Profile 未授权 ⇒ 不一致。
+         影响：鸿蒙端不再读取剪贴板 ⇒ 「复制好友分享文案→打开 App 直达商品详情」在鸿蒙机型上失效
+               （客户端已做优雅降级：读取失败静默跳过，主流程不受影响，见 src/utils/share-landing.ts 第 16-17 行）；
+             复制类功能（setClipboardData：客服电话/订单号/运单号/推广码/分享文案）不受影响。
+         与 Android 口径一致：Android 侧同样未声明读取剪贴板权限，靠前台应用系统机制实现。
+         恢复方式（若确需鸿蒙剪贴板落地）：AGC 后台为该应用申请 ACL 权限 → 重新签发 Profile →
+         替换 release/harmony/mall-harmony-profile.p7b → 打开下方配置 → 重新构建。 */
+      // {
+      //   "name": "ohos.permission.READ_PASTEBOARD",
+      //   "reason": "$string:permission_reason_pasteboard",
+      //   "usedScene": {
+      //     "abilities": [
+      //       "EntryAbility"
+      //     ],
+      //     "when": "inuse"
+      //   }
+      // }
+    ]
+  }
+}

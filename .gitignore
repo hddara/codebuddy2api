@@ -56,3 +56,7 @@ test-results/
 # iOS 离线打包壳工程（含 DCloud 离线 SDK，体积 4.9G，不入库）
 HDdaraAi/dcloud-ios/
 HDdaraAi/**/dcloud-ios/
+
+# Android 离线打包壳工程（DCloud 离线 SDK，438M，不入库）
+HDdaraAi/dcloud-android/
+HDdaraAi/**/dcloud-android/

@@ -1,0 +1,71 @@
+{
+  // 覆盖 HBuilderX 生成的鸿蒙工程 build-profile.json5（文件级覆盖）
+  // 目的：把 DevEco「自动签名」生成的调试证书固化下来 —— 否则每次重新生成工程都要在 DevEco 里手点一次
+  // 证书来源：DevEco Studio → File → Project Structure → Project → Signing Configs → ☑ Automatically generate signature
+  //          产物落 ~/.ohos/config/（p12 + cer + p7b），口令是 DevEco 本地加密值（仅本机有效，勿外传）
+  // 注意：storePassword/keyPassword 由 DevEco 加密，只在生成它的机器上可解 ⇒ 换机需各自重新自动签名
+  // release 产品指向的 "release" 签名需上架前用 AGC 发布证书补齐（当前仅调试签名可用）
+  "app": {
+    "signingConfigs": [],
+    "products": [
+      {
+        "name": "default",
+        // 2026-10-02 修正：原为 "default"（DevEco 自动签名，其 bundleName 与本工程不匹配，
+        // 报 00303074「bundleName ... does not match ... SigningConfigs」导致 SignHap 失败）。
+        // 改用 AGC 发布证书签发的 "release" 签名（profile bundleName = cn.dreamshopping.shop，已验证匹配）。
+        // 运行设备下限：HarmonyOS 5.0.1（API 13）
+        "compatibleSdkVersion": "5.0.1(13)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        },
+        // 显式声明目标 SDK（否则 hvigor 会告警 targetSdkVersion 未配置）
+        "targetSdkVersion": "26.0.0"
+      },
+      {
+        "name": "release",
+        "compatibleSdkVersion": "5.0.1(13)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug"
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "uni_modules__uts_openschema",
+      "srcPath": "./uni_modules/uts-openSchema",
+      "targets": [
+        { "name": "default", "applyToProducts": ["default", "release"] }
+      ]
+    },
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default",
+            "release"
+          ]
+        }
+      ]
+    }
+  ]
+}

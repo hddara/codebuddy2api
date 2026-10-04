@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 
 /**
- * Compile-time values injected by `vite.config.mts`.
+ * Compile-time values injected by `vite.config.ts`.
  *
  * Declared here because they are bare globals, not `import.meta.env` entries:
  * `utils/app-info.ts` reads them directly, and without a declaration the type
