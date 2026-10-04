@@ -167,46 +167,62 @@ unzip -l $APK | grep -oE "__UNI__[A-Z0-9]+" | sort -u      # 只应出现 __UNI_
 
 ---
 
-# 三、鸿蒙离线打包（**当前阻塞**，2026-10-05）
+# 三、鸿蒙离线打包（**已确认阻塞在上游，2026-10-05**）
 
-## 3.1 已完成的准备工作
+## 3.1 已完成的准备工作（都做完了）
 
 | 项 | 值 | 落盘位置 |
 |---|---|---|
 | HarmonyOS bundleName | `cn.hddara.ai` | `manifest.config.ts` → `app-harmony.distribute.bundleName` |
-| `vueVersion` | `'3'` | `manifest.config.ts`（**必须**，否则 HBuilderX 报「目前 vue 2 项目尚不支持鸿蒙平台」） |
+| `vueVersion` | `'3'` | `manifest.config.ts`（**必须**，但**不是**「vue2 不支持」报错的真实原因，见 3.3） |
 | 工程覆盖 | `harmony-configs/`（AppScope 名称、entry 权限声明、build-profile.json5） | 项目根（`app_name` 已改 HDdaraAi；`signingConfigs` 已清空以走 unsigned） |
-| 构建工具 | DevEco Studio（`/Applications/DevEco-Studio.app`）+ HBuilderX CLI | 本机已装 |
+| 配置文件改名 | `vite.config.mts` → **`vite.config.ts`**、`uno.config.mts` → **`uno.config.ts`** | 项目根 |
+| 包管理器 | 已切 **pnpm@9.9.0** + `.npmrc`（`shamefully-hoist=true` 等，从 mall 复刻） | 项目根 |
+| 构建工具 | DevEco Studio + HBuilderX CLI | 本机已装 |
 
-## 3.2 卡在哪
+## 3.2 三次报错与处置
 
-已排掉前两个错，停在第三个：
+| # | 报错 | 真实原因 | 处置 |
+|---|---|---|---|
+| 1 | `目前 vue 2 项目尚不支持鸿蒙平台` | **不是** Vue 版本问题。HBuilderX 判定 CLI 项目 Vue 版本时要求项目根存在 **`vite.config.js` / `vite.config.ts`**；本项目用的是 `.mts`（mall 用 `.ts`） | ✅ 已改名 `.ts` |
+| 2 | `"isInSSRComponentSetup" is not exported by vue` | 该符号 Vue **3.5** 才引入，项目 pin 的是 `~3.4.38` | 试过升级，见下 |
+| 3 | 升 Vue 3.5 后 → `"normalizeCssVarValue" is not exported by @vue/shared` | `@dcloudio/*` 把 `@vue/shared` 钉在 `3.4.21` | 试过 `overrides` 统一，见下 |
 
-1. ✅ `目前 vue 2 项目尚不支持鸿蒙平台` → **已修**。真实原因不是 vue 版本，而是 HBuilderX 判定 CLI 项目 Vue 版本时要求项目根存在 **`vite.config.js` 或 `vite.config.ts`**；本项目用的是 `vite.config.mts` / `uno.config.mts`（mall 用的是 `.ts`）。已重命名为 `.ts`。
-2. ✅ `"isInSSRComponentSetup" is not exported by vue` → 该符号 Vue 3.5 才引入，而项目 pin 的是 `~3.4.38`。
-3. ❌ **当前阻塞**：把 `vue` 升到 3.5.43（并用 npm `overrides` 把 `@vue/*` 全部统一到 3.5.43）后，报错变成
-   `"normalizeCssVarValue" is not exported by @vue/shared`（该符号 3.5.4+ 才有），
-   再统一后又回到 `isInSSRComponentSetup` —— **像是有另一份旧的 `@vue/shared` 参与解析**，
-   但实测项目 `node_modules` 下只有一份 `vue@3.5.43`。
+## 3.3 关键结论：**上游依赖自相矛盾，两边都出不了包**
 
-根因指向 **uni-app `3.0.0-5020620260917001` 的依赖自相矛盾**：它的 `@dcloudio/*` 包把
-`@vue/shared` 钉在 `3.4.21`，而它自己的 `uni-app.es.js` 却 import 只有 3.5 才有的
-`isInSSRComponentSetup`。**mall 项目用的是同一版本、同一 Vue 3.4.38**，其
-`release/harmony/*.app` 是 2026-09-21 / 10-02 的产物 —— 因此怀疑 **mall 的鸿蒙链路在 09-17
-依赖升级后同样已不可复现**（当时的包是用升级前的依赖组合打出来的）。
+三次尝试（Vue 3.5 单升 → `overrides` 统一 `@vue/*` → 切 **pnpm@9.9.0** 复刻 mall 的
+`shamefully-hoist=true` 链接方式）**都复现同一个错**，且最后做了逐字节对照：
 
-## 3.3 为保持一致性已回退
-
-为避免「源码依赖」与「已验证的 iOS/Android 产物」不一致，Vue 3.5 与 `overrides` 已**全部回退**到
-`vue 3.4.38` / `@vue/shared 3.4.21`（即产出可用包的那套组合）。
-
-## 3.4 下一步可选路径
-
-| 方案 | 说明 | 代价 |
+| 对照项 | mall | HDdaraAi |
 |---|---|---|
-| A. 向 mall 侧求证 | 问清 mall 的鸿蒙包当时用的依赖组合/是否打了 patch（`mall-app-ui/patches/` 下已有 wot-design-uni 的 patch 先例） | 需要一次沟通 |
-| B. 用 pnpm 复刻 mall | mall 用 pnpm，npm 的扁平化 hoisting 与 pnpm 的严格链接不同，很可能就是解析差异的来源。用 pnpm 重装后重试 | 中等（要改包管理器） |
-| C. 等 uni-app 修上游 | 该依赖矛盾是上游问题，等 DCloud 在新版本中对齐 `@vue/shared` | 被动 |
-| D. 走云端打包 | 与当前结论相反（HBuilderX 云打包对 CLI 项目版本校验走不通），不建议 | —— |
+| `@dcloudio/uni-app` 版本 | `3.0.0-5020620260917001` | 同 |
+| `uni-app.es.js` sha256 | `e074a2c1…12d0` | **完全相同** |
+| 该文件是否 import `isInSSRComponentSetup` | **是** | 是 |
+| 根 `vue` 版本 | `3.4.38` | 同 |
+| `vue.runtime.esm-bundler.js` 是否含该符号 | **否** | 否 |
+| `.pnpm` 内 `@vue/shared` 份数 | 3.4.21 + 3.4.38 | 3.4.21 + 3.4.38 + 3.5.43 |
 
-> 我的建议：**先试 B**（pnpm 复刻 mall 的链接方式，改动可控、可回退），再考虑 A。
+**即：`@dcloudio/uni-app` 的代码需要只有 Vue 3.5 才提供的 `isInSSRComponentSetup`，
+而 `@dcloudio/*` 自己又把 `@vue/shared` 钉在 3.4.21 —— 上游包自身矛盾。
+mall 用完全相同的依赖组合，因此同样无法在当前依赖下出鸿蒙包。**
+
+时间线也吻合：mall 的鸿蒙链路是 **2026-09-19 跑通**的（`1fc83d89` / `0b92fe98`），
+而 `@dcloudio/*` 升到当前版本是**同一天**的 `8c956a89`；现有产物是 09-21 / 10-02 的
+`.app` —— 也就是**依赖升级与出包在同一窗口内发生，之后未再验证过鸿蒙链路**。
+
+## 3.4 保持一致性
+
+为了不让「源码依赖」与「已验证的 iOS / Android 产物」分叉，Vue 3.5 与 `overrides` 已**回退**，
+iOS 与 Android 包已用最终源码**重出并重装验证**。**pnpm 切换保留**（与 mall 一致，构建正常）。
+
+## 3.5 可选出路
+
+| 方案 | 说明 | 评价 |
+|---|---|---|
+| A. 把 `@dcloudio/uni-app` 钉回 09-19 之前的版本 | 需先确认哪个版本不引用 3.5-only API | **最可能可行**；但会影响已答通的 iOS/Android 包，需重出复验 |
+| B. 打 patch 去掉对 `isInSSRComponentSetup` 的依赖 | mall 已有 `patches/` 先例（wot-design-uni）；但这是运行时 API，改动风险高于纯编译期 patch | 有风险，需实测三个平台 |
+| C. 查 `@vue/shared` 为何未带该符号 | 3.4.21 与 3.4.38 都不带 ⇒ 上游把 API 与 peer 版本配错了 | 仅供说明，不构成解法 |
+| D. 等 uni-app 修复上游矛盾 | 被动等待 | 兜底 |
+
+> 建议：先查 **A**（找 09-19 之前可用的 `@dcloudio/*` 版本），不行再评估 B。
+> 若不接受动依赖组合，鸿蒙这条线需等 DCloud 修上游 —— iOS / Android 两个平台不受影响。
