@@ -671,6 +671,28 @@ export const clearUsageHistory = async (): Promise<void> => {
   });
 };
 
+/**
+ * Reads events newer than `since` for callers that group them differently (for
+ * example the per-conversation session view). Uses the same flush + trim path as
+ * analytics so pending writes are visible and retention still applies.
+ */
+export const listUsageEventsSince = async (
+  since: Date,
+): Promise<UsageEventRecord[]> => {
+  await flushPendingUsageEvents();
+
+  return enqueueUsageMutation(async () => {
+    const store = await persistTrimmedStore(Date.now());
+    const sinceMs = since.getTime();
+
+    return store.events.filter((event) => {
+      const eventMs = Date.parse(event.timestamp);
+
+      return Number.isFinite(eventMs) && eventMs >= sinceMs;
+    });
+  });
+};
+
 export const getUsageAnalytics = async ({
   accessKey = 'all',
   credential = 'all',
