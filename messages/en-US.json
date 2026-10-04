@@ -24,6 +24,7 @@
     "tabs": {
       "dashboard": "Dashboard",
       "usage": "Usage",
+      "sessions": "Sessions",
       "credentials": "Credentials",
       "accountStatus": "Account Status",
       "apiTest": "API Test",
@@ -420,7 +421,8 @@
       "settingsSaved": "Settings saved.",
       "usageClearFailed": "Failed to clear usage history.",
       "usageCleared": "Usage history cleared.",
-      "usageLoadFailed": "Failed to load usage data."
+      "usageLoadFailed": "Failed to load usage data.",
+      "sessionsLoadFailed": "Failed to load the session list."
     },
     "sections": {
       "dashboard": {
@@ -525,6 +527,23 @@
       "title": "Admin sign in",
       "waitingForPasskey": "Waiting for a saved passkey...",
       "usernameLabel": "Username"
+    },
+    "sessions": {
+      "windowLabel": "Time range",
+      "window1h": "Last hour",
+      "window6h": "Last 6 hours",
+      "window24h": "Last 24 hours",
+      "window7d": "Last 7 days",
+      "refresh": "Refresh",
+      "summary": "{sessions} sessions / {calls} requests",
+      "ungrouped": "{count} requests carried no x-conversation-id and cannot be grouped",
+      "updatedAt": "Updated at {time}",
+      "empty": "No sessions in this time range",
+      "columnConversation": "Conversation ID",
+      "columnModel": "Model",
+      "columnCalls": "Calls",
+      "columnTokens": "Tokens",
+      "columnLastActive": "Last active"
     }
   },
   "usage": {

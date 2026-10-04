@@ -24,6 +24,10 @@ import {
 } from '@/lib/server/domain/credentials';
 import { getModelsForCredentials } from '@/lib/server/proxy/codebuddy';
 import { getDebugSettings, listDebugLogs } from '@/lib/server/domain/debug';
+import {
+  DEFAULT_SESSION_WINDOW_MINUTES,
+  getSessionSummaries,
+} from '@/lib/server/domain/sessions';
 import { getUsageAnalytics } from '@/lib/server/domain/usage';
 import type { AppLocale } from '@/lib/i18n/routing';
 
@@ -170,6 +174,23 @@ export const getInitialData = async ({
         currentCredential:
           currentCredential as unknown as CurrentCredentialInfo,
         models: models.map((model) => model.id),
+        tab,
+      };
+    }
+    case 'sessions': {
+      const timestamp = new Date().toISOString();
+      const summary = await getSessionSummaries({
+        windowMinutes: DEFAULT_SESSION_WINDOW_MINUTES,
+      });
+
+      return {
+        sessions: {
+          rows: summary.sessions,
+          totals: summary.totals,
+          ungroupedEvents: summary.ungroupedEvents,
+          updatedAtLabel: formatTime(timestamp, locale),
+          windowMinutes: summary.windowMinutes,
+        },
         tab,
       };
     }

@@ -10,6 +10,7 @@ import type { AdminDebugSnapshot } from '@/app/debug/debug';
 export type TabKey =
   | 'dashboard'
   | 'usage'
+  | 'sessions'
   | 'credentials'
   | 'account-status'
   | 'api-test'
@@ -59,6 +60,11 @@ export interface DebugTabInitialData {
   tab: 'debug';
 }
 
+export interface SessionsTabInitialData {
+  sessions?: import('@/app/sessions/sessions').SessionsSnapshot;
+  tab: 'sessions';
+}
+
 export interface SettingsTabInitialData {
   settings: AdminSettingsSnapshot;
   tab: 'settings';
@@ -70,5 +76,6 @@ export type AdminConsoleInitialData =
   | CredentialsTabInitialData
   | DashboardInitialData
   | DebugTabInitialData
+  | SessionsTabInitialData
   | SettingsTabInitialData
   | UsageTabInitialData;

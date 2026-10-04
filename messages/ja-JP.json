@@ -24,6 +24,7 @@
     "tabs": {
       "dashboard": "ダッシュボード",
       "usage": "使用量",
+      "sessions": "セッション",
       "credentials": "認証情報",
       "accountStatus": "アカウント状態",
       "apiTest": "API テスト",
@@ -420,7 +421,8 @@
       "settingsSaved": "設定を保存しました。",
       "usageClearFailed": "使用量履歴の削除に失敗しました。",
       "usageCleared": "使用量履歴を削除しました。",
-      "usageLoadFailed": "使用量データの読み込みに失敗しました。"
+      "usageLoadFailed": "使用量データの読み込みに失敗しました。",
+      "sessionsLoadFailed": "セッション一覧の読み込みに失敗しました。"
     },
     "sections": {
       "dashboard": {
@@ -526,6 +528,23 @@
       "title": "管理者サインイン",
       "waitingForPasskey": "保存済み passkey を待っています...",
       "usernameLabel": "ユーザー名"
+    },
+    "sessions": {
+      "windowLabel": "期間",
+      "window1h": "直近 1 時間",
+      "window6h": "直近 6 時間",
+      "window24h": "直近 24 時間",
+      "window7d": "直近 7 日間",
+      "refresh": "更新",
+      "summary": "{sessions} セッション / {calls} リクエスト",
+      "ungrouped": "x-conversation-id を持たないリクエストが {count} 件あり、集約できません",
+      "updatedAt": "{time} に更新",
+      "empty": "この期間にセッションはありません",
+      "columnConversation": "セッション ID",
+      "columnModel": "モデル",
+      "columnCalls": "リクエスト数",
+      "columnTokens": "トークン",
+      "columnLastActive": "最終活動"
     }
   },
   "usage": {

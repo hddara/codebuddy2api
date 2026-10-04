@@ -16,6 +16,7 @@ import {
   KeyRound,
   LayoutDashboard,
   LogOut,
+  Radio,
   Send,
   Settings2,
 } from 'lucide-react';
@@ -54,6 +55,12 @@ import {
   createApiTestState,
 } from '@/app/api-test/api-test';
 import {
+  createSessionsState,
+  SessionsProvider,
+  sessionsStateAtom,
+  type SessionsSnapshot,
+} from '@/app/sessions/sessions';
+import {
   authStateAtom,
   createCredentialsState,
   CredentialsProvider,
@@ -85,11 +92,13 @@ const tabs: Array<{
     | 'dashboard'
     | 'accountStatus'
     | 'debug'
+    | 'sessions'
     | 'settings'
     | 'usage';
 }> = [
   { icon: LayoutDashboard, key: 'dashboard', labelKey: 'dashboard' },
   { icon: ChartLine, key: 'usage', labelKey: 'usage' },
+  { icon: Radio, key: 'sessions', labelKey: 'sessions' },
   { icon: KeyRound, key: 'credentials', labelKey: 'credentials' },
   { icon: CircleUserRound, key: 'account-status', labelKey: 'accountStatus' },
   { icon: Send, key: 'api-test', labelKey: 'apiTest' },
@@ -178,6 +187,16 @@ interface SettingsResponse {
   labels?: Record<string, string>;
   settings?: Record<string, string | number | null>;
 }
+
+interface SessionsResponse {
+  sessions?: SessionsSnapshot['rows'];
+  totals?: SessionsSnapshot['totals'];
+  ungroupedEvents?: number;
+  windowMinutes?: number;
+}
+
+const formatSessionUpdatedAt = (value: Date): string =>
+  value.toLocaleTimeString();
 
 interface DebugResponse {
   autoRefreshSeconds?: number;
@@ -309,6 +328,7 @@ type InitialStateAtom =
   | typeof credentialsStateAtom
   | typeof dashboardStateAtom
   | typeof debugStateAtom
+  | typeof sessionsStateAtom
   | typeof settingsStateAtom
   | typeof usageStateAtom;
 
@@ -338,6 +358,8 @@ const AdminPageLayoutContent = ({
     initialTabAtoms.set(settingsStateAtom, createSettingsState(initialData));
   } else if (initialData?.tab === 'api-test') {
     initialTabAtoms.set(apiTestStateAtom, createApiTestState(initialData));
+  } else if (initialData?.tab === 'sessions') {
+    initialTabAtoms.set(sessionsStateAtom, createSessionsState(initialData));
   }
 
   useHydrateAtoms(initialTabAtoms);
@@ -354,6 +376,7 @@ const AdminPageLayoutContent = ({
   const [auth, setAuth] = useAtom(authStateAtom);
   const [apiTest, setApiTest] = useAtom(apiTestStateAtom);
   const [settings, setSettings] = useAtom(settingsStateAtom);
+  const [sessions, setSessions] = useAtom(sessionsStateAtom);
   const activeTab = initialTab;
   const locale = useLocale();
   const translations = useTranslations('Admin');
@@ -396,6 +419,11 @@ const AdminPageLayoutContent = ({
   const debugAutoRefreshTimerRef = useRef<number | null>(null);
   const usageAutoRefreshTimerRef = useRef<number | null>(null);
   const usageRequestRef = useRef(usage.request);
+  const sessionsRef = useRef(sessions);
+
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
   const showNotification = useCallback(
     (type: 'success' | 'error' | 'warning' | 'info', message: string) => {
       toast[type]({ description: message, duration: 3000 });
@@ -625,6 +653,49 @@ const AdminPageLayoutContent = ({
       values: nextValues,
     }));
   }, [setSettings]);
+
+  const loadSessions = useCallback(
+    async (windowMinutes?: number) => {
+      setSessions((current) => ({ ...current, loading: true }));
+
+      const targetWindow =
+        windowMinutes ?? sessionsRef.current.request.windowMinutes;
+      const result = await requestJson<SessionsResponse>(
+        `/admin-api/sessions?windowMinutes=${targetWindow}`,
+      );
+
+      if (!result.ok) {
+        setSessions((current) => ({
+          ...current,
+          errorMessage: getErrorMessage(
+            result.data,
+            consoleMessages.sessionsLoadFailed,
+          ),
+          loading: false,
+        }));
+        return;
+      }
+
+      const payload = result.data;
+
+      setSessions((current) => ({
+        ...current,
+        errorMessage: null,
+        lastUpdatedAt: formatSessionUpdatedAt(new Date()),
+        loading: false,
+        request: { windowMinutes: targetWindow },
+        rows: payload?.sessions ?? [],
+        totals: payload?.totals ?? {
+          calls: 0,
+          sessions: 0,
+          totalTokens: 0,
+        },
+        ungroupedEvents: payload?.ungroupedEvents ?? 0,
+        windowMinutes: payload?.windowMinutes ?? targetWindow,
+      }));
+    },
+    [consoleMessages.sessionsLoadFailed, setSessions],
+  );
 
   const loadDebug = useCallback(
     async ({
@@ -1591,6 +1662,8 @@ const AdminPageLayoutContent = ({
         void loadDebug();
       } else if (activeTab === 'settings') {
         void loadSettings();
+      } else if (activeTab === 'sessions') {
+        void loadSessions();
       } else {
         void loadUsage();
       }
@@ -1609,6 +1682,7 @@ const AdminPageLayoutContent = ({
     loadCredentialModels,
     loadDashboard,
     loadDebug,
+    loadSessions,
     loadSettings,
     loadUsage,
   ]);
@@ -2096,6 +2170,21 @@ const AdminPageLayoutContent = ({
             >
               {children}
             </DebugProvider>
+          ) : null}
+          {activeTab === 'sessions' ? (
+            <SessionsProvider
+              value={{
+                loadSessions,
+                refresh: async () => {
+                  await loadSessions(sessions.request.windowMinutes);
+                },
+                setWindowMinutes: async (windowMinutes) => {
+                  await loadSessions(windowMinutes);
+                },
+              }}
+            >
+              {children}
+            </SessionsProvider>
           ) : null}
           {activeTab === 'settings' ? (
             <SettingsProvider

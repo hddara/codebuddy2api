@@ -1193,3 +1193,23 @@ textarea {
     margin-top: 48px;
   }
 }
+
+.sessions-window-select {
+  min-width: 160px;
+}
+
+.sessions-meta {
+  font-size: 13px;
+}
+
+.sessions-meta-muted {
+  opacity: 0.7;
+}
+
+.sessions-meta-faint {
+  opacity: 0.6;
+}
+
+.sessions-meta-error {
+  color: var(--ant-color-error);
+}

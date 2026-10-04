@@ -24,6 +24,7 @@
     "tabs": {
       "dashboard": "仪表板",
       "usage": "用量统计",
+      "sessions": "会话",
       "credentials": "凭证管理",
       "accountStatus": "账号状态",
       "apiTest": "API 测试",
@@ -416,7 +417,8 @@
       "settingsSaved": "设置已保存。",
       "usageClearFailed": "清空用量统计历史失败。",
       "usageCleared": "用量统计历史已清空。",
-      "usageLoadFailed": "加载用量统计数据失败。"
+      "usageLoadFailed": "加载用量统计数据失败。",
+      "sessionsLoadFailed": "会话列表加载失败。"
     },
     "sections": {
       "dashboard": {
@@ -522,6 +524,23 @@
       "title": "管理员登录",
       "waitingForPasskey": "正在等待已保存的 passkey...",
       "usernameLabel": "用户名"
+    },
+    "sessions": {
+      "windowLabel": "时间范围",
+      "window1h": "最近 1 小时",
+      "window6h": "最近 6 小时",
+      "window24h": "最近 24 小时",
+      "window7d": "最近 7 天",
+      "refresh": "刷新",
+      "summary": "共 {sessions} 个会话 / {calls} 次请求",
+      "ungrouped": "另有 {count} 条请求未带 x-conversation-id，无法归入会话",
+      "updatedAt": "更新于 {time}",
+      "empty": "该时间范围内没有会话",
+      "columnConversation": "会话 ID",
+      "columnModel": "模型",
+      "columnCalls": "请求数",
+      "columnTokens": "Token",
+      "columnLastActive": "最后活动"
     }
   },
   "usage": {

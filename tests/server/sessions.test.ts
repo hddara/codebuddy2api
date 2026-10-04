@@ -180,4 +180,39 @@ describe('sessions admin route', () => {
     expect(response.status).toBe(401);
     expect(getSessionSummaries).not.toHaveBeenCalled();
   });
+
+  it('renders a plain-text table when format=table is requested', async () => {
+    vi.mocked(getSessionSummaries).mockResolvedValue({
+      sessions: [
+        {
+          accessKeyId: 'key-1',
+          accessKeyName: 'HDdaraSuper',
+          callCount: 3,
+          conversationId: 'conv-a',
+          credentialFilenames: ['cred-a.json'],
+          firstSeenAt: '2026-10-04T00:00:00.000Z',
+          inputTokens: 1,
+          lastActiveAt: '2026-10-04T00:10:00.000Z',
+          models: ['deepseek-v4.1-flash'],
+          outputTokens: 2,
+          routes: ['/v1/chat/completions'],
+          totalTokens: 3,
+        },
+      ],
+      totals: { calls: 3, sessions: 1, totalTokens: 3 },
+      ungroupedEvents: 2,
+      windowMinutes: 60,
+    });
+
+    const response = await GET(
+      new Request('http://localhost/admin-api/sessions?format=table'),
+    );
+    const body = await response.text();
+
+    expect(response.headers.get('Content-Type')).toContain('text/plain');
+    expect(body).toContain('window=60min sessions=1 calls=3');
+    expect(body).toContain('ungrouped=2');
+    expect(body).toContain('conv-a');
+    expect(body).toContain('HDdaraSuper');
+  });
 });
