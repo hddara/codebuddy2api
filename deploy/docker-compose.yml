@@ -1,6 +1,6 @@
 services:
   codebuddy2api:
-    image: registry.cn-hangzhou.aliyuncs.com/hucx/codebuddy2api:20261004.T05
+    image: registry.cn-hangzhou.aliyuncs.com/hucx/codebuddy2api:20261004.T06
     restart: unless-stopped
     ports:
       - '8001:8001'
