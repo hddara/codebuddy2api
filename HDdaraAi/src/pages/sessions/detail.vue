@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import type { StreamHandle } from '@/api/sessions'
+import type { StreamHandle, TranscriptEntry } from '@/api/sessions'
 import { onLoad, onUnload } from '@dcloudio/uni-app'
 
 import { ref } from 'vue'
-import { openSessionStream } from '@/api/sessions'
+import { fetchTranscripts, openSessionStream } from '@/api/sessions'
 
 definePage({
   name: 'session-detail',
@@ -17,8 +17,49 @@ const statusLabel = ref('等待活动')
 const errorMessage = ref('')
 const model = ref('')
 const eventCount = ref(0)
+const history = ref<TranscriptEntry[]>([])
+const historyLoaded = ref(false)
+const expandedIds = ref<string[]>([])
 
 let handle: StreamHandle | null = null
+
+/**
+ * Loads the stored history for this conversation.
+ *
+ * Failures are swallowed on purpose: the live stream is the primary purpose of
+ * this page, so a history problem must not blank out the screen.
+ */
+async function loadHistory() {
+  if (!conversationId.value)
+    return
+
+  try {
+    const payload = await fetchTranscripts(conversationId.value)
+
+    history.value = payload.entries ?? []
+  }
+  catch {
+    history.value = []
+  }
+  finally {
+    historyLoaded.value = true
+  }
+}
+
+function toggleEntry(id: string) {
+  expandedIds.value = expandedIds.value.includes(id)
+    ? expandedIds.value.filter(item => item !== id)
+    : [...expandedIds.value, id]
+}
+
+function formatClock(value: string): string {
+  const parsed = new Date(value)
+
+  if (Number.isNaN(parsed.getTime()))
+    return value
+
+  return parsed.toLocaleTimeString()
+}
 
 function applyEvent(event: Record<string, unknown>) {
   eventCount.value += 1
@@ -56,6 +97,9 @@ function applyEvent(event: Record<string, unknown>) {
   if (type === 'session.completed') {
     status.value = 'done'
     statusLabel.value = '回答完成'
+    // The finished turn is persisted by the gateway, so re-read history to show
+    // it in the list instead of waiting for the next app launch.
+    void loadHistory()
     return
   }
 
@@ -63,6 +107,7 @@ function applyEvent(event: Record<string, unknown>) {
     status.value = 'failed'
     statusLabel.value = '回答失败'
     errorMessage.value = String(event.error ?? '未知错误')
+    void loadHistory()
     return
   }
 
@@ -107,6 +152,7 @@ onLoad((query) => {
 
   conversationId.value = decodeURIComponent(id)
   connect()
+  void loadHistory()
 })
 
 onUnload(() => {
@@ -148,6 +194,45 @@ onUnload(() => {
         该会话当前没有正在进行的输出。在 IDE 里发起请求后会实时出现在这里。
       </text>
       <text v-else class="reply-text">{{ replyText }}</text>
+    </view>
+
+    <view class="history">
+      <view class="history-head">
+        <text class="reply-title">历史问答</text>
+        <text class="history-count">{{ history.length }} 条</text>
+      </view>
+
+      <text v-if="historyLoaded && !history.length" class="history-empty">
+        还没有记录。网关会保存每次问答，可在设置里调整保留天数与条数。
+      </text>
+
+      <view
+        v-for="entry in history"
+        :key="entry.id"
+        class="entry"
+        @tap="toggleEntry(entry.id)"
+      >
+        <view class="entry-head">
+          <text class="entry-time">{{ formatClock(entry.completedAt) }}</text>
+          <text
+            class="entry-status"
+            :class="[`entry-status-${entry.status}`]"
+          >
+            {{ entry.status === 'failed' ? '失败' : '完成' }}
+          </text>
+        </view>
+        <text class="entry-question">{{ entry.question || '(无提问文本)' }}</text>
+        <text
+          v-if="expandedIds.includes(entry.id)"
+          class="entry-answer"
+        >
+          {{ entry.answer || '(无回答内容)' }}
+        </text>
+        <text v-else class="entry-preview">
+          {{ (entry.answer || '(无回答内容)').slice(0, 80) }}{{ entry.answerChars > 80 ? '…' : '' }}
+        </text>
+        <text v-if="entry.error" class="entry-error">{{ entry.error }}</text>
+      </view>
     </view>
 
     <view class="tip">
@@ -269,5 +354,91 @@ onUnload(() => {
   font-size: 22rpx;
   color: #a8adb5;
   text-align: center;
+}
+
+.history {
+  margin-top: 20rpx;
+  padding: 24rpx;
+  border-radius: 20rpx;
+  background-color: #ffffff;
+}
+
+.history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16rpx;
+}
+
+.history-count {
+  font-size: 24rpx;
+  color: #8a8f99;
+}
+
+.history-empty {
+  font-size: 26rpx;
+  color: #8a8f99;
+  line-height: 1.7;
+}
+
+.entry {
+  padding: 20rpx 0;
+  border-top: 1rpx solid #f0f1f3;
+}
+
+.entry-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.entry-time {
+  font-size: 22rpx;
+  color: #a8adb5;
+}
+
+.entry-status {
+  font-size: 22rpx;
+}
+
+.entry-status-completed {
+  color: #22a06b;
+}
+
+.entry-status-failed {
+  color: #cf1322;
+}
+
+.entry-question {
+  display: block;
+  margin-top: 10rpx;
+  font-size: 28rpx;
+  font-weight: 600;
+  color: #1f2329;
+  line-height: 1.6;
+}
+
+.entry-preview {
+  display: block;
+  margin-top: 8rpx;
+  font-size: 26rpx;
+  color: #8a8f99;
+  line-height: 1.7;
+}
+
+.entry-answer {
+  display: block;
+  margin-top: 8rpx;
+  font-size: 26rpx;
+  color: #4a4f57;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.entry-error {
+  display: block;
+  margin-top: 8rpx;
+  font-size: 24rpx;
+  color: #cf1322;
 }
 </style>

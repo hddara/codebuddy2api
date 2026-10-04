@@ -42,6 +42,49 @@ export async function fetchSessions(windowMinutes: number): Promise<SessionListP
     .send()
 }
 
+export interface TranscriptEntry {
+  accessKeyId: string | null
+  answer: string
+  answerChars: number
+  completedAt: string
+  conversationId: string
+  error?: string
+  id: string
+  model: string | null
+  question: string
+  questionChars: number
+  startedAt: string
+  status: 'completed' | 'failed'
+}
+
+export interface TranscriptPayload {
+  entries: TranscriptEntry[]
+  settings: { enabled: boolean, maxEntries: number, retentionDays: number }
+  totals: { answerChars: number, questionChars: number, stored: number }
+}
+
+/**
+ * Stored question/answer history for one conversation.
+ *
+ * Retention is decided server-side (age and count limits), so an entry missing
+ * here simply means it was pruned — the app does not need its own cleanup.
+ */
+export async function fetchTranscripts(
+  conversationId: string,
+  limit = 50,
+): Promise<TranscriptPayload> {
+  const query = new URLSearchParams({
+    conversationId,
+    limit: String(limit),
+  })
+
+  return alovaInstance
+    .Get<TranscriptPayload>(`/admin-api/sessions/transcripts?${query.toString()}`, {
+      headers: { ...consoleHeaders(), skipToken: true },
+    } as never)
+    .send()
+}
+
 export interface StreamHandle {
   close: () => void
 }
