@@ -37,16 +37,73 @@ for arg in "$@"; do
 done
 
 # ---- 工具定位 ----------------------------------------------------------
-# Java 交给 gradle 自己找会很飘（本机装了 10 个 JDK），显式钉一个 21。
-if [ -z "${JAVA_HOME:-}" ]; then
-  for candidate in "$HOME/Library/Java/JavaVirtualMachines"/ms-21.*/Contents/Home \
-                   "$HOME/Library/Java/JavaVirtualMachines"/openjdk-21*/Contents/Home; do
-    if [ -x "$candidate/bin/java" ]; then JAVA_HOME="$candidate"; break; fi
-  done
+# Java 交给 gradle 自己找会很飘（本机装了 10 个 JDK，其中还有 1.8），显式钉一个 21。
+#
+# 这里**不能只在 JAVA_HOME 为空时才探测**：本机 JAVA_HOME 常被别的工具留成 1.8，
+# 而 Android Gradle Plugin 8.7 要求 Java 11+，会以
+# 「Dependency requires at least JVM runtime version 11」失败 —— 报错点离原因很远。
+# 所以无论 JAVA_HOME 来自哪里，都先验版本，不合格就换。
+MIN_JAVA_MAJOR=11
+
+java_major() {
+  # 输出 JDK 主版本号；无法识别时输出 0。
+  #
+  # 注意旧式版本串 `1.8.0_504` 的主版本是 **8** 而不是 1 —— 直接取第一个点前数字
+  # 会把 JDK 8 误判成 1，于是「1 >= 11」为假、逻辑恰好还能工作，但提示信息会写成
+  # 「版本过低（1）」，把人引向错误的方向。
+  [ -x "$1/bin/java" ] || { echo 0; return; }
+  local raw
+  raw="$("$1/bin/java" -version 2>&1 | head -1 | sed -n 's/.*version "\([0-9._]*\)".*/\1/p')"
+  if [ -z "$raw" ]; then echo 0; return; fi
+  case "$raw" in
+    1.*) echo "$raw" | cut -d. -f2 ;;
+    *)   echo "$raw" | cut -d. -f1 ;;
+  esac
+}
+
+drop_java_home() {
+  unset JAVA_HOME
+}
+
+if [ -n "${JAVA_HOME:-}" ]; then
+  if [ "$(java_major "$JAVA_HOME")" -ge "$MIN_JAVA_MAJOR" ]; then
+    echo "   沿用环境中的 JAVA_HOME=$(basename "$(dirname "$(dirname "$JAVA_HOME")")")"
+  else
+    echo "   环境中的 JAVA_HOME 版本过低（$(java_major "$JAVA_HOME")），改用自动探测"
+    drop_java_home
+  fi
 fi
 
-if [ -z "${JAVA_HOME:-}" ] || [ ! -x "$JAVA_HOME/bin/java" ]; then
-  echo "找不到可用的 JDK 21。请设置 JAVA_HOME 后重试，例如：" >&2
+if [ -z "${JAVA_HOME:-}" ]; then
+  # 按偏好顺序找：先 21，再 17，再任意 11+。
+  #
+  # 两种写法必须区分开，这里踩过两次：
+  #
+  #  - `for pattern in ms-21.*` —— 列表**不加引号**，但开了 nullglob 时，未匹配的
+  #    条目会被整条删掉，列表可能变空 ⇒ **循环一次都不执行**，探测静默失败。
+  #    所以列表项一律加引号，让 pattern 以字面量进入循环。
+  #  - `".../$pattern/Contents/Home"` —— 拼接后**必须是引号外的通配符**才会展开；
+  #    写成 `"$dir/$pattern/..."`（全引号）则 `$pattern` 不参与 glob，永远匹配不到。
+  #
+  # 用数组收集而不是 `ls | sort`，以免路径含空格被拆开。
+  shopt -s nullglob
+  for pattern in "ms-21.*" "openjdk-21*" "temurin-21.*" "graalvm-jdk-21*" \
+                 "ms-17.*" "openjdk-17*" "temurin-17.*" \
+                 "ms-*" "openjdk-*" "temurin-*"; do
+    candidates=("$HOME/Library/Java/JavaVirtualMachines/"$pattern"/Contents/Home")
+    for candidate in "${candidates[@]}"; do
+      if [ "$(java_major "$candidate")" -ge "$MIN_JAVA_MAJOR" ]; then
+        JAVA_HOME="$candidate"
+        break 2
+      fi
+    done
+  done
+  shopt -u nullglob
+fi
+
+if [ -z "${JAVA_HOME:-}" ] || [ "$(java_major "$JAVA_HOME")" -lt "$MIN_JAVA_MAJOR" ]; then
+  echo "找不到 JDK ${MIN_JAVA_MAJOR}+（Android Gradle Plugin 8.7 的最低要求）。" >&2
+  echo "请设置 JAVA_HOME 后重试，例如：" >&2
   echo "  export JAVA_HOME=\$HOME/Library/Java/JavaVirtualMachines/ms-21.0.11/Contents/Home" >&2
   exit 1
 fi
