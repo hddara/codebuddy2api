@@ -226,3 +226,50 @@ iOS 与 Android 包已用最终源码**重出并重装验证**。**pnpm 切换�
 
 > 建议：先查 **A**（找 09-19 之前可用的 `@dcloudio/*` 版本），不行再评估 B。
 > 若不接受动依赖组合，鸿蒙这条线需等 DCloud 修上游 —— iOS / Android 两个平台不受影响。
+
+---
+
+# 四、真机联调踩到的 4 个真实缺陷（2026-10-05，已修）
+
+App 装上真机后「设置里保存了凭据，一开却提示未登录 / 请求打到线上网关」，逐个排掉后
+定位到 **4 个代码级缺陷**，都不是打包问题：
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 1 | 凭据保存后冷启动就丢 | App 端 storage 底层是 `plus.storage`，Pinia 插件在 5+ runtime 就绪**之前**执行；此时 `uni.setStorageSync` **不抛错、也不写入**（静默丢弃） | `persist.ts` 改为**写入后读回校验，失败则重试**（最多 12 次 × 500ms）；并把快照**序列化成 JSON 字符串**再存（直接存对象在部分 runtime 会读回空值） |
+| 2 | 恢复后 `isLoggedIn` 仍是 false | `persist.ts` 直接给 `store.$state` 整体赋值，Pinia 不会可靠通知订阅者；且派生字段 `isLoggedIn` 没有被重算 | 改用 `store.$patch()`；新增 `syncLoginState()` 并在 `App.vue` 的 `onLaunch` 调用 |
+| 3 | **设置页填的网关地址完全没生效**，请求一直打到编译期的线上地址 | `base-url.ts` 的选路只用「远端配置 + 编译期候选」，**从未读取设置页填的 `baseUrl`** | 新增 `readManualBaseUrl()`，**手填地址优先级最高**（本机/LAN/`adb reverse` 地址本来就不会出现在远端配置里） |
+| 4 | 保存好的凭据会**自己消失** | `handlers.ts` 里**任意一个** 401/403 都会无条件 `setAdminCookie('')`；而冷启动时多个请求并发，首个未就绪的 401 就把凭据清掉了 | 改为**连续 2 次**鉴权失败才清（成功即清零计数） |
+
+## 服务端配套改动
+
+`lib/server/admin/session.ts`：控制台会话令牌现在同时接受两种传递形式 ——
+
+- `Cookie: codebuddy_admin_session=<token>`（浏览器原生形态）
+- `Authorization: Bearer <token>`（原生客户端兜底）
+
+原因：部分 App / 小程序 runtime **拒绝设置 `Cookie` 头**。注意 bearer 里必须是**裸 token**，
+不能带 `codebuddy_admin_session=` 前缀，否则会把名字一起哈希进去而校验失败。
+这只是放宽传输方式，**令牌本身没变**，鉴权强度不变。
+
+## 可观测性
+
+- 设置页新增**存储探针**（显示 `存储：cookie(67) / <地址>`），因为正式版 App 沙盒无法用
+  `adb` 查看，这是判断「到底写没写进去」的唯一手段。
+- 保存时做读回校验，失败会显示「保存未生效」而不是假报「已保存」。
+
+## 联调小抄（Android）
+
+```bash
+adb reverse tcp:8001 tcp:8001          # 手机 127.0.0.1:8001 → 本机 8001
+adb shell pm clear cn.hddara.ai        # 想从零验证时用（会清掉存储）
+adb shell input tap 545 428            # 设置页「网关地址」框（1088x2400 布局下的实测坐标）
+adb shell input tap 545 907            # 「控制台 Cookie」框
+```
+
+⚠️ **不要连续 `adb shell input text` 往同一个框里灌值** —— 它不会先清空，会**追加**，
+很容易把地址拼成 `http://127.0.0.1:8001http:http://...` 这种坏串（本次就踩了）。
+先点框 → `keyevent 123`（到行尾）→ 多次 `keyevent 67`（退格）清空 → 再输入。
+
+⚠️ **华为等 ROM 会保活**：`am force-stop` 后进程仍在（非 root 杀不掉），
+所以「冷启动」验证要认准 `am force-stop` 后 `ps` 里进程真的消失。
