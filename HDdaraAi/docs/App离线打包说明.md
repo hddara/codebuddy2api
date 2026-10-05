@@ -139,6 +139,20 @@ $BT/aapt dump badging $APK | grep application-icon   # 各密度应有独立条�
 4. **DCloud appid / 离线 Key 是两件事**：appid 在「应用列表 → 创建应用」拿；iOS 离线 Key 在「应用 → 各平台信息 → 新增(iOS App，填 BundleId) → 创建离线Key」。每个 AppID 前 6 个 Key 免费。
 5. **壳工程的图标一直是 mall 的「梦想购」购物车**：`android:icon`、`AppIcon`、`dclogo`（启动图）**三处都要换**，而它们分散在 iOS/Android 两套壳里，容易只改一处。曾出现「App 图标换了但启动瞬间仍闪出购物车」的情况。**处置：统一走 `design/make-app-icon.py`（§3.1），不要手工替换。**
 6. **`android:roundIcon` 需要 `@mipmap/ic_launcher` 在旧 API 上也能解析**：`mipmap-anydpi-v26/ic_launcher.xml` 从 API 26 起才存在，所以必须同时提供 `mipmap-<dpi>/ic_launcher.png` 位图，否则 Android 7 及以下**启动崩溃**。
+7. **iOS 图标只有一张，且只有重新出包才生效**：`AppIcon.appiconset/Contents.json` 只声明 `icon1024.png`（新版 Xcode 单尺寸模式），其余尺寸由 Xcode 派生。Android 换图重装即可，**iOS 必须 `./build-ipa.sh` 重打**。
+8. **`[3/3] 导出 IPA` 阶段日志会“反复重试”，别误判为卡死**：日志反复出现同一句 `IDEDistribution: Created bundle at path: …/HBuilder_<时间戳>.xcdistributionlogs`，且**每轮 xcodebuild 进程号都不同**，同时 `HBuilder.ipa` 的时间戳在推进。这是 xcodebuild 在等 Apple 服务响应，每轮都在前进。**判据是产物不是日志末行**：
+
+   ```bash
+   ls build/ipa/                                   # 出现 DistributionSummary.plist 即成功
+   plutil -p build/ipa/DistributionSummary.plist   # 含证书/有效期/buildNumber
+   ```
+
+   确认成功后可直接终止仍在重试的进程：
+   ```bash
+   launchctl remove cb2ios
+   pkill -f "build-ipa.sh development"; pkill -f "xcodebuild -exportArchive"
+   ```
+9. **iOS 装机不必走 Xcode GUI**：`xcrun devicectl device install app --device <UDID> <ipa>` 可直接安装 development 签名的包；启动用 `xcrun devicectl device process launch --device <UDID> cn.hddara.ai`。
 
 ---
 
