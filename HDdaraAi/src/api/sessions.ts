@@ -95,6 +95,158 @@ export async function fetchTranscripts(
     .send()
 }
 
+/**
+ * The App runtime's XHR, which can read a response incrementally.
+ *
+ * Declared as a structural type rather than reusing the DOM's `XMLHttpRequest`
+ * because the plus variant only exposes what the SSE reader needs, and because
+ * `lib.dom` is not guaranteed to be in scope for the App build.
+ */
+interface PlusXhrConstructor {
+  new (): {
+    abort: () => void
+    onerror: (() => void) | null
+    onloadend: (() => void) | null
+    onprogress: (() => void) | null
+    open: (method: string, url: string, async: boolean) => void
+    response: ArrayBuffer | null
+    responseType: string
+    send: () => void
+    setRequestHeader: (name: string, value: string) => void
+    status: number
+  }
+}
+
+/**
+ * Sends a message to the gateway and streams the answer back.
+ *
+ * Uses `/admin-api/chat/completions`, which authenticates with the console
+ * cookie the app already holds — `/v1/chat/completions` would require a gateway
+ * API key, an extra credential the user should not need just to ask a question.
+ * The payload is the standard chat-completions shape, so nothing bespoke is
+ * introduced on the server side.
+ *
+ * `conversationId` is threaded through as the upstream conversation id so the
+ * answer joins the same thread the IDE is using; it is carried as a header
+ * because the body is forwarded verbatim to the provider.
+ */
+export async function sendChatMessage({
+  conversationId,
+  message,
+  model,
+  onDelta,
+  onError,
+  onStart,
+}: {
+  conversationId?: string
+  message: string
+  model?: string
+  onDelta: (text: string) => void
+  onError: (message: string) => void
+  onStart?: () => void
+}): Promise<void> {
+  const auth = useAuthStore()
+  const base = auth.baseUrl || getApiBaseUrl()
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...consoleHeaders(),
+  }
+
+  if (conversationId) {
+    headers['x-conversation-id'] = conversationId
+  }
+
+  const response = await new Promise<{
+    onChunkReceived?: (handler: (result: { data: ArrayBuffer }) => void) => void
+    onHeadersReceived?: (handler: (result: { header: Record<string, string> }) => void) => void
+    abort?: () => void
+  }>((resolve, reject) => {
+    const request = uni.request({
+      data: {
+        messages: [{ content: message, role: 'user' }],
+        model: model || 'deepseek-v4.1-flash',
+        stream: true,
+      },
+      enableChunked: true,
+      header: headers,
+      method: 'POST',
+      timeout: 2_147_483_647 as never,
+      url: `${base}/admin-api/chat/completions`,
+      fail: (error: { errMsg?: string }) => {
+        reject(new Error(String(error?.errMsg ?? '请求失败')))
+      },
+      success: () => {
+        // Streaming responses end here once the server closes; nothing to do.
+      },
+    } as never) as never
+
+    resolve(request)
+  }).catch((error: Error) => {
+    onError(error.message)
+    return null
+  })
+
+  if (!response)
+    return
+
+  if (!response.onChunkReceived) {
+    onError('当前运行时不支持流式响应，无法显示回答')
+    return
+  }
+
+  onStart?.()
+
+  const decodeChunk = createUtf8Decoder()
+  let buffer = ''
+
+  await new Promise<void>((resolve) => {
+    response.onChunkReceived?.((result) => {
+      buffer += decodeChunk(result.data)
+
+      const frames = buffer.split(/\n\n/)
+      buffer = frames.pop() ?? ''
+
+      for (const frame of frames) {
+        const dataLine = frame
+          .split(/\n/)
+          .find(line => line.startsWith('data: '))
+
+        if (!dataLine)
+          continue
+
+        const payload = dataLine.slice(6)
+
+        if (payload === '[DONE]') {
+          resolve()
+          return
+        }
+
+        try {
+          const parsed = JSON.parse(payload) as {
+            choices?: Array<{ delta?: { content?: string } }>
+            error?: { message?: string }
+          }
+
+          if (parsed.error?.message) {
+            onError(parsed.error.message)
+            resolve()
+            return
+          }
+
+          const text = parsed.choices?.[0]?.delta?.content
+
+          if (typeof text === 'string' && text) {
+            onDelta(text)
+          }
+        }
+        catch {
+          // A malformed frame is skipped rather than aborting the whole answer.
+        }
+      }
+    })
+  })
+}
+
 export interface StreamHandle {
   close: () => void
 }
@@ -120,67 +272,265 @@ export function openSessionStream({
   const query = conversationId
     ? `?conversationId=${encodeURIComponent(conversationId)}`
     : ''
+  const url = `${base}/admin-api/sessions/stream${query}`
+  const headers = { Accept: 'text/event-stream', ...consoleHeaders() }
+
+  // Reported through the same channel as runtime failures so an exception here
+  // is never mistaken for "waiting for the model".
   let buffer = ''
   let closed = false
-  // Stateful: a Chinese glyph split across two chunks must not decode to
-  // replacement characters.
-  const decodeChunk = createUtf8Decoder()
 
-  const request = uni.request({
-    enableChunked: true,
-    header: {
-      Accept: 'text/event-stream',
-      ...consoleHeaders(),
-    },
-    method: 'GET',
-    timeout: 0 as never,
-    url: `${base}/admin-api/sessions/stream${query}`,
-    fail: (error: { errMsg?: string }) => {
-      if (!closed) {
-        onError?.(String(error?.errMsg ?? 'stream failed'))
-      }
-    },
-    success: () => {
-      // The stream ends when the server closes it; nothing to do.
-    },
-  } as never) as unknown as {
-    abort?: () => void
-    onChunkReceived?: (handler: (result: { data: ArrayBuffer }) => void) => void
-  }
+  // Feeds raw bytes into the SSE frame parser. Shared by both transports below,
+  // so the parsing rules exist in exactly one place.
+  const consume = ((): ((bytes: ArrayBuffer) => void) => {
+    // Stateful: a Chinese glyph split across two chunks must not decode to
+    // replacement characters.
+    const decodeChunk = createUtf8Decoder()
 
-  request.onChunkReceived?.((result) => {
-    buffer += decodeChunk(result.data)
+    return (bytes: ArrayBuffer) => {
+      if (closed)
+        return
 
-    const frames = buffer.split(/\n\n/)
+      buffer += decodeChunk(bytes)
 
-    buffer = frames.pop() ?? ''
+      const frames = buffer.split(/\n\n/)
+      buffer = frames.pop() ?? ''
 
-    for (const frame of frames) {
-      // Comment frames (`: keep-alive`) carry no payload.
-      const dataLine = frame
-        .split(/\n/)
-        .find(line => line.startsWith('data: '))
+      for (const frame of frames) {
+        // Comment frames (`: keep-alive`) carry no payload.
+        const dataLine = frame
+          .split(/\n/)
+          .find(line => line.startsWith('data: '))
 
-      if (!dataLine)
-        continue
+        if (!dataLine)
+          continue
 
-      try {
-        const parsed = JSON.parse(dataLine.slice(6)) as Record<string, unknown>
-
-        if (!closed) {
-          onEvent(parsed)
+        try {
+          const parsed = JSON.parse(dataLine.slice(6)) as Record<string, unknown>
+          if (!closed)
+            onEvent(parsed)
+        }
+        catch {
+          // A malformed frame is skipped rather than tearing down the stream.
         }
       }
-      catch {
-        // A malformed frame is skipped rather than tearing down the stream.
+    }
+  })()
+
+  // ---- transport 1: plus.net.XMLHttpRequest ---------------------------
+  //
+  // Preferred on App. `uni.request`'s chunked mode is a mini-program feature:
+  // on App the `enableChunked`/`onChunkReceived` pair silently does nothing
+  // when unsupported, so the request never reached the network at all — the
+  // gateway logged no connection while the UI sat on "等待活动" forever.
+  // XHR's `onprogress` with `responseType: 'arraybuffer'` is the App runtime's
+  // documented way to read a stream incrementally.
+  //
+  // `plus` is injected by the App runtime and only appears once the native
+  // bridge is up. Reading it eagerly (module scope, or even at page load on a
+  // cold start) can observe `undefined`, which is why the lookup below is a
+  // function called when the stream is actually started.
+  interface PlusScope { plus?: { net?: { XMLHttpRequest?: PlusXhrConstructor } } }
+
+  const plusXhrCtor = (): PlusXhrConstructor | undefined => {
+    const scopes: Array<PlusScope | undefined> = [globalThis as PlusScope]
+
+    // Reading `window` is guarded on purpose: in the App runtime it may be
+    // absent — or throw — and an unguarded read aborts this whole function.
+    // That is how the stream came to never be opened while nothing was reported
+    // anywhere: the exception happened before any transport was chosen.
+    try {
+      if (typeof window !== 'undefined') {
+        scopes.push(window as unknown as PlusScope)
       }
     }
-  })
+    catch {
+      // No browser global here; `globalThis` above already covers this runtime.
+    }
+
+    for (const scope of scopes) {
+      const ctor = scope?.plus?.net?.XMLHttpRequest
+      if (ctor)
+        return ctor
+    }
+
+    return undefined
+  }
+
+  // Distinguishes "the bridge never came up" from "the bridge is there but has
+  // no streaming XHR" — two different bugs that both look like a silent stream.
+  const describeMissingBridge = (): string => {
+    const hasPlus = Boolean(
+      (globalThis as { plus?: unknown }).plus
+      || (typeof window !== 'undefined'
+        && (window as unknown as { plus?: unknown }).plus),
+    )
+
+    return hasPlus
+      ? '实时连接不可用：当前运行时不支持流式请求'
+      : '实时连接不可用：未检测到 App 原生桥（plus）'
+  }
+
+  const startXhrStream = (Ctor: PlusXhrConstructor): StreamHandle => {
+    let consumedBytes = 0
+    const xhr = new Ctor()
+
+    xhr.open('GET', url, true)
+    xhr.responseType = 'arraybuffer'
+    xhr.setRequestHeader('Accept', headers.Accept)
+    for (const [name, value] of Object.entries(headers)) {
+      if (name !== 'Accept')
+        xhr.setRequestHeader(name, value)
+    }
+
+    xhr.onprogress = () => {
+      if (closed)
+        return
+
+      const chunk = xhr.response
+      if (!chunk || chunk.byteLength <= consumedBytes)
+        return
+
+      // `response` is cumulative for arraybuffer responses, so only the new tail
+      // is handed to the parser — otherwise every frame would be replayed.
+      const fresh = chunk.slice(consumedBytes)
+      consumedBytes = chunk.byteLength
+      consume(fresh)
+    }
+
+    xhr.onerror = () => {
+      if (!closed) {
+        onError?.(`实时连接失败（HTTP ${xhr.status || '未知'}）`)
+      }
+    }
+
+    xhr.onloadend = () => {
+      // A closed stream is normal: the gateway ends it when the turn finishes,
+      // so only a rejected connection is reported. 401 in particular means the
+      // console cookie is no longer valid, which is worth naming explicitly —
+      // it reads as a UI bug otherwise.
+      if (closed || xhr.status < 400)
+        return
+
+      onError?.(
+        xhr.status === 401
+          ? '实时连接被拒绝（401）：控制台凭据已失效，请到「设置」更新 Cookie'
+          : `实时连接被拒绝（HTTP ${xhr.status}）`,
+      )
+    }
+
+    try {
+      xhr.send()
+    }
+    catch (error) {
+      onError?.(`实时连接无法建立：${String(error)}`)
+    }
+
+    return {
+      close: () => {
+        closed = true
+        try {
+          xhr.abort()
+        }
+        catch {
+          // Aborting an already-finished request is harmless.
+        }
+      },
+    }
+  }
+
+  // ---- transport 2: fetch（H5 浏览器原生流式）-------------------------
+  //
+  // Reached only when `plus` never appears, which on App means the bridge failed
+  // to start. The App build compiles this out entirely.
+  const startFetchStream = (): StreamHandle => {
+    const controller = new AbortController()
+
+    void fetch(url, { headers, signal: controller.signal })
+      .then(async (response) => {
+        if (!response.body) {
+          onError?.(`实时连接不可用（HTTP ${response.status}）`)
+          return
+        }
+
+        const reader = response.body.getReader()
+
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done || closed)
+            break
+          if (value)
+            consume(value.buffer as ArrayBuffer)
+        }
+      })
+      .catch((error: unknown) => {
+        if (!closed && (error as { name?: string })?.name !== 'AbortError') {
+          onError?.(`实时连接失败：${String(error)}`)
+        }
+      })
+
+    return {
+      close: () => {
+        closed = true
+        controller.abort()
+      },
+    }
+  }
+
+  // ---- pick a transport ------------------------------------------------
+  const immediate = plusXhrCtor()
+
+  if (immediate) {
+    return startXhrStream(immediate)
+  }
+
+  // On a cold start the page can run before `plus` is injected, so poll briefly
+  // rather than giving up on the first miss.
+  const POLL_INTERVAL_MS = 300
+  const POLL_LIMIT = 10
+  let attempts = 0
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let active: StreamHandle | undefined
+
+  const poll = (): void => {
+    if (closed)
+      return
+
+    const ctor = plusXhrCtor()
+
+    if (ctor) {
+      active = startXhrStream(ctor)
+      return
+    }
+
+    attempts += 1
+
+    if (attempts >= POLL_LIMIT) {
+      // No `plus` at all: inside the App that means the bridge is missing, while
+      // in a browser it simply is not part of the platform. Compiling the branch
+      // per platform keeps each build honest about which case it can hit.
+      // #ifdef H5
+      active = startFetchStream()
+      // #endif
+      // #ifndef H5
+      // Be explicit rather than showing "等待活动" forever with no explanation.
+      // (A silent no-op here was the original bug: no request, and no error.)
+      onError?.(describeMissingBridge())
+      // #endif
+      return
+    }
+
+    timer = setTimeout(poll, POLL_INTERVAL_MS)
+  }
+
+  timer = setTimeout(poll, POLL_INTERVAL_MS)
 
   return {
     close: () => {
       closed = true
-      request.abort?.()
+      if (timer)
+        clearTimeout(timer)
+      active?.close()
     },
   }
 }

@@ -209,6 +209,27 @@ tap_settings_tab() {
   exit 1
 }
 
+# 先用同一枚凭据探一次网关。放在最前面，是为了在**改动设备之前**就发现「token 已过期」——
+# 否则整个流程会走完，最后卡在一句含糊的「未登录」，让人以为是 App 或存储出了问题。
+if [ -n "$BASE_URL" ]; then
+  probe="$(curl -s -m 20 -o /dev/null -w '%{http_code}' \
+    -H "Cookie: codebuddy_admin_session=$COOKIE" \
+    "$BASE_URL/admin-api/sessions?windowMinutes=1440" 2>/dev/null || echo 000)"
+
+  case "$probe" in
+    200) echo "== 凭据校验：有效 ==" ;;
+    401 | 403)
+      # `${probe}` 必须带花括号：紧跟中文全角标点时，shell 会把「）」当成变量名的一部分，
+      # 报 `probe）: unbound variable`。这个坑在文档 §4 记过，这里又踩了一次。
+      echo "✗ 网关拒绝了这枚 Cookie（HTTP ${probe}）。" >&2
+      echo "  请重新登录控制台，复制新的 codebuddy_admin_session 值。" >&2
+      exit 1
+      ;;
+    000) echo "== 凭据校验：跳过（网关不可达，稍后由 App 侧暴露）==" ;;
+    *) echo "== 凭据校验：HTTP ${probe}（非 200，继续尝试）==" ;;
+  esac
+fi
+
 echo "== 启动 App 并等待界面就绪 =="
 "$ADB" shell am force-stop "$PKG" >/dev/null 2>&1 || true
 "$ADB" shell am start -n "$ACTIVITY" >/dev/null 2>&1 || true
@@ -356,7 +377,7 @@ PY
 }
 
 ok=1
-for attempt in 1 2 3; do
+for attempt in 1 2 3 4 5; do
   XML="$(require_ui)"
   RESULT="$(verify_saved "$XML")"
   PROBLEMS="$(sed -n 's/^PROBLEMS=//p' <<<"$RESULT")"
@@ -367,10 +388,13 @@ for attempt in 1 2 3; do
     break
   fi
 
-  # 保存可能只差一拍（页面重渲染），给它三次机会再判失败。
+  # 落盘是**异步**的：App 的 setStorageSync 在原生桥就绪前会静默丢弃，代码里
+  # 是带重试的，而设置页的「存储：…」回显本身也有约 1.8 秒延迟。早先只等 2 秒，
+  # 曾出现「脚本报成功、随后冷启动又提示未登录」——保存其实还没落地。
+  # 这里给足时间，并在每轮补点一次保存。
   ok=0
-  if [ "$attempt" -lt 3 ]; then
-    sleep 3
+  if [ "$attempt" -lt 5 ]; then
+    sleep 2
     "$ADB" shell input tap $SAVE >/dev/null 2>&1 || true
     sleep 2
   fi
@@ -384,4 +408,54 @@ else
   exit 1
 fi
 
-echo "完成。回到「会话」页即可看到数据。"
+# 终极校验：冷启动后会话页必须真的能取到数据。
+#
+# 这一步不能省。前面读的都是设置页自身的回显，而它只能证明「设置页认为已保存」；
+# 曾经出现过回显正常、冷启动后却回到「尚未登录」的情况（异步落盘未完成）。
+# 判定配置是否成功，看的是**数据能不能拿到**，不是界面文案。
+echo "== 冷启动校验 =="
+"$ADB" shell am force-stop "$PKG" >/dev/null 2>&1 || true
+sleep 2
+"$ADB" shell am start -n "$ACTIVITY" >/dev/null 2>&1 || true
+
+verified=0
+for attempt in $(seq 1 8); do
+  sleep 5
+  XML="$(dump_ui)"
+  [ -n "$XML" ] || continue
+
+  STATE="$(python3 - "$XML" <<'PY'
+import re, sys
+xml = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+texts = [t for t in re.findall(r'text="([^"]*)"', xml)]
+if any('尚未登录' in t or 'Admin session' in t for t in texts):
+    print('NOT_LOGGED_IN')
+elif any(re.match(r'\d+ 个会话', t) or '没有会话' in t or '该时间范围' in t for t in texts):
+    print('OK')
+else:
+    print('WAIT')
+PY
+)"
+
+  case "$STATE" in
+    OK) verified=1; break ;;
+    NOT_LOGGED_IN)
+      # "Not signed in" here does NOT mean the write failed: it means the app
+      # reached the gateway and the gateway refused the credential. The two
+      # causes need different actions, so they are reported differently —
+      # conflating them sent me chasing a storage bug that did not exist.
+      echo "  ✗ 冷启动后仍未登录。存储写入是成功的（上一行已确认），" >&2
+      echo "    因此更可能是**凭据本身已失效**，请重新登录控制台取新的 Cookie。" >&2
+      echo "    自检：curl -o /dev/null -w '%{http_code}' -H \\"Cookie: codebuddy_admin_session=<token>\\" \\"$BASE_URL/admin-api/sessions\\"" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [ "$verified" = "0" ]; then
+  echo "  [警告] 未能确认会话页已连通（界面可能仍在加载），请在手机上确认" >&2
+else
+  echo "  ✓ 冷启动后会话页正常取到数据"
+fi
+
+echo "完成。"

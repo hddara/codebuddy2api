@@ -62,14 +62,39 @@ function hasCredential(): boolean {
   return false
 }
 
+/**
+ * Waits for a credential to become readable.
+ *
+ * On a cold start the storage backend is not up when the page first shows, so a
+ * single check reports "not signed in" even though the snapshot is on disk —
+ * the settings page reads it fine a moment later. Polling briefly turns that
+ * startup race into a short delay instead of a misleading empty state.
+ */
+async function awaitCredential(timeoutMs = 5_000): Promise<boolean> {
+  if (hasCredential())
+    return true
+
+  const deadline = Date.now() + timeoutMs
+
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 300))
+    if (hasCredential())
+      return true
+  }
+
+  return false
+}
+
 async function load() {
-  if (!hasCredential()) {
+  loading.value = true
+
+  if (!(await awaitCredential())) {
     errorMessage.value = '尚未登录，请先到「设置」填写控制台凭据'
     sessions.value = []
+    loading.value = false
     return
   }
 
-  loading.value = true
   errorMessage.value = ''
 
   try {
@@ -84,8 +109,16 @@ async function load() {
     ungroupedEvents.value = payload.ungroupedEvents ?? 0
   }
   catch (error) {
+    const message = error instanceof Error ? error.message : '加载会话失败'
+
+    // The gateway's own wording ("Admin session required") describes the server's
+    // view, not what the user should do about it. A stale cookie is by far the
+    // most common cause — sessions expire while the app keeps holding the old
+    // value — so it is translated into an actionable instruction.
     errorMessage.value
-      = error instanceof Error ? error.message : '加载会话失败'
+      = /session required|401|unauthor/i.test(message)
+        ? '控制台凭据已失效，请到「设置」重新填入新的 Cookie'
+        : message
     sessions.value = []
   }
   finally {

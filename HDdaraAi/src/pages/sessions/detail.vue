@@ -3,7 +3,11 @@ import type { StreamHandle, TranscriptEntry } from '@/api/sessions'
 import { onLoad, onUnload } from '@dcloudio/uni-app'
 
 import { ref } from 'vue'
-import { fetchTranscripts, openSessionStream } from '@/api/sessions'
+import {
+  fetchTranscripts,
+  openSessionStream,
+  sendChatMessage,
+} from '@/api/sessions'
 
 definePage({
   name: 'session-detail',
@@ -21,6 +25,10 @@ const history = ref<TranscriptEntry[]>([])
 const historyLoaded = ref(false)
 const historyError = ref('')
 const expandedIds = ref<string[]>([])
+
+const draft = ref('')
+const sending = ref(false)
+const sendError = ref('')
 
 let handle: StreamHandle | null = null
 
@@ -56,6 +64,34 @@ function toggleEntry(id: string) {
   expandedIds.value = expandedIds.value.includes(id)
     ? expandedIds.value.filter(item => item !== id)
     : [...expandedIds.value, id]
+}
+
+/**
+ * Reduces a stored question to what the user actually typed.
+ *
+ * The IDE sends its prompt wrapped in system scaffolding — `<additional_data>`
+ * carrying editor context, and the real request inside `<user_query>`. Stored
+ * verbatim that renders as a wall of instructions, and the question is buried
+ * in the middle. When the tags are present the inner query is preferred; older
+ * records without tags are shown as-is (trimmed of the scaffolding if any).
+ */
+function readableQuestion(raw: string): string {
+  if (!raw)
+    return ''
+
+  const inner = raw.match(/<user_query>([\s\S]*?)<\/user_query>/i)
+
+  if (inner?.[1]?.trim()) {
+    return inner[1].trim()
+  }
+
+  // No explicit query tag: drop known scaffolding blocks and keep the rest.
+  const withoutBlocks = raw
+    .replace(/<additional_data>[\s\S]*?<\/additional_data>/gi, '')
+    .replace(/<\/?[a-z_]+>/gi, '')
+    .trim()
+
+  return withoutBlocks || raw.trim()
 }
 
 function formatClock(value: string): string {
@@ -133,20 +169,103 @@ function applyEvent(event: Record<string, unknown>) {
   }
 }
 
+/**
+ * Sends the draft to the gateway and streams the answer into the reply panel.
+ *
+ * The reply panel is shared with the live SSE stream on purpose: whether the
+ * text arrives because the IDE asked something or because the user did, it is
+ * the same conversation and it should read as one continuous transcript.
+ */
+async function send() {
+  const text = draft.value.trim()
+
+  if (!text || sending.value)
+    return
+
+  sending.value = true
+  sendError.value = ''
+  replyText.value = ''
+  status.value = 'live'
+  statusLabel.value = '正在提交问题…'
+
+  try {
+    await sendChatMessage({
+      conversationId: conversationId.value,
+      message: text,
+      onDelta: (delta) => {
+        replyText.value += delta
+        statusLabel.value = '正在输出…'
+      },
+      onError: (message) => {
+        sendError.value = message
+        status.value = 'failed'
+        statusLabel.value = '回答失败'
+      },
+      onStart: () => {
+        statusLabel.value = '正在输出…'
+      },
+    })
+
+    if (!sendError.value) {
+      status.value = 'done'
+      statusLabel.value = '回答完成'
+      draft.value = ''
+      // The turn was persisted by the gateway, so pull the history back rather
+      // than waiting for the next launch to show it.
+      void loadHistory()
+    }
+  }
+  finally {
+    sending.value = false
+  }
+}
+
+/**
+ * Last transport step reached, rendered on the page.
+ *
+ * `adb` cannot read the App sandbox on a production build and `console.log` does
+ * not reach logcat here, so the page itself is the only place these facts can be
+ * observed. It is removed once streaming works.
+ */
+const streamDebug = ref('')
+
 function connect() {
+  streamDebug.value = `id=${conversationId.value ? 'ok' : 'empty'}`
+
   if (!conversationId.value)
     return
 
-  handle?.close()
-  handle = openSessionStream({
-    conversationId: conversationId.value,
-    onError: (message) => {
-      errorMessage.value = message
-      status.value = 'failed'
-      statusLabel.value = '连接失败'
-    },
-    onEvent: applyEvent,
-  })
+  try {
+    handle?.close()
+    streamDebug.value = 'closed'
+  }
+  catch (error) {
+    streamDebug.value = `close 失败：${String(error)}`
+    return
+  }
+
+  // Wrapped because an exception thrown synchronously here is swallowed by the
+  // navigation lifecycle: the page simply stays on "等待活动" with no error and
+  // no request, which is indistinguishable from a hang.
+  try {
+    handle = openSessionStream({
+      conversationId: conversationId.value,
+      onError: (message) => {
+        errorMessage.value = message
+        status.value = 'failed'
+        statusLabel.value = '连接失败'
+        streamDebug.value = `已上报：${message}`
+      },
+      onEvent: applyEvent,
+    })
+    streamDebug.value = `handle=${handle ? 'ok' : 'null'}`
+  }
+  catch (error) {
+    status.value = 'failed'
+    statusLabel.value = '连接失败'
+    errorMessage.value = `实时连接初始化失败：${String(error)}`
+    streamDebug.value = `抛出：${String(error)}`
+  }
 }
 
 function disconnect() {
@@ -207,10 +326,36 @@ onUnload(() => {
         <text class="reply-title">实时回复</text>
         <text class="reply-action" @tap="copyReply">复制</text>
       </view>
+      <text v-if="streamDebug" class="reply-debug">{{ streamDebug }}</text>
       <text v-if="!replyText" class="reply-empty">
         该会话当前没有正在进行的输出。在 IDE 里发起请求后会实时出现在这里。
       </text>
       <text v-else class="reply-text">{{ replyText }}</text>
+    </view>
+
+    <view class="compose">
+      <text class="reply-title">继续提问</text>
+      <text class="compose-hint">
+        回答会直接发往网关，与 IDE 使用同一个会话。
+      </text>
+      <textarea
+        v-model="draft"
+        class="compose-input"
+        :disabled="sending"
+        placeholder="输入问题…"
+      />
+      <view class="compose-actions">
+        <text v-if="sending" class="compose-status">正在回答…</text>
+        <text v-else-if="sendError" class="compose-error">{{ sendError }}</text>
+        <text v-else class="compose-status" />
+        <button
+          class="compose-send"
+          :disabled="sending || !draft.trim()"
+          @tap="send"
+        >
+          {{ sending ? '发送中' : '发送' }}
+        </button>
+      </view>
     </view>
 
     <view class="history">
@@ -242,7 +387,7 @@ onUnload(() => {
             {{ entry.status === 'failed' ? '失败' : '完成' }}
           </text>
         </view>
-        <text class="entry-question">{{ entry.question || '(无提问文本)' }}</text>
+        <text class="entry-question">{{ readableQuestion(entry.question) || '(无提问文本)' }}</text>
         <text
           v-if="expandedIds.includes(entry.id)"
           class="entry-answer"
@@ -257,7 +402,8 @@ onUnload(() => {
     </view>
 
     <view class="tip">
-      提示：本页只做实时观察，不会修改 IDE 中的对话内容。
+      提示：本页用于查看实时输出与历史记录；在下方提问会直接调用网关，
+      不经过 IDE 界面。
     </view>
   </view>
 </template>
@@ -346,6 +492,14 @@ onUnload(() => {
   margin-bottom: 16rpx;
 }
 
+.reply-debug {
+  display: block;
+  margin-top: 8rpx;
+  font-size: 22rpx;
+  color: #cf1322;
+  word-break: break-all;
+}
+
 .reply-title {
   font-size: 28rpx;
   font-weight: 600;
@@ -375,6 +529,68 @@ onUnload(() => {
   font-size: 22rpx;
   color: #a8adb5;
   text-align: center;
+}
+
+.compose {
+  margin-top: 20rpx;
+  padding: 24rpx;
+  border-radius: 20rpx;
+  background-color: #ffffff;
+}
+
+.compose-hint {
+  display: block;
+  margin-top: 6rpx;
+  font-size: 22rpx;
+  color: #8a8f99;
+  line-height: 1.6;
+}
+
+.compose-input {
+  width: 100%;
+  height: 140rpx;
+  margin-top: 16rpx;
+  padding: 18rpx;
+  box-sizing: border-box;
+  border-radius: 14rpx;
+  background-color: #f5f6f8;
+  font-size: 26rpx;
+  color: #1f2329;
+}
+
+.compose-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 16rpx;
+}
+
+.compose-status {
+  flex: 1;
+  font-size: 22rpx;
+  color: #8a8f99;
+}
+
+.compose-error {
+  flex: 1;
+  font-size: 22rpx;
+  color: #cf1322;
+}
+
+.compose-send {
+  margin: 0;
+  padding: 0 40rpx;
+  height: 68rpx;
+  line-height: 68rpx;
+  border-radius: 34rpx;
+  background-color: #0a84ff;
+  color: #ffffff;
+  font-size: 26rpx;
+}
+
+.compose-send[disabled] {
+  background-color: #c8cdd6;
+  color: #ffffff;
 }
 
 .history {

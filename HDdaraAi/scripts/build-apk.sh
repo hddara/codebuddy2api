@@ -7,7 +7,7 @@
 #   ./build-apk.sh --no-web     # 跳过前端构建，复用 dist/build/app（只改了原生时用）
 #   ./build-apk.sh --install --configure
 #                               # 装机后再自动填好网关地址与控制台 Cookie
-#                               # 凭据取自 $HDARA_BASE_URL / $HDARA_COOKIE，
+#                               # 凭据取自 ${HDARA_BASE_URL} / ${HDARA_COOKIE}，
 #                               # 或 ~/.hdara-base-url / ~/.hdara-cookie
 #
 # 为什么要有这个脚本：这条链路本来有 4 步（uni build → 投放 → gradlew → adb install），
@@ -38,7 +38,7 @@ for arg in "$@"; do
     --no-web)    DO_WEB=0 ;;
     --configure) DO_CONFIGURE=1; DO_INSTALL=1 ;;   # 配置必须在装机之后
     -h|--help)   sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "未知参数: $arg（可用: --install / --no-web / --configure）" >&2; exit 2 ;;
+    *) echo "未知参数: ${arg}（可用: --install / --no-web / --configure）" >&2; exit 2 ;;
   esac
 done
 
@@ -157,7 +157,7 @@ if [ -f "$ICON_SCRIPT" ] && command -v python3 >/dev/null 2>&1; then
     echo "   手动排查: python3 $ICON_SCRIPT"
   fi
 else
-  echo "   [警告] 缺少 python3 或 $ICON_SCRIPT，跳过图标生成"
+  echo "   [警告] 缺少 python3 或 ${ICON_SCRIPT}，跳过图标生成"
 fi
 
 # ---- [3/5] 打包 --------------------------------------------------------
@@ -181,7 +181,7 @@ fi
 if [ "$DO_INSTALL" -eq 1 ]; then
   echo "== [4/5] 安装到设备 =="
   if [ ! -x "$ADB" ]; then
-    echo "   未找到 adb（$ADB），跳过安装" >&2
+    echo "   未找到 adb（${ADB}），跳过安装" >&2
     exit 0
   fi
   if [ -z "$("$ADB" devices | awk 'NR>1 && $2=="device" {print $1; exit}')" ]; then

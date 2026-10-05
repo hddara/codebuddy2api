@@ -66,35 +66,53 @@ function writeThrough(
   // every cold start look like "the credentials were never saved"; a string is
   // handled consistently on every platform.
   const serialized = JSON.stringify(payload)
-
-  // Every field the snapshot carries must be present after the write. Comparing
-  // the whole string is too strict — key order and extra Pinia internals differ
-  // between reads — and a false negative here would retry forever and, worse,
-  // keep rewriting a stale snapshot over a good one.
   const expectedKeys = Object.keys(payload as object)
-  let landed = false
+
+  const landed = (): boolean => {
+    try {
+      const readBack = parseStored(uni.getStorageSync(store.$id))
+
+      return readBack !== null
+        && expectedKeys.every(key => key in readBack)
+    }
+    catch {
+      return false
+    }
+  }
+
+  const retry = (): void => {
+    if (attempt >= WRITE_RETRY_LIMIT) {
+      console.warn(`[persist] gave up persisting ${store.$id}`)
+      return
+    }
+
+    setTimeout(writeThrough, WRITE_RETRY_INTERVAL_MS, store, attempt + 1)
+  }
 
   try {
-    uni.setStorageSync(store.$id, serialized)
-
-    const readBack = parseStored(uni.getStorageSync(store.$id))
-    landed
-      = readBack !== null
-        && expectedKeys.every(key => key in readBack)
+    // The **async** API is used on purpose. On the App runtime
+    // `setStorageSync` keeps a value in an in-memory layer and only flushes it
+    // to disk later — so reading it straight back with `getStorageSync` always
+    // succeeded, the retry loop stopped, and the write was still lost whenever
+    // the app was killed before the flush. That is the "credentials gone after
+    // restart" bug: the read-back was checking the cache, not the storage.
+    //
+    // `uni.setStorage`'s success callback fires after the write is committed.
+    uni.setStorage({
+      data: serialized,
+      fail: () => retry(),
+      key: store.$id,
+      success: () => {
+        if (!landed()) {
+          retry()
+        }
+      },
+    })
   }
   catch (error) {
     console.warn(`[persist] write failed for ${store.$id}`, error)
+    retry()
   }
-
-  if (landed || attempt >= WRITE_RETRY_LIMIT) {
-    if (!landed) {
-      console.warn(`[persist] gave up persisting ${store.$id}`)
-    }
-
-    return
-  }
-
-  setTimeout(writeThrough, WRITE_RETRY_INTERVAL_MS, store, attempt + 1)
 }
 
 /**
