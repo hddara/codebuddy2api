@@ -14,6 +14,8 @@ const auth = useAuthStore()
 
 const baseUrl = ref('')
 const adminCookie = ref('')
+// 默认隐藏；设成 true 才能看见自己粘进去的值对不对。
+const cookieVisible = ref(false)
 const apiKey = ref('')
 const saved = ref(false)
 const persistStatus = ref('')
@@ -122,10 +124,15 @@ function save() {
   uni.showToast({ icon: 'none', title: '已保存' })
 }
 
+function toggleCookieVisible() {
+  cookieVisible.value = !cookieVisible.value
+}
+
 function clear() {
   auth.logout()
   adminCookie.value = ''
   apiKey.value = ''
+  cookieVisible.value = false
   saved.value = false
 
   uni.showToast({ icon: 'none', title: '已清除凭据' })
@@ -147,16 +154,25 @@ onShow(load)
     </view>
 
     <view class="section">
-      <text class="section-title">控制台 Cookie</text>
+      <view class="section-head">
+        <text class="section-title">控制台 Cookie</text>
+        <!-- 默认遮蔽：这个值可以直接冒充管理员会话，设置页又常被截图分享。
+             需要核对时再手动展开。 -->
+        <text class="section-toggle" @tap="toggleCookieVisible">
+          {{ cookieVisible ? '隐藏' : '显示' }}
+        </text>
+      </view>
       <text class="section-hint">
         在浏览器登录控制台后，从开发者工具复制 Cookie 头里的
         codebuddy_admin_session 值。
       </text>
-      <textarea
+      <input
         v-model="adminCookie"
-        class="textarea"
+        class="input"
         placeholder="codebuddy_admin_session=..."
-      />
+        :password="!cookieVisible"
+        type="text"
+      >
     </view>
 
     <view class="section">
@@ -231,23 +247,31 @@ onShow(load)
 }
 
 .input {
+  width: 100%;
   height: 80rpx;
   padding: 0 20rpx;
+  box-sizing: border-box;
   border-radius: 14rpx;
   background-color: #f5f6f8;
   font-size: 26rpx;
   color: #1f2329;
 }
 
-.textarea {
-  width: 100%;
-  height: 160rpx;
-  padding: 20rpx;
-  box-sizing: border-box;
-  border-radius: 14rpx;
-  background-color: #f5f6f8;
+/* 标题与「显示/隐藏」同排；标题原有的下间距在这里由容器承担。 */
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12rpx;
+}
+
+.section-head .section-title {
+  margin-bottom: 0;
+}
+
+.section-toggle {
   font-size: 24rpx;
-  color: #1f2329;
+  color: #0a84ff;
 }
 
 .actions {
