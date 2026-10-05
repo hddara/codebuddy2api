@@ -1,4 +1,4 @@
-import { useAuthStore } from '@/store/authStore'
+import { ADMIN_COOKIE_NAME, useAuthStore } from '@/store/authStore'
 import { createUtf8Decoder } from '@/utils/utf8-stream'
 import { getApiBaseUrl } from './core/base-url'
 import { alovaInstance } from './core/instance'
@@ -21,35 +21,22 @@ export interface SessionListPayload {
 /**
  * Auth headers for the console (`/admin-api/*`) endpoints.
  *
- * Those routes authenticate with the signed admin cookie, and the raw cookie
- * value is stored at login, so it is replayed as a `Cookie` header. This works
- * on App and H5; some mini-program runtimes restrict the `Cookie` header, which
- * is why the settings page also accepts a gateway API key.
- */
-/**
- * The gateway stores the console session as a cookie whose value is the signed
- * token; the name lives in `codebuddy_admin_session`, not in the token itself.
- * The two headers below therefore carry *different* shapes of the same secret:
+ * The gateway authenticates these routes solely by the signed session cookie:
+ * `Cookie: codebuddy_admin_session=<token>` is the only shape that verifies.
+ * Measured against production, all of these are rejected with 401:
  *
- *  - `Cookie: codebuddy_admin_session=<token>` — the native shape.
- *  - `Authorization: Bearer <token>` — the fallback for runtimes that refuse to
- *    set a `Cookie` header (several App / mini-program JS engines do). The
- *    bearer value must be the bare token: sending `name=value` there fails
- *    verification because the name would be hashed as part of the token.
+ *  - `Cookie: <bare token>` (no name — the value is not the token, the *cookie*
+ *    is: the name is part of what gets signed)
+ *  - `Authorization: Bearer <token>`
+ *  - `Authorization: Bearer codebuddy_admin_session=<token>`
+ *
+ * The store already normalises what the user typed, so the token is taken from
+ * there rather than re-parsed here.
  */
 function consoleHeaders(): Record<string, string> {
-  const auth = useAuthStore()
-  const raw = auth.adminCookie.trim()
+  const token = useAuthStore().adminCookie.trim()
 
-  if (!raw)
-    return {}
-
-  const token = raw.includes('=') ? raw.slice(raw.indexOf('=') + 1) : raw
-
-  return {
-    Authorization: `Bearer ${token}`,
-    Cookie: raw,
-  }
+  return token ? { Cookie: `${ADMIN_COOKIE_NAME}=${token}` } : {}
 }
 
 export async function fetchSessions(windowMinutes: number): Promise<SessionListPayload> {
@@ -94,13 +81,15 @@ export async function fetchTranscripts(
   conversationId: string,
   limit = 50,
 ): Promise<TranscriptPayload> {
-  const query = new URLSearchParams({
-    conversationId,
-    limit: String(limit),
-  })
+  // Built by hand rather than with `URLSearchParams`: that class does not exist
+  // in the App JS runtime, and its absence threw before the request was ever
+  // sent — history silently rendered as "0 条" with no network activity.
+  const query
+    = `conversationId=${encodeURIComponent(conversationId)}`
+      + `&limit=${encodeURIComponent(String(limit))}`
 
   return alovaInstance
-    .Get<TranscriptPayload>(`/admin-api/sessions/transcripts?${query.toString()}`, {
+    .Get<TranscriptPayload>(`/admin-api/sessions/transcripts?${query}`, {
       headers: { ...consoleHeaders(), skipToken: true },
     } as never)
     .send()

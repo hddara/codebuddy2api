@@ -12,6 +12,50 @@ import { defineStore } from 'pinia'
  * Only the cookie is needed for the session views; the API key field exists so
  * the same app can also act as a client of the model gateway later.
  */
+/** Cookie name the gateway's console session lives under. */
+export const ADMIN_COOKIE_NAME = 'codebuddy_admin_session'
+
+/**
+ * Reduces whatever was typed into the cookie field to the bare session token.
+ *
+ * Handles the shapes seen in practice — `name=value`, `name=value; other=x`,
+ * a `Cookie` header copied verbatim, a bare token, and a value duplicated by a
+ * form that was not cleared. `String.prototype.replace` with a global pattern is
+ * used instead of a loop because the duplicate may repeat many times.
+ */
+export function normalizeAdminCookie(input: string): string {
+  const trimmed = input.trim()
+
+  if (!trimmed)
+    return ''
+
+  // Take the first `name=value` pair if a whole cookie header was pasted.
+  const firstPair = trimmed.split(';')[0].trim()
+  const raw = firstPair.includes('=')
+    ? (firstPair.slice(firstPair.indexOf('=') + 1) || '')
+    : firstPair
+
+  const token = raw.trim()
+
+  if (!token)
+    return ''
+
+  // Collapse `abcabc` (and `abcabcabc`) back to `abc`. A token repeated an odd
+  // number of times still reduces to the base value.
+  for (let size = 1; size <= Math.floor(token.length / 2); size += 1) {
+    if (token.length % size !== 0)
+      continue
+
+    const unit = token.slice(0, size)
+
+    if (unit.repeat(token.length / size) === token) {
+      return unit
+    }
+  }
+
+  return token
+}
+
 export const useAuthStore = defineStore('auth', {
   state: () => ({
     /** Raw `Cookie` header value captured from a successful console login. */
@@ -37,8 +81,18 @@ export const useAuthStore = defineStore('auth', {
       Boolean(state.adminCookie || state.apiKey),
   },
   actions: {
+    /**
+     * Stores the console session token in its canonical form.
+     *
+     * The field is free text, so anything can arrive: a bare token, the full
+     * `name=value`, a whole `Cookie` header, or — seen on a device — the same
+     * value pasted twice because the form was not cleared first. Normalising on
+     * write keeps every consumer from having to guess, and it collapses the
+     * duplicated case, which otherwise produced a token that 401'd with no hint
+     * as to why.
+     */
     setAdminCookie(cookie: string) {
-      this.adminCookie = cookie.trim()
+      this.adminCookie = normalizeAdminCookie(cookie)
       this.isLoggedIn = Boolean(this.adminCookie || this.apiKey)
     },
     setApiKey(apiKey: string) {

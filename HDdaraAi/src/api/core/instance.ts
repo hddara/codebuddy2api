@@ -2,7 +2,7 @@ import type { Method } from 'alova'
 import { uniappRequestAdapter } from '@alova/adapter-uniapp'
 import { createAlova } from 'alova'
 import vueHook from 'alova/vue'
-import { useAuthStore } from '@/store/authStore'
+import { ADMIN_COOKIE_NAME, useAuthStore } from '@/store/authStore'
 import { getAppVersion, getAppVersionCode, getDeviceInfo, getPlatformType } from '@/utils/app-info'
 import { getApiBaseUrl, isNgrokBaseUrl, resolveApiBaseUrl } from './base-url'
 import { handleAlovaError, handleAlovaResponse } from './handlers'
@@ -95,14 +95,25 @@ export const alovaInstance = createAlova({
     if (['POST', 'PUT', 'PATCH'].includes(method.type) && method.config.requestType !== 'upload') {
       method.config.headers['Content-Type'] = 'application/json'
     }
-    // Gateway authentication. The console uses its own signed admin cookie for
-    // the browser session; native apps present a gateway API key instead, so
-    // whichever credential the auth store holds is attached here as Bearer.
+    // Gateway authentication. Two credential shapes exist and they are NOT
+    // interchangeable (`/admin-api/*` verifies the signed cookie; `/v1/*` takes
+    // an API key), so each is attached in the form its endpoint expects.
     // (`satoken` was a mall-backend convention and is intentionally gone.)
     const authStore = useAuthStore()
-    const credential = authStore.getToken
-    if (credential && !method.config.headers.skipToken) {
-      method.config.headers.Authorization = `Bearer ${credential}`
+
+    if (!method.config.headers.skipToken) {
+      // A gateway API key is a bearer credential.
+      if (authStore.apiKey) {
+        method.config.headers.Authorization = `Bearer ${authStore.apiKey}`
+      }
+
+      // The console session is a cookie, and `Cookie: name=value` is the only
+      // shape production accepts — a bare value or a bearer token both 401.
+      // The store holds the normalised token, so no re-parsing is needed here.
+      const token = authStore.adminCookie.trim()
+      if (token) {
+        method.config.headers.Cookie = `${ADMIN_COOKIE_NAME}=${token}`
+      }
     }
     // Platform + client headers give the gateway something to attribute
     // requests to. They are optional: the gateway ignores unknown headers.

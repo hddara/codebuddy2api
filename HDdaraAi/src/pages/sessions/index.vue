@@ -5,6 +5,7 @@ import { onPullDownRefresh, onShow } from '@dcloudio/uni-app'
 import { computed, ref } from 'vue'
 import { fetchSessions } from '@/api/sessions'
 import { useAuthStore } from '@/store/authStore'
+import { parseStored } from '@/store/persist'
 
 definePage({
   name: 'sessions',
@@ -32,8 +33,37 @@ const windowLabel = computed(
       ?.label ?? '',
 )
 
+/**
+ * Whether a credential is available, consulting persistent storage.
+ *
+ * `auth.hasCredentials` alone is not enough on a cold start: the store is
+ * hydrated by a Pinia plugin that runs after `plus` is up, while this page's
+ * `onShow` can fire first — so the in-memory state was still empty and the page
+ * short-circuited with "not signed in", never sending the request. Reading the
+ * snapshot (and syncing the store once it is found) makes the page independent
+ * of that ordering.
+ */
+function hasCredential(): boolean {
+  if (auth.hasCredentials)
+    return true
+
+  const persisted = parseStored(uni.getStorageSync('auth'))
+
+  if (persisted?.adminCookie || persisted?.apiKey) {
+    // Hydrate the store too, so the request interceptor can attach the header.
+    // Use the setters rather than `$patch`: they keep `isLoggedIn` in sync by
+    // construction, and `$patch` does not accept an untyped record here.
+    auth.setAdminCookie((persisted.adminCookie as string | undefined) ?? '')
+    auth.setApiKey((persisted.apiKey as string | undefined) ?? '')
+
+    return true
+  }
+
+  return false
+}
+
 async function load() {
-  if (!auth.hasCredentials) {
+  if (!hasCredential()) {
     errorMessage.value = '尚未登录，请先到「设置」填写控制台凭据'
     sessions.value = []
     return

@@ -144,7 +144,10 @@ function persist({ store }: PiniaPluginContext, excludedIds: string[]) {
       // wholesale looked like it worked (the fields were readable in memory) but
       // does not reliably notify subscribers, so the UI kept reading the initial
       // empty values until something else triggered a re-render.
-      store.$patch(storageState as Record<string, unknown>)
+      //
+      // The record is cast because a snapshot is untyped by nature; Pinia's
+      // overloads only accept a `_DeepPartial` of the concrete state.
+      store.$patch(storageState as never)
       console.log(`[persist] restored ${store.$id}`, Object.keys(storageState as object).join(','))
     }
     catch (error) {

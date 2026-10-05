@@ -19,6 +19,7 @@ const model = ref('')
 const eventCount = ref(0)
 const history = ref<TranscriptEntry[]>([])
 const historyLoaded = ref(false)
+const historyError = ref('')
 const expandedIds = ref<string[]>([])
 
 let handle: StreamHandle | null = null
@@ -26,8 +27,10 @@ let handle: StreamHandle | null = null
 /**
  * Loads the stored history for this conversation.
  *
- * Failures are swallowed on purpose: the live stream is the primary purpose of
- * this page, so a history problem must not blank out the screen.
+ * A history failure must not blank out the screen — the live stream is the
+ * primary purpose of this page — but it must not be invisible either: silently
+ * swallowing it made "history is always empty" indistinguishable from "this
+ * conversation has no turns", which is exactly the bug that hid here once.
  */
 async function loadHistory() {
   if (!conversationId.value)
@@ -37,9 +40,12 @@ async function loadHistory() {
     const payload = await fetchTranscripts(conversationId.value)
 
     history.value = payload.entries ?? []
+    historyError.value = ''
   }
-  catch {
+  catch (error) {
     history.value = []
+    historyError.value
+      = error instanceof Error ? error.message : '历史问答加载失败'
   }
   finally {
     historyLoaded.value = true
@@ -213,7 +219,11 @@ onUnload(() => {
         <text class="history-count">{{ history.length }} 条</text>
       </view>
 
-      <text v-if="historyLoaded && !history.length" class="history-empty">
+      <text v-if="historyError" class="history-error">
+        {{ historyError }}
+      </text>
+
+      <text v-else-if="historyLoaded && !history.length" class="history-empty">
         还没有记录。网关会保存每次问答，可在设置里调整保留天数与条数。
       </text>
 
@@ -389,6 +399,12 @@ onUnload(() => {
 .history-empty {
   font-size: 26rpx;
   color: #8a8f99;
+  line-height: 1.7;
+}
+
+.history-error {
+  font-size: 24rpx;
+  color: #cf1322;
   line-height: 1.7;
 }
 
