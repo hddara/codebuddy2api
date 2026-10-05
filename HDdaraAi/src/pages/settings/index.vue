@@ -3,6 +3,7 @@ import { onShow } from '@dcloudio/uni-app'
 import { ref } from 'vue'
 
 import { useAuthStore } from '@/store/authStore'
+import { parseStored } from '@/store/persist'
 
 definePage({
   name: 'settings',
@@ -15,12 +16,93 @@ const baseUrl = ref('')
 const adminCookie = ref('')
 const apiKey = ref('')
 const saved = ref(false)
+const persistStatus = ref('')
+
+/**
+ * True when the saved credentials can be read back from persistent storage.
+ *
+ * The write itself is asynchronous on the App runtime (it retries until the 5+
+ * storage engine is up), so a negative result here means "not stored yet"
+ * rather than "lost" — the value is still in the store and will be flushed.
+ */
+function verifyPersisted(): boolean {
+  // #ifdef APP-PLUS
+  try {
+    if (parseStored(uni.getStorageSync('auth'))?.adminCookie) {
+      return true
+    }
+
+    // Retry shortly: the storage write itself retries until the bridge is up.
+    setTimeout(() => {
+      try {
+        const landed = Boolean(parseStored(uni.getStorageSync('auth'))?.adminCookie)
+
+        persistStatus.value = landed ? '已保存' : '保存未生效'
+        probeStorage()
+      }
+      catch {
+        persistStatus.value = '保存未生效'
+      }
+    }, 1800)
+
+    return false
+  }
+  catch {
+    return false
+  }
+  // #endif
+
+  // #ifndef APP-PLUS
+  return true
+  // #endif
+}
+
+const storageProbe = ref('')
+
+/**
+ * Reads the persisted snapshot and describes it.
+ *
+ * Shown on the settings page so the storage state is observable on the device
+ * itself: there is no way to inspect the App sandbox from `adb` on a production
+ * build, and "did the write land" cannot be answered by looking at the UI alone.
+ */
+function probeStorage(): void {
+  // #ifdef APP-PLUS
+  try {
+    const parsed = parseStored(uni.getStorageSync('auth'))
+
+    if (!parsed) {
+      storageProbe.value = '存储：空'
+      return
+    }
+
+    const cookie = (parsed.adminCookie as string | undefined) ?? ''
+    const url = (parsed.baseUrl as string | undefined) ?? ''
+
+    storageProbe.value = `存储：${cookie ? `cookie(${cookie.length})` : '无 cookie'} / ${url || '无地址'}`
+  }
+  catch (error) {
+    storageProbe.value = `存储读取失败：${String(error)}`
+  }
+  // #endif
+}
 
 function load() {
-  baseUrl.value = auth.baseUrl || String(import.meta.env.VITE_API_BASE_URL ?? '')
-  adminCookie.value = auth.adminCookie
-  apiKey.value = auth.apiKey
+  // Prefer whatever is in the store, but fall back to the persisted snapshot:
+  // on a cold start the store may not have been hydrated yet when the first
+  // page is shown, and filling the form from an empty store would look like the
+  // credentials were lost even though they are on disk.
+  const persisted = parseStored(uni.getStorageSync('auth')) ?? {}
+
+  baseUrl.value
+    = auth.baseUrl
+      || (persisted.baseUrl as string | undefined)
+      || String(import.meta.env.VITE_API_BASE_URL ?? '')
+  adminCookie.value = auth.adminCookie || (persisted.adminCookie as string | undefined) || ''
+  apiKey.value = auth.apiKey || (persisted.apiKey as string | undefined) || ''
   saved.value = false
+  persistStatus.value = ''
+  probeStorage()
 }
 
 function save() {
@@ -28,6 +110,11 @@ function save() {
   auth.setAdminCookie(adminCookie.value)
   auth.setApiKey(apiKey.value)
   saved.value = true
+
+  // Verify the credentials actually reached persistent storage. On the App
+  // runtime an early `setStorageSync` is dropped silently, and reporting
+  // "saved" for a write that never landed is worse than failing loudly.
+  persistStatus.value = verifyPersisted() ? '已保存' : '正在写入…'
 
   uni.showToast({ icon: 'none', title: '已保存' })
 }
@@ -93,7 +180,10 @@ onShow(load)
 
     <view class="status">
       <text>当前状态：{{ auth.hasCredentials ? '已配置' : '未配置' }}</text>
-      <text v-if="saved" class="status-saved">已保存</text>
+      <text v-if="saved" class="status-saved">{{ persistStatus || '已保存' }}</text>
+    </view>
+    <view v-if="storageProbe" class="status">
+      <text class="status-saved">{{ storageProbe }}</text>
     </view>
 
     <view class="about">

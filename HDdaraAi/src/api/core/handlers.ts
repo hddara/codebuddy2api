@@ -53,12 +53,39 @@ function toastErrorOnce(msg: string): void {
  * and `/v1`), so the body is returned as-is. HTTP failures raise `ApiError`,
  * which is what the app's pages catch.
  */
+/**
+ * Consecutive auth rejections since the last successful response.
+ *
+ * Kept module-local rather than on the store: it is transient request state, not
+ * something the user can configure, and persisting it would make one bad session
+ * look worse after a restart.
+ */
+const AUTH_REJECTION_THRESHOLD = 2
+
+let consecutiveAuthRejections = 0
+
+const authRejectionStreak = {
+  record: (): number => {
+    consecutiveAuthRejections += 1
+
+    return consecutiveAuthRejections
+  },
+  reset: (): void => {
+    consecutiveAuthRejections = 0
+  },
+}
+
 export async function handleAlovaResponse(response: unknown): Promise<unknown> {
   const { statusCode, data } = response as {
     statusCode?: number
     data?: unknown
   }
   const status = Number(statusCode ?? 0)
+
+  // The credential demonstrably works, so the failure streak is over.
+  if (status && status < 400) {
+    authRejectionStreak.reset()
+  }
 
   // Reaching the gateway at all proves the base URL works, even for 4xx.
   // 5xx is excluded: a broken node typically answers 502/503/504.
@@ -72,10 +99,24 @@ export async function handleAlovaResponse(response: unknown): Promise<unknown> {
         ?? `HTTP ${status}`
 
     if (status === 401 || status === 403) {
-      // The stored console cookie is no longer accepted; drop it so the settings
-      // page can prompt for a fresh one instead of looping on failures.
-      useAuthStore().setAdminCookie('')
-      toastErrorOnce('登录已失效，请到「设置」重新填写凭据')
+      // Do NOT clear the credential on the first rejection.
+      //
+      // A single 401 is not proof the credential is invalid: the gateway also
+      // answers 401 while its session store is still warming up, and the App
+      // fires several requests in parallel on cold start. Dropping the cookie
+      // there looked like "the settings I just saved disappeared" and forced the
+      // user to retype them. Two consecutive rejections is treated as genuine.
+      const store = useAuthStore()
+      const previous = store.adminCookie
+      const failures = authRejectionStreak.record()
+
+      if (previous && failures >= AUTH_REJECTION_THRESHOLD) {
+        store.setAdminCookie('')
+        toastErrorOnce('登录已失效，请到「设置」重新填写凭据')
+      }
+      else {
+        toastErrorOnce(message)
+      }
 
       throw new ApiError(message, status, data)
     }

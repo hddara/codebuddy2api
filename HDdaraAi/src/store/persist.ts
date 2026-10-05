@@ -27,6 +27,99 @@ function snapshotState(state: unknown): unknown {
   }
 }
 
+/**
+ * Writes a store snapshot and reads it straight back.
+ *
+ * The read-back is deliberate: on the App runtime `setStorageSync` can appear to
+ * succeed while nothing lands, and a silent failure here is invisible until the
+ * next cold start ("I saved the settings, they are gone"). Verifying turns that
+ * into something observable in the device log.
+ */
+/** How many times a failed write is retried before giving up. */
+const WRITE_RETRY_LIMIT = 12
+const WRITE_RETRY_INTERVAL_MS = 500
+
+/**
+ * Persists a store snapshot, retrying until the read-back confirms it landed.
+ *
+ * Why the retry loop: on the App runtime the storage engine is backed by
+ * `plus.storage`, which is unavailable until the 5+ runtime is up. A Pinia
+ * plugin runs before that, and `setStorageSync` does not throw in that window —
+ * it simply does nothing. Retrying against a read-back is the only way to tell
+ * "stored" from "silently dropped", and a write that is dropped on a cold start
+ * is exactly the "credentials gone after restart" failure.
+ */
+function writeThrough(
+  store: { $id: string, $state: unknown },
+  attempt = 0,
+): void {
+  const payload = snapshotState(store.$state)
+
+  // Nothing to persist yet: writing `{}` would erase a good snapshot that we
+  // simply have not restored yet.
+  if (!Object.keys(payload as object).length) {
+    return
+  }
+
+  // Stored as a JSON string rather than a raw object. Some App runtimes accept
+  // an object in `setStorageSync` and then read back an empty value, which made
+  // every cold start look like "the credentials were never saved"; a string is
+  // handled consistently on every platform.
+  const serialized = JSON.stringify(payload)
+
+  // Every field the snapshot carries must be present after the write. Comparing
+  // the whole string is too strict — key order and extra Pinia internals differ
+  // between reads — and a false negative here would retry forever and, worse,
+  // keep rewriting a stale snapshot over a good one.
+  const expectedKeys = Object.keys(payload as object)
+  let landed = false
+
+  try {
+    uni.setStorageSync(store.$id, serialized)
+
+    const readBack = parseStored(uni.getStorageSync(store.$id))
+    landed
+      = readBack !== null
+        && expectedKeys.every(key => key in readBack)
+  }
+  catch (error) {
+    console.warn(`[persist] write failed for ${store.$id}`, error)
+  }
+
+  if (landed || attempt >= WRITE_RETRY_LIMIT) {
+    if (!landed) {
+      console.warn(`[persist] gave up persisting ${store.$id}`)
+    }
+
+    return
+  }
+
+  setTimeout(writeThrough, WRITE_RETRY_INTERVAL_MS, store, attempt + 1)
+}
+
+/**
+ * Reads a snapshot back into an object.
+ *
+ * Accepts the JSON string this module writes as well as a plain object, so a
+ * snapshot written by an earlier build is still restorable.
+ */
+export function parseStored(raw: unknown): Record<string, unknown> | null {
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw) as unknown
+
+      return parsed && typeof parsed === 'object'
+        ? (parsed as Record<string, unknown>)
+        : null
+    }
+    catch {
+      return null
+    }
+  }
+
+  return raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : null
+}
+
 function persist({ store }: PiniaPluginContext, excludedIds: string[]) {
   // 检查当前store的id是否在排除列表中
   const isExcluded = excludedIds.includes(store.$id)
@@ -41,13 +134,21 @@ function persist({ store }: PiniaPluginContext, excludedIds: string[]) {
   // 因此这里先读一次，并在 plus 就绪后再兜底恢复一次；读到空值时不覆盖 store 自身状态，避免把空状态回写进缓存。
   const restoreState = () => {
     try {
-      const storageState = uni.getStorageSync(store.$id)
-      if (storageState && typeof storageState === 'object' && Object.keys(storageState).length > 0) {
-        store.$state = storageState
+      const storageState = parseStored(uni.getStorageSync(store.$id))
+
+      if (!storageState || !Object.keys(storageState).length) {
+        return
       }
+
+      // `$patch` is the supported way to hydrate a store. Assigning `$state`
+      // wholesale looked like it worked (the fields were readable in memory) but
+      // does not reliably notify subscribers, so the UI kept reading the initial
+      // empty values until something else triggered a re-render.
+      store.$patch(storageState as Record<string, unknown>)
+      console.log(`[persist] restored ${store.$id}`, Object.keys(storageState as object).join(','))
     }
-    catch {
-      // 读取失败不阻塞启动
+    catch (error) {
+      console.warn(`[persist] restore failed for ${store.$id}`, error)
     }
   }
   restoreState()
@@ -64,8 +165,33 @@ function persist({ store }: PiniaPluginContext, excludedIds: string[]) {
 
   store.$subscribe(() => {
     // 在存储变化的时候将store缓存
-    uni.setStorageSync(store.$id, snapshotState(store.$state))
+    writeThrough(store)
   })
+
+  // #ifdef APP-PLUS
+  // On the App runtime `uni.setStorageSync` silently does nothing until the
+  // `plus` bridge is up, and a Pinia plugin runs before that. Subscribing here
+  // alone therefore wrote to nowhere: the settings page showed "saved", the
+  // device directory stayed empty, and the credentials were gone on the next
+  // cold start. Flush again once the bridge reports ready.
+  const bridge = globalThis as any
+  const flush = () => writeThrough(store)
+
+  if (bridge.plus) {
+    flush()
+  }
+  else {
+    if (typeof document !== 'undefined') {
+      document.addEventListener('plusready', flush, { once: true } as any)
+    }
+
+    // The bridge can also come up without the DOM event; a delayed retry covers
+    // that ordering.
+    setTimeout(flush, 2000)
+  }
+
+  bridge.plus?.globalEvent?.addEventListener?.('pause', flush)
+  // #endif
 }
 
 export function persistPlugin(context: PiniaPluginContext) {

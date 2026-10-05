@@ -45,6 +45,17 @@ export const useAuthStore = defineStore('auth', {
       this.apiKey = apiKey.trim()
       this.isLoggedIn = Boolean(this.adminCookie || this.apiKey)
     },
+    /**
+     * Recomputes the derived flag after the state was restored wholesale.
+     *
+     * `persist.ts` assigns `store.$state` directly on cold start, which replaces
+     * the fields without running the setters — so `isLoggedIn` kept its initial
+     * `false` even with a cookie present, and the session page reported
+     * "not signed in" until the user re-saved the form.
+     */
+    syncLoginState() {
+      this.isLoggedIn = Boolean(this.adminCookie || this.apiKey)
+    },
     setBaseUrl(baseUrl: string) {
       this.baseUrl = baseUrl.replace(/\/+$/, '')
     },

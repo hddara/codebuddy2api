@@ -194,13 +194,27 @@ export const extractQuestionText = (body?: object): string => {
   return '';
 };
 
+/**
+ * True when the active backend can enumerate a namespace other than
+ * `credentials`. The file backend refuses to list anything else, so transcripts
+ * degrade to "not collected" there instead of throwing.
+ */
+const canEnumerateTurns = (): boolean =>
+  getStorageBackendMeta().backend !== 'file';
+
+/** Settings are only persisted on backends that can read them back. */
+
 export const getSessionTranscriptSettings =
   async (): Promise<SessionTranscriptSettings> => {
-    const stored =
-      (await readStorageJson<Partial<SessionTranscriptSettings>>(
-        NAMESPACE,
-        SETTINGS_KEY,
-      )) ?? {};
+    // Check the backend *before* touching storage: the file backend rejects any
+    // namespace other than `credentials`, so reading here would throw and take
+    // the settings/listing endpoints down with it.
+    const stored = canEnumerateTurns()
+      ? ((await readStorageJson<Partial<SessionTranscriptSettings>>(
+          NAMESPACE,
+          SETTINGS_KEY,
+        )) ?? {})
+      : {};
 
     return {
       enabled:
@@ -252,14 +266,6 @@ export const updateSessionTranscriptSettings = async (
 
 const buildRecordId = (completedAt: string, conversationId: string): string =>
   `${completedAt}-${conversationId.slice(0, 12)}`;
-
-/**
- * True when the active backend can enumerate a namespace other than
- * `credentials`. The file backend refuses to list anything else, so transcripts
- * degrade to "not collected" there instead of throwing.
- */
-const canEnumerateTurns = (): boolean =>
-  getStorageBackendMeta().backend !== 'file';
 
 /**
  * Runs `worker` over `items` with a fixed ceiling on in-flight work, so a large

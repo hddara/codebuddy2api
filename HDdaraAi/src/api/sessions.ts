@@ -26,10 +26,30 @@ export interface SessionListPayload {
  * on App and H5; some mini-program runtimes restrict the `Cookie` header, which
  * is why the settings page also accepts a gateway API key.
  */
+/**
+ * The gateway stores the console session as a cookie whose value is the signed
+ * token; the name lives in `codebuddy_admin_session`, not in the token itself.
+ * The two headers below therefore carry *different* shapes of the same secret:
+ *
+ *  - `Cookie: codebuddy_admin_session=<token>` — the native shape.
+ *  - `Authorization: Bearer <token>` — the fallback for runtimes that refuse to
+ *    set a `Cookie` header (several App / mini-program JS engines do). The
+ *    bearer value must be the bare token: sending `name=value` there fails
+ *    verification because the name would be hashed as part of the token.
+ */
 function consoleHeaders(): Record<string, string> {
   const auth = useAuthStore()
+  const raw = auth.adminCookie.trim()
 
-  return auth.adminCookie ? { Cookie: auth.adminCookie } : {}
+  if (!raw)
+    return {}
+
+  const token = raw.includes('=') ? raw.slice(raw.indexOf('=') + 1) : raw
+
+  return {
+    Authorization: `Bearer ${token}`,
+    Cookie: raw,
+  }
 }
 
 export async function fetchSessions(windowMinutes: number): Promise<SessionListPayload> {

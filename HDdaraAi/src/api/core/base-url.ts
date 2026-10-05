@@ -144,8 +144,44 @@ export function resolveApiBaseUrl(): Promise<string> {
   return promise
 }
 
+/**
+ * Base URL the user typed on the settings page, if any.
+ *
+ * A hand-entered origin has to win over every automatic candidate: it is the
+ * only way to point the app at a self-hosted or on-device gateway (a LAN address
+ * or `adb reverse` tunnel never appears in the remote config). Without this the
+ * field looked like it was saved but every request still went to the compiled-in
+ * production origin.
+ */
+function readManualBaseUrl(): string {
+  try {
+    const stored = uni.getStorageSync('auth')
+
+    if (!stored) {
+      return ''
+    }
+
+    const parsed
+      = typeof stored === 'string'
+        ? (JSON.parse(stored) as { baseUrl?: string })
+        : (stored as { baseUrl?: string })
+
+    return (parsed?.baseUrl ?? '').trim().replace(/\/+$/, '')
+  }
+  catch {
+    return ''
+  }
+}
+
 /** 冷启动决策：配置优先于本地缓存（配置里没有的节点一律不再使用） */
 async function bootResolve(cachedBase: string, myEpoch: number): Promise<string> {
+  const manualBase = readManualBaseUrl()
+
+  if (manualBase) {
+    console.log(`[api] 使用设置页指定的基址 ${manualBase}`)
+    return manualBase
+  }
+
   const startedAt = Date.now()
   const config = await fetchRemoteConfig(true, STARTUP_CONFIG_TIMEOUT)
   const remoteCandidates = resolveEndpoints(config)

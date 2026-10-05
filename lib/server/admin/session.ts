@@ -214,8 +214,13 @@ const getCookieValue = (request: RequestLike, name: string): string | null => {
     return request.cookies.get(name)?.value ?? null;
   }
 
-  const cookieHeader = request.headers.get('cookie');
+  return readCookiePair(request.headers.get('cookie'), name);
+};
 
+const readCookiePair = (
+  cookieHeader: string | null,
+  name: string,
+): string | null => {
   if (!cookieHeader) {
     return null;
   }
@@ -231,6 +236,34 @@ const getCookieValue = (request: RequestLike, name: string): string | null => {
   }
 
   return null;
+};
+
+/**
+ * Resolves the console session token from either credential header.
+ *
+ * Browsers send the signed session cookie, but native clients cannot always set
+ * a `Cookie` header — some App and mini-program runtimes drop it. Those clients
+ * present the same token as `Authorization: Bearer <token>` instead, which is
+ * the shape the mobile app already uses for the gateway's `/v1/*` endpoints.
+ * Accepting both keeps one credential that works everywhere; the token itself
+ * is unchanged, so this widens transport, not authority.
+ */
+const getSessionTokenFromRequest = (request: RequestLike): string | null => {
+  const fromCookie = getCookieValue(request, ADMIN_SESSION_COOKIE);
+
+  if (fromCookie) {
+    return fromCookie;
+  }
+
+  const authorization = request.headers.get('authorization');
+
+  if (!authorization) {
+    return null;
+  }
+
+  const match = /^Bearer\s+(.+)$/i.exec(authorization.trim());
+
+  return match?.[1]?.trim() || null;
 };
 
 const getRequestProtocol = (request: RequestLike): string => {
@@ -338,7 +371,7 @@ const attachLogoutCookie = (
 };
 
 const getSessionToken = (request: RequestLike): string | null => {
-  return getCookieValue(request, ADMIN_SESSION_COOKIE);
+  return getSessionTokenFromRequest(request);
 };
 
 const usageRanges = new Set<UsageRange>([
