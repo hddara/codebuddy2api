@@ -265,28 +265,108 @@ read -r _ COOKIE_X COOKIE_Y <<<"${EDITS[1]}"
 
 # 清空再填：输入框里可能已有编译期默认地址，直接 `input text` 会**追加**，
 # 拼出 `https://...devhttps://...dev` 这种非法值，App 报“Unable to resolve host”。
+#
+# 清空后**必须回读确认**：`KEYCODE_DEL` 在光标未落入输入框、或输入法仍在合成状态时
+# 会被丢弃，退格跑完 120 次却一个字没删。实测遇到过——填完被校验判为长度不符，
+# 而输入框里其实还是上一个值。（校验拦住了它，否则会写进一个错误的凭据。）
 clear_field() {
-  "$ADB" shell input tap "$1" "$2"
-  sleep 2
-  "$ADB" shell input keyevent KEYCODE_MOVE_END
-  sleep 1
-  # 退格次数取足够大（120）：`input keyevent` 无法一次删多字符。
-  local i
-  for ((i = 0; i < 120; i += 1)); do
-    "$ADB" shell input keyevent KEYCODE_DEL
+  local label="$1" x="$2" y="$3" attempt remaining
+  local before after
+
+  for attempt in 1 2 3; do
+    "$ADB" shell input tap "$x" "$y"
+    sleep 2
+    "$ADB" shell input keyevent KEYCODE_MOVE_END
+    sleep 1
+
+    before="$(field_value_at "$x" "$y")"
+    [ -z "$before" ] && return 0
+
+    # 密码框在 dump 里回显为等长的圆点（`•••`），内容读不到但**长度可信** ——
+    # 退格要按这个长度给足。地址框则是明文，同样适用。
+    remaining=$(( ${#before} + 20 ))
+    local i
+    for ((i = 0; i < remaining; i += 1)); do
+      "$ADB" shell input keyevent KEYCODE_DEL
+    done
+    sleep 1
+
+    after="$(field_value_at "$x" "$y")"
+    if [ -z "$after" ]; then
+      return 0
+    fi
+
+    echo "   清空 ${label} 第 ${attempt} 次未成功（仍有 ${#after} 字符），重试" >&2
   done
+
+  echo "✗ 无法清空「${label}」输入框（仍残留 ${#after} 字符）。" >&2
+  echo "  请在手机上手动清空该字段后重试，或关闭输入法再跑一次。" >&2
+  return 1
+}
+
+# 让输入框把当前内容**提交**给页面状态。
+#
+# `input text` 是往原生 EditText 里敲字符，不保证触发 uni-app 的 input 事件；
+# 页面上的 `v-model` 因此可能仍是旧值。实测症状很迷惑：**输入框里显示的圆点数与
+# 期望一致，点保存后落盘的却还是上一次的值** —— 因为 store 从来没收到新内容。
+#
+# 失焦（点页面别处）会触发 change/blur，让 v-model 同步；再按一次 ENTER 兜底
+# （部分输入法只在回车时才提交）。
+commit_field() {
+  "$ADB" shell input keyevent KEYCODE_ENTER >/dev/null 2>&1 || true
+  sleep 1
+  # 点标题区域（顶部固定位置，不属于任何输入框）以移除焦点。
+  "$ADB" shell input tap 540 240 >/dev/null 2>&1 || true
   sleep 1
 }
 
+# 读出某个坐标所在输入框的当前文本；读不到返回空串。
+field_value_at() {
+  local x="$1" y="$2" xml
+  xml="$(dump_ui)"
+  [ -n "$xml" ] || { echo ''; return; }
+
+  python3 - "$xml" "$x" "$y" <<'PY'
+import re, sys
+import xml.etree.ElementTree as ET
+
+try:
+    root = ET.parse(sys.argv[1]).getroot()
+except ET.ParseError:
+    print('')
+    sys.exit(0)
+
+tx, ty = int(sys.argv[2]), int(sys.argv[3])
+
+for node in root.iter():
+    if not (node.get('class') or '').endswith('EditText'):
+        continue
+    raw = node.get('bounds') or ''
+    try:
+        left, rest = raw.split(',', 1)
+        top, rest = rest.split('][', 1)
+        right, bottom = rest.rstrip(']').split(',', 1)
+        x1, y1, x2, y2 = int(left.lstrip('[')), int(top), int(right), int(bottom)
+    except ValueError:
+        continue
+    # 命中点落在框内即认为是这个输入框（坐标本身来自同一份 dump，稳定）。
+    if x1 <= tx <= x2 and y1 <= ty <= y2:
+        print(node.get('text') or '')
+        break
+PY
+}
+
 echo "== 填入网关地址 =="
-clear_field "$ADDR_X" "$ADDR_Y"
+clear_field "网关地址" "$ADDR_X" "$ADDR_Y" || exit 1
 "$ADB" shell input text "$BASE_URL"
-sleep 2
+sleep 1
+commit_field "$ADDR_X" "$ADDR_Y"
 
 echo "== 填入控制台 Cookie =="
-clear_field "$COOKIE_X" "$COOKIE_Y"
+clear_field "控制台 Cookie" "$COOKIE_X" "$COOKIE_Y" || exit 1
 "$ADB" shell input text "$COOKIE"
-sleep 2
+sleep 1
+commit_field "$COOKIE_X" "$COOKIE_Y"
 
 # 保存按钮同理由 dump 定位（文案为「保存」）。
 XML="$(require_ui)"

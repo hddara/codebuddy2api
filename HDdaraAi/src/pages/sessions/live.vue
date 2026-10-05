@@ -3,7 +3,7 @@ import type { StreamHandle } from '@/api/sessions'
 import { onLoad, onUnload } from '@dcloudio/uni-app'
 
 import { nextTick, ref } from 'vue'
-import { openSessionStream, sendChatMessage } from '@/api/sessions'
+import { fetchLiveSnapshot, openSessionStream, sendChatMessage } from '@/api/sessions'
 import { renderMarkdown } from '@/utils/markdown'
 
 definePage({
@@ -75,30 +75,101 @@ function applyEvent(event: Record<string, unknown>) {
   }
 }
 
+/**
+ * Starts watching the live turn.
+ *
+ * The App polls a snapshot endpoint instead of subscribing to SSE. It does open
+ * the SSE request — the gateway logs it — but no bytes ever reach the page, so
+ * the screen sat at `0 字` while 29 frames were published against the device.
+ * `uni.request`'s chunked mode is a mini-program feature and is a no-op here too,
+ * which leaves polling as the only transport the App can actually use.
+ */
+const POLL_INTERVAL_MS = 900
+/** Consecutive quiet reads before the watcher stops; a turn may simply be late. */
+const IDLE_ROUNDS_BEFORE_STOP = 10
+
+let pollTimer: ReturnType<typeof setTimeout> | null = null
+let idleRounds = 0
+let stopped = false
+
+function stopWatching() {
+  stopped = true
+  if (pollTimer) {
+    clearTimeout(pollTimer)
+    pollTimer = null
+  }
+}
+
+async function pollOnce() {
+  if (stopped || !conversationId.value)
+    return
+
+  try {
+    const snapshot = await fetchLiveSnapshot(conversationId.value)
+
+    if (snapshot.text) {
+      idleRounds = 0
+
+      // The endpoint returns the whole text so far, so replacing (rather than
+      // appending) keeps this correct across missed or duplicated polls.
+      if (snapshot.text !== reply.value) {
+        reply.value = snapshot.text
+        eventCount.value += 1
+      }
+
+      status.value = 'live'
+      statusLabel.value = '正在输出…'
+      errorMessage.value = ''
+    }
+    else {
+      idleRounds += 1
+
+      if (idleRounds >= IDLE_ROUNDS_BEFORE_STOP) {
+        // Nothing has started. Stop rather than poll forever; sending a question
+        // starts the watcher again.
+        stopWatching()
+        return
+      }
+    }
+  }
+  catch (error) {
+    const message = error instanceof Error ? error.message : '读取实时状态失败'
+
+    if (/session required|401|unauthor/i.test(message)) {
+      errorMessage.value = '控制台凭据已失效，请到「设置」重新填入新的 Cookie'
+      status.value = 'failed'
+      statusLabel.value = '连接失败'
+      stopWatching()
+      return
+    }
+    // A transient failure is not worth showing; the next round retries.
+  }
+
+  pollTimer = setTimeout(() => void pollOnce(), POLL_INTERVAL_MS)
+}
+
 function subscribe() {
   if (!conversationId.value)
     return
 
+  stopped = false
+  idleRounds = 0
+  void pollOnce()
+
+  // The browser build keeps SSE, which genuinely streams there. It is additive:
+  // the poll above is the source of truth and stops on its own once idle.
+  // #ifdef H5
   try {
     handle = openSessionStream({
       conversationId: conversationId.value,
-      onError: (message) => {
-        // Only surface this while nothing has arrived; a completed turn closes
-        // the connection, which is not an error.
-        if (status.value !== 'done') {
-          errorMessage.value = message
-          status.value = 'failed'
-          statusLabel.value = '连接失败'
-        }
-      },
+      onError: () => {},
       onEvent: applyEvent,
     })
   }
-  catch (error) {
-    status.value = 'failed'
-    statusLabel.value = '连接失败'
-    errorMessage.value = `实时连接初始化失败：${String(error)}`
+  catch {
+    // Polling still covers this.
   }
+  // #endif
 }
 
 async function ask() {
@@ -113,6 +184,12 @@ async function ask() {
   eventCount.value = 0
   status.value = 'live'
   statusLabel.value = '正在提交…'
+
+  // Restart the watcher so the reply is picked up even if it had gone idle.
+  stopWatching()
+  stopped = false
+  idleRounds = 0
+  pollTimer = setTimeout(() => void pollOnce(), POLL_INTERVAL_MS)
 
   // Echo the question into the transcript area so the answer has context even
   // before the first delta lands.
@@ -166,6 +243,7 @@ onLoad((query) => {
 })
 
 onUnload(() => {
+  stopWatching()
   handle?.close()
   handle = null
 })

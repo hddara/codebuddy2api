@@ -108,6 +108,8 @@ interface PlusXhrConstructor {
     onerror: (() => void) | null
     onloadend: (() => void) | null
     onprogress: (() => void) | null
+    onreadystatechange: (() => void) | null
+    readyState: number
     open: (method: string, url: string, async: boolean) => void
     response: ArrayBuffer | null
     responseType: string
@@ -247,6 +249,32 @@ export async function sendChatMessage({
   })
 }
 
+export interface LiveSnapshot {
+  accessKeyId: string | null
+  live: boolean
+  model: string | null
+  question: string | null
+  text: string
+}
+
+/**
+ * One-shot read of the live text for a conversation.
+ *
+ * The App cannot consume SSE (see `openSessionStream`), so it polls this. Cheap
+ * by construction: the gateway answers from in-process state, no storage read.
+ */
+export async function fetchLiveSnapshot(
+  conversationId: string,
+): Promise<LiveSnapshot> {
+  const query = `?conversationId=${encodeURIComponent(conversationId)}`
+
+  return alovaInstance
+    .Get<LiveSnapshot>(`/admin-api/sessions/live${query}`, {
+      headers: { ...consoleHeaders(), skipToken: true },
+    } as never)
+    .send()
+}
+
 export interface StreamHandle {
   close: () => void
 }
@@ -383,12 +411,31 @@ export function openSessionStream({
         xhr.setRequestHeader(name, value)
     }
 
-    xhr.onprogress = () => {
+    // Reads whatever has arrived so far.
+    //
+    // Driven by `onreadystatechange` as well as `onprogress`: in the App runtime
+    // `onprogress` is not guaranteed to fire for `responseType: 'arraybuffer'`
+    // (the request completes, the bytes arrive, and this callback is simply
+    // never invoked — the UI then sits on "等待输出" forever with no error).
+    // `readyState >= 3` means the body is being received, which is when there is
+    // something to read.
+    const drain = (): void => {
       if (closed)
         return
 
-      const chunk = xhr.response
-      if (!chunk || chunk.byteLength <= consumedBytes)
+      let chunk: ArrayBuffer | null = null
+
+      try {
+        chunk = xhr.response as ArrayBuffer | null
+      }
+      catch {
+        // Reading a partial arraybuffer throws in some implementations.
+        return
+      }
+
+      if (!chunk || typeof chunk.byteLength !== 'number')
+        return
+      if (chunk.byteLength <= consumedBytes)
         return
 
       // `response` is cumulative for arraybuffer responses, so only the new tail
@@ -398,6 +445,12 @@ export function openSessionStream({
       consume(fresh)
     }
 
+    xhr.onprogress = drain
+    xhr.onreadystatechange = () => {
+      if (xhr.readyState >= 3)
+        drain()
+    }
+
     xhr.onerror = () => {
       if (!closed) {
         onError?.(`实时连接失败（HTTP ${xhr.status || '未知'}）`)
@@ -405,6 +458,10 @@ export function openSessionStream({
     }
 
     xhr.onloadend = () => {
+      // The final drain matters: the last frames may have arrived without any
+      // further progress/readystatechange callback.
+      drain()
+
       // A closed stream is normal: the gateway ends it when the turn finishes,
       // so only a rejected connection is reported. 401 in particular means the
       // console cookie is no longer valid, which is worth naming explicitly —
