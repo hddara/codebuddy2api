@@ -4,7 +4,7 @@
 > 本文件是它的「可重建说明书」+ 参数台账，换机/重克隆后照此恢复。
 > 做法参考 `mall/docs/iOS离线打包与App参数清单.md`（同一套壳工程，同一 Apple 团队）。
 >
-> 最后核对：**2026-10-05 01:20**（首个可运行包，已装真机并启动成功）
+> 最后核对：**2026-10-05 20:45**（图标重设计；打包脚本移入 `scripts/` 并入库）
 
 ---
 
@@ -52,18 +52,39 @@ cd HDdaraAi
 env -u NODE_OPTIONS npx uni build -p app        # 产物：dist/build/app
 
 # 2) 出包（脚本会 rsync 资源进壳的 Pandora 目录，再 archive + export）
-cd dcloud-ios
-./build-ipa.sh                                   # development（可直装真机）
-#   ./build-ipa.sh ad-hoc | app-store            # 其它方式
-#   TEAM=56N4V3XSFA ./build-ipa.sh               # 临时换个人免费团队
+#    脚本在 HDdaraAi/scripts/，**不在壳工程内** —— 见 §2.0
+./scripts/build-ipa.sh                           # development（可直装真机）
+#   ./scripts/build-ipa.sh ad-hoc | app-store    # 其它方式
+#   TEAM=56N4V3XSFA ./scripts/build-ipa.sh       # 临时换个人免费团队
 #   产物：dcloud-ios/build/ipa/HBuilder.ipa
 
-# 3) 安装到真机（Xcode 26 的 devicectl）
+# 3) 安装到真机（Xcode 26 的 devicectl；可直接装 development 签名的 ipa，不必解包）
 export DEVELOPER_DIR=/Users/hddara/Applications/Xcode.app/Contents/Developer
 export PATH="$DEVELOPER_DIR/usr/bin:$PATH"
-xcrun devicectl device install app --device 00008101-001E19923001401E <解包后的 HBuilder.app>
+xcrun devicectl device install app --device 00008101-001E19923001401E dcloud-ios/build/ipa/HBuilder.ipa
 xcrun devicectl device process launch --device 00008101-001E19923001401E cn.hddara.ai
 ```
+
+### 2.0 一键打包脚本（iOS / Android 各一个）
+
+| 平台 | 命令 | 做什么 |
+|---|---|---|
+| iOS | `./scripts/build-ipa.sh [development\|ad-hoc\|app-store]` | 同步前端资源 → **生成图标/启动图** → archive → 导出 IPA → 校验 `DTSDKName` |
+| Android | `./scripts/build-apk.sh [--install] [--no-web]` | 构建前端 → **投放资源（先删再拷）** → **生成图标** → `gradle assembleRelease`；`--install` 顺带装机启动 |
+
+**为什么脚本放在 `scripts/` 而不是壳工程里**：`dcloud-ios/`、`dcloud-android/` 整体被
+`.gitignore` 排除（体积数 GB），脚本若放在里面会**跟着一起不入库** —— 换机克隆后就没了，
+只能照文档手抄。放到 `scripts/` 后脚本入库，壳工程仍可按文档重建。
+
+**Android 之前根本没有脚本**，靠手敲 4 条命令，反复踩两个坑，现已固化进脚本：
+
+1. **投放资源必须先删再拷**：目标目录名等于 appid，`cp -R` 到已存在的目录会嵌套成
+   `www/app` → App 起来**白屏**。
+2. **图标要跟着前端产物一起重生成**：图标与前端资源同源（都在壳内、都被 ignore），
+   重建壳后会**静默**退回脚手架那套（mall 的「梦想购」购物车），不报任何错。
+
+两个脚本都把**图标生成做成了正常步骤**（失败只告警不中断打包）：
+图标缺失只是观感问题，而打包成功才是这步的目的。
 
 ---
 
@@ -72,7 +93,7 @@ xcrun devicectl device process launch --device 00008101-001E19923001401E cn.hdda
 | 步骤 | 操作 |
 |---|---|
 | 1 | 取 **iOS 离线 SDK 5.26**（DCloud 开发者中心 → 离线打包 SDK），解压后保持 `SDK/HBuilder-Hello/...` 结构 |
-| 2 | 把 mall 的 `mall-app-ui/dcloud-ios/build-ipa.sh` 放回 `HDdaraAi/dcloud-ios/`，并按本文件 §1 改 `APPID="__UNI__DC81923"` |
+| 2 | 打包脚本**已在版本库内**（`HDdaraAi/scripts/build-ipa.sh`、`build-apk.sh`），无需从 mall 复制；壳工程重建后直接 `./scripts/build-ipa.sh` 即可 |
 | 3 | `project.pbxproj`：`PRODUCT_BUNDLE_IDENTIFIER=cn.hddara.ai`、`MARKETING_VERSION=0.1.0`、`CURRENT_PROJECT_VERSION=100`、`DEVELOPMENT_TEAM=ASQ257FU6F` |
 | 4 | `HBuilder-Hello-Info.plist`：`dcloud_appkey=094ea8084a16d1eb18ca87a0c75131f8`、`CFBundleDisplayName=HDdaraAi`；**同时**改 `zh-Hans.lproj`/`en.lproj` 的 `InfoPlist.strings` |
 | 5 | 资源目录 `Pandora/apps/__UNI__DC81923/www`（目录名必须与 appid 一致；由 `build-ipa.sh` 自动灌入）；**删掉 mall 的 `__UNI__1CBF901`** |
@@ -114,17 +135,18 @@ Android 侧另有两个**不在脚本里**的手写文件：
 > ⚠️ `mipmap-anydpi-v26` 只在 API 26+ 生效，所以 `mipmap-<dpi>` 的位图**不能省**，
 > 否则 Android 7 及以下取值失败会**启动崩溃**（不是回退）。
 
-**改图后必须重新打包**，图标是编译进 APK 的资源，不会热更：
+**改图后必须重新打包**，图标是编译进包内的资源，不会热更 —— Android 重装即可，
+iOS 必须重新出包。两个打包脚本已把图标生成作为正常步骤，直接跑即可：
 
 ```bash
-cd dcloud-android/shell && JAVA_HOME=$HOME/Library/Java/JavaVirtualMachines/ms-21.0.11/Contents/Home \
-  ./gradlew :simpleDemo:assembleRelease --no-daemon
+./scripts/build-apk.sh --install     # Android：含图标生成 + 装机
+./scripts/build-ipa.sh               # iOS：含图标生成 + 出包
 ```
 
 自检（改完图标值得跑一次，确认进包的不是旧图）：
 
 ```bash
-BT=$HOME/Library/Android/sdk/build-tools/36.1.0
+BT=$(ls -d ~/Library/Android/sdk/build-tools/* | sort -V | tail -1)
 APK=dcloud-android/shell/simpleDemo/build/outputs/apk/release/simpleDemo-release.apk
 $BT/aapt dump badging $APK | grep application-icon   # 各密度应有独立条目
 ```
@@ -139,7 +161,7 @@ $BT/aapt dump badging $APK | grep application-icon   # 各密度应有独立条�
 4. **DCloud appid / 离线 Key 是两件事**：appid 在「应用列表 → 创建应用」拿；iOS 离线 Key 在「应用 → 各平台信息 → 新增(iOS App，填 BundleId) → 创建离线Key」。每个 AppID 前 6 个 Key 免费。
 5. **壳工程的图标一直是 mall 的「梦想购」购物车**：`android:icon`、`AppIcon`、`dclogo`（启动图）**三处都要换**，而它们分散在 iOS/Android 两套壳里，容易只改一处。曾出现「App 图标换了但启动瞬间仍闪出购物车」的情况。**处置：统一走 `design/make-app-icon.py`（§3.1），不要手工替换。**
 6. **`android:roundIcon` 需要 `@mipmap/ic_launcher` 在旧 API 上也能解析**：`mipmap-anydpi-v26/ic_launcher.xml` 从 API 26 起才存在，所以必须同时提供 `mipmap-<dpi>/ic_launcher.png` 位图，否则 Android 7 及以下**启动崩溃**。
-7. **iOS 图标只有一张，且只有重新出包才生效**：`AppIcon.appiconset/Contents.json` 只声明 `icon1024.png`（新版 Xcode 单尺寸模式），其余尺寸由 Xcode 派生。Android 换图重装即可，**iOS 必须 `./build-ipa.sh` 重打**。
+7. **iOS 图标只有一张，且只有重新出包才生效**：`AppIcon.appiconset/Contents.json` 只声明 `icon1024.png`（新版 Xcode 单尺寸模式），其余尺寸由 Xcode 派生。Android 换图重装即可，**iOS 必须重新打包**。
 8. **`[3/3] 导出 IPA` 阶段日志会“反复重试”，别误判为卡死**：日志反复出现同一句 `IDEDistribution: Created bundle at path: …/HBuilder_<时间戳>.xcdistributionlogs`，且**每轮 xcodebuild 进程号都不同**，同时 `HBuilder.ipa` 的时间戳在推进。这是 xcodebuild 在等 Apple 服务响应，每轮都在前进。**判据是产物不是日志末行**：
 
    ```bash
@@ -153,6 +175,8 @@ $BT/aapt dump badging $APK | grep application-icon   # 各密度应有独立条�
    pkill -f "build-ipa.sh development"; pkill -f "xcodebuild -exportArchive"
    ```
 9. **iOS 装机不必走 Xcode GUI**：`xcrun devicectl device install app --device <UDID> <ipa>` 可直接安装 development 签名的包；启动用 `xcrun devicectl device process launch --device <UDID> cn.hddara.ai`。
+10. **打包脚本一度放在被 gitignore 的壳工程里 ⇒ 根本不在版本库**：`build-ipa.sh` 原先位于 `dcloud-ios/`，而该目录被整目录排除，`git ls-files` 里**从来没有它** —— 换机克隆后就只剩文档可照抄。**处置：脚本移到 `HDdaraAi/scripts/`**（壳工程仍按文档重建）。**判断脚本是否真入库，用 `git ls-files <路径>`，不要看文件是否存在。**
+11. **Android 侧原本没有打包脚本**，靠手敲 4 条命令，反复踩「投放资源不先删旧目录 → `www/app` 嵌套 → 白屏」和「图标静默退回脚手架购物车」。现已有 `scripts/build-apk.sh` 把两步固化，并自动挑 JDK 21（本机 10 个 JDK，交给 gradle 自己找不稳）。
 
 ---
 
@@ -196,20 +220,37 @@ codesign -dv --verbose=2 "$APP" 2>&1 | grep -E "Authority|TeamIdentifier"      #
 
 ## 2.2 出包链路
 
+**用脚本（推荐）**：
+
+```bash
+cd HDdaraAi
+./scripts/build-apk.sh              # 构建 + 投放 + 图标 + 打包
+./scripts/build-apk.sh --install    # 上面全部，完了装机并启动
+./scripts/build-apk.sh --no-web     # 只改了原生代码时，复用现有 dist/build/app
+```
+
+脚本会自动挑 JDK 21（本机装了 10 个 JDK，交给 gradle 自己找很不稳），
+并在 `[2/4]` 一步完成「投放资源 + 生成图标」。
+
+**手工步骤（脚本出问题时的排查用）**：
+
 ```bash
 # 1) 生成 App 资源（与 iOS 同一份产物）
 cd HDdaraAi && env -u NODE_OPTIONS npx uni build -p app     # → dist/build/app
 
-# 2) 投放资源（目录名 = appid；**先删旧 www 再 cp**，否则会嵌套成 www/app）
+# 2) 生成品牌资产（图标 + 启动图；漏了会退回脚手架的购物车图标）
+python3 design/make-app-icon.py
+
+# 3) 投放资源（目录名 = appid；**先删旧 www 再 cp**，否则会嵌套成 www/app → 白屏）
 A=dcloud-android/shell/simpleDemo/src/main/assets/apps/__UNI__DC81923
 rm -rf "$A/www" && cp -R dist/build/app "$A/www"
 
-# 3) 打包
+# 4) 打包
 cd dcloud-android/shell
 JAVA_HOME=$HOME/Library/Java/JavaVirtualMachines/ms-21.0.11/Contents/Home \
   ./gradlew :simpleDemo:assembleRelease --no-daemon
 
-# 4) 装机
+# 5) 装机（会清空 App 存储，网关地址与 Cookie 需重填）
 ~/Library/Android/sdk/platform-tools/adb install -r simpleDemo/build/outputs/apk/release/simpleDemo-release.apk
 ```
 
