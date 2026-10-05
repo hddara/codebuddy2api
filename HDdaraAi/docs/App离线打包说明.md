@@ -273,3 +273,62 @@ adb shell input tap 545 907            # 「控制台 Cookie」框
 
 ⚠️ **华为等 ROM 会保活**：`am force-stop` 后进程仍在（非 root 杀不掉），
 所以「冷启动」验证要认准 `am force-stop` 后 `ps` 里进程真的消失。
+
+---
+
+# 五、DCloud 后台状态（2026-10-05 核对）
+
+应用：**`HDdaraAi`** / appid **`__UNI__DC81923`**（账号 `928***@qq.com`）
+
+> 注：创建时输入框未生效，DCloud 用了默认名「家务小帮手」。已改为 `HDdaraAi`。
+> **若后续重新创建应用，务必在创建后立刻回列表确认名称**（创建页的输入框对自动化输入不敏感）。
+
+各平台信息（路径：应用 → 各平台信息）：
+
+| 序号 | 平台 | 版本 | 包名 | 创建时间 | 离线 Key |
+|---|---|---|---|---|---|
+| 1 | Android App | 正式版 | `cn.hddara.ai` | 2026/10/05 01:41 | `37ffccc4374ecd389c947d117182d41d` |
+| 2 | iOS App | 正式版 | `cn.hddara.ai` | 2026/10/05 01:14 | `094ea8084a16d1eb18ca87a0c75131f8` |
+
+**免费额度**：每个 AppID 前 **6 个**不同离线打包 Key 免费；修改包名或 SHA1 会占用新名额，
+且删除 Key/包名/应用后**已用名额不释放**。当前只用了 2 个。
+
+## 三个 Key 各归何处（不要弄混）
+
+| Key | 绑定 | 写在哪里 |
+|---|---|---|
+| iOS Key `094ea8084a…31f8` | appid + Bundle ID `cn.hddara.ai` | 壳工程 `HBuilder-Hello-Info.plist` → `dcloud_appkey` |
+| Android Key `37ffccc4374ecd…d41d` | appid + 包名 `cn.hddara.ai` + 证书 SHA1 | 壳工程 `AndroidManifest.xml` → `dcloud_appkey` |
+| HarmonyOS | —— | 鸿蒙走 AGC 签名，与上面两个无关 |
+
+---
+
+# 六、真机联调：ngrok 隧道（IP 直连不通时用这个）
+
+当手机与网关不在同一网段、无法直连服务器 IP 时，用 ngrok 把本地/自建网关暴露成公网 HTTPS。
+
+```bash
+# 1) 起隧道（本机 8001 = 网关）
+ngrok http 8001 --log=stdout > /tmp/ngrok.log 2>&1 &
+
+# 2) 取公网地址
+curl -s http://127.0.0.1:4040/api/tunnels | python3 -c "
+import json,sys
+for t in json.load(sys.stdin)['tunnels']: print(t['public_url'])
+"
+
+# 3) 在 App 设置页把「网关地址」填成该 https 地址（如
+#    https://frying-bootie-flattery.ngrok-free.dev），**不要**再用 127.0.0.1
+```
+
+要点：
+
+- **必须用 `https://` 那个地址**。ngrok 同时给 http/https，App 端走 https 才稳。
+- ngrok 免费版的浏览器插页**不影响 App**：插页只对带 `Accept: text/html` 的浏览器请求返回，
+  App 的 `uni.request` 不会被拦。若无故被拦，可在请求头加 `ngrok-skip-browser-warning: 1`。
+- **`adb reverse tcp:8001 tcp:8001` 与 ngrok 二选一**：前者仅 USB 调试时有效，且重装 APK 会失效；
+  后者对真机走公网、更接近真实使用。验证时先 `adb reverse --remove-all` 把反向隧道清掉，
+  否则你分不清请求到底走了哪条路。
+- 免费隧道**重启后域名会变**，每次改完地址记得回设置页重新保存。
+- 请求是否真的经过隧道，看 `/tmp/ngrok.log` 里的 `join connections` 行；
+  本机出口 IP 会显示为手机的公网 IP（如 `r=120.229.69.50`），这是判断「确实来自手机」的铁证。

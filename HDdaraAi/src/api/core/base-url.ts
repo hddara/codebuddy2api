@@ -112,6 +112,23 @@ export function isNgrokBaseUrl(url: string = getApiBaseUrl()): boolean {
  *  3. 本地基址不可用（被配置移除 / 校验不过 / 近期判过失效）→ 候选按「未失效优先」排序后逐个健康校验。
  */
 export function resolveApiBaseUrl(): Promise<string> {
+  // A hand-entered origin short-circuits the whole selection pipeline: there is
+  // nothing to discover, probe or fail over to. Reading it first also keeps the
+  // remote-config fetch out of the request path when the user points the app at
+  // their own gateway.
+  const manualBase = readManualBaseUrl()
+
+  if (manualBase) {
+    if (currentBaseUrl !== manualBase) {
+      console.log(`[api] 使用设置页指定的基址 ${manualBase}`)
+    }
+
+    currentBaseUrl = manualBase
+    bootResolved = true
+
+    return Promise.resolve(manualBase)
+  }
+
   // 本次会话已完成启动选路：后续请求直接用结果，不再重复拉配置（否则每个请求都会打一次对象存储）
   if (bootResolved) {
     return Promise.resolve(getApiBaseUrl())
@@ -279,6 +296,19 @@ export function markApiHealthy() {
  * @param reason 失败原因（用于日志排查）
  */
 export function invalidateApiBase(reason: string) {
+  // A hand-entered origin is the user's explicit choice, not a discovered node:
+  // marking it unavailable and reselecting would silently move requests back to
+  // the compiled-in production origin, which is exactly the behaviour the
+  // settings field exists to override. Report the failure and keep the origin.
+  const manualBase = readManualBaseUrl()
+
+  if (manualBase) {
+    console.warn(
+      `[api] 基址 ${manualBase} 请求失败（${reason}），但该地址由设置页指定，不做自动重选`,
+    )
+    return
+  }
+
   const now = Date.now()
   if (now - lastFailureAt < FAILURE_DEBOUNCE) {
     // 一屏多请求同时失败时只处理一次（否则会并发触发多轮重选）

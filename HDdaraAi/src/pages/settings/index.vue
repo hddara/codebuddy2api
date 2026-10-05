@@ -94,9 +94,12 @@ function load() {
   // credentials were lost even though they are on disk.
   const persisted = parseStored(uni.getStorageSync('auth')) ?? {}
 
+  // Persisted value first: the store is not hydrated yet on a cold start, and
+  // `auth.baseUrl` can still hold the previous value for a moment after the user
+  // changed the field, which showed a stale address next to a fresh snapshot.
   baseUrl.value
-    = auth.baseUrl
-      || (persisted.baseUrl as string | undefined)
+    = (persisted.baseUrl as string | undefined)
+      || auth.baseUrl
       || String(import.meta.env.VITE_API_BASE_URL ?? '')
   adminCookie.value = auth.adminCookie || (persisted.adminCookie as string | undefined) || ''
   apiKey.value = auth.apiKey || (persisted.apiKey as string | undefined) || ''
