@@ -5,6 +5,10 @@
 #   ./build-apk.sh              # 构建 + 投放资源 + 打包
 #   ./build-apk.sh --install    # 上面全部，完了直接装机并启动
 #   ./build-apk.sh --no-web     # 跳过前端构建，复用 dist/build/app（只改了原生时用）
+#   ./build-apk.sh --install --configure
+#                               # 装机后再自动填好网关地址与控制台 Cookie
+#                               # 凭据取自 $HDARA_BASE_URL / $HDARA_COOKIE，
+#                               # 或 ~/.hdara-base-url / ~/.hdara-cookie
 #
 # 为什么要有这个脚本：这条链路本来有 4 步（uni build → 投放 → gradlew → adb install），
 # 全靠手敲。手敲会踩两个反复出现的坑：
@@ -27,12 +31,14 @@ ICON_SCRIPT="$APP_ROOT/design/make-app-icon.py"
 
 DO_INSTALL=0
 DO_WEB=1
+DO_CONFIGURE=0
 for arg in "$@"; do
   case "$arg" in
-    --install) DO_INSTALL=1 ;;
-    --no-web)  DO_WEB=0 ;;
-    -h|--help) sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "未知参数: $arg（可用: --install / --no-web）" >&2; exit 2 ;;
+    --install)   DO_INSTALL=1 ;;
+    --no-web)    DO_WEB=0 ;;
+    --configure) DO_CONFIGURE=1; DO_INSTALL=1 ;;   # 配置必须在装机之后
+    -h|--help)   sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "未知参数: $arg（可用: --install / --no-web / --configure）" >&2; exit 2 ;;
   esac
 done
 
@@ -110,12 +116,12 @@ fi
 
 ADB="${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}"
 
-echo "== [0/4] 环境 =="
+echo "== [0/5] 环境 =="
 echo "   JAVA_HOME = $JAVA_HOME"
 echo "   ($("$JAVA_HOME/bin/java" -version 2>&1 | head -1))"
 
-# ---- [1/4] 前端产物 ----------------------------------------------------
-echo "== [1/4] 前端资源（uni build -p app）=="
+# ---- [1/5] 前端产物 ----------------------------------------------------
+echo "== [1/5] 前端资源（uni build -p app）=="
 if [ "$DO_WEB" -eq 1 ]; then
   if ! command -v npx >/dev/null 2>&1; then
     echo "   未找到 npx，无法构建前端。可用 --no-web 复用现有 dist/build/app。" >&2
@@ -132,8 +138,8 @@ if [ ! -f "$RES_SRC/app-service.js" ]; then
   exit 1
 fi
 
-# ---- [2/4] 资源与品牌资产 ----------------------------------------------
-echo "== [2/4] 投放资源 + 品牌资产 =="
+# ---- [2/5] 资源与品牌资产 ----------------------------------------------
+echo "== [2/5] 投放资源 + 品牌资产 =="
 
 # 先删再拷：目录名必须等于 appid，`cp -R` 到已存在的目录会嵌套成 www/app。
 rm -rf "$WWW_DEST"
@@ -154,8 +160,8 @@ else
   echo "   [警告] 缺少 python3 或 $ICON_SCRIPT，跳过图标生成"
 fi
 
-# ---- [3/4] 打包 --------------------------------------------------------
-echo "== [3/4] gradle assembleRelease =="
+# ---- [3/5] 打包 --------------------------------------------------------
+echo "== [3/5] gradle assembleRelease =="
 ( cd "$SHELL_DIR" && JAVA_HOME="$JAVA_HOME" ./gradlew :simpleDemo:assembleRelease --no-daemon )
 
 if [ ! -f "$APK" ]; then
@@ -171,9 +177,9 @@ if [ -n "${BT:-}" ] && [ -x "$BT/aapt" ]; then
   echo "   图标条目数: $("$BT/aapt" dump badging "$APK" 2>/dev/null | grep -c '^application-icon')"
 fi
 
-# ---- [4/4] 装机（可选）-------------------------------------------------
+# ---- [4/5] 装机（可选）-------------------------------------------------
 if [ "$DO_INSTALL" -eq 1 ]; then
-  echo "== [4/4] 安装到设备 =="
+  echo "== [4/5] 安装到设备 =="
   if [ ! -x "$ADB" ]; then
     echo "   未找到 adb（$ADB），跳过安装" >&2
     exit 0
@@ -183,13 +189,45 @@ if [ "$DO_INSTALL" -eq 1 ]; then
     exit 0
   fi
   "$ADB" install -r "$APK"
-  # 重装会清空 WebView 存储，网关地址与 Cookie 需在设置页重填；这是预期行为。
-  echo "   提示：adb install -r 会清空 App 存储，网关地址与控制台 Cookie 需重填。"
+  # `install -r` **保留**应用数据（实测确认）；清空存储的是 `adb uninstall` 或
+  # `adb shell pm clear`。这一点曾被文档写错，导致每次重装都误以为要重填配置。
+  echo "   提示：install -r 保留应用数据；若要清空请显式执行 adb shell pm clear cn.hddara.ai"
   "$ADB" shell am force-stop cn.hddara.ai || true
   "$ADB" shell am start -n cn.hddara.ai/io.dcloud.PandoraEntry >/dev/null 2>&1 || true
-  echo "   已启动 App（验证持久化的正确做法是只 am force-stop 重启，不要重装）"
+  echo "   已启动 App"
 else
-  echo "== [4/4] 跳过安装（加 --install 可直接装机）=="
+  echo "== [4/5] 跳过安装（加 --install 可直接装机）=="
+fi
+
+# ---- [5/5] 自动配置（可选）---------------------------------------------
+if [ "$DO_CONFIGURE" -eq 1 ]; then
+  echo "== [5/5] 写入网关配置 =="
+  # 凭据不写进仓库，也不进日志：优先环境变量，其次 ~/.hdara-* 文件。
+  cfg_base="${HDARA_BASE_URL:-}"
+  cfg_cookie="${HDARA_COOKIE:-}"
+  if [ -z "$cfg_base" ] && [ -r "$HOME/.hdara-base-url" ]; then
+    cfg_base="$(head -1 "$HOME/.hdara-base-url" | tr -d '\r\n')"
+  fi
+  if [ -z "$cfg_cookie" ] && [ -r "$HOME/.hdara-cookie" ]; then
+    cfg_cookie="$(head -1 "$HOME/.hdara-cookie" | tr -d '\r\n')"
+  fi
+
+  if [ -z "$cfg_base" ] || [ -z "$cfg_cookie" ]; then
+    # 打包已经成功了，配置只是附加便利 —— 这里用告警而不是失败，
+    # 否则 CI/发布脚本会把「包是好的，只是没自动填表」当成构建失败。
+    echo "   [警告] 缺少凭据，跳过配置。请提供其中一种：" >&2
+    echo "     export HDARA_BASE_URL=... HDARA_COOKIE=..." >&2
+    echo "     或写入 ~/.hdara-base-url 与 ~/.hdara-cookie" >&2
+  elif [ ! -f "$APP_ROOT/scripts/configure-device.sh" ]; then
+    echo "   [警告] 未找到 configure-device.sh，跳过配置" >&2
+  else
+    # `|| true`：脚本自身已做回读校验并会在失败时返回非零，但打包已经完成，
+    # 配置不成功不该把整次构建判为失败。
+    bash "$APP_ROOT/scripts/configure-device.sh" --base-url "$cfg_base" --cookie "$cfg_cookie" || \
+      echo "   [警告] 自动配置未通过，请在手机上检查设置页" >&2
+  fi
+else
+  echo "== [5/5] 跳过配置（加 --configure 可自动填入网关地址与 Cookie）=="
 fi
 
 echo "完成。"
