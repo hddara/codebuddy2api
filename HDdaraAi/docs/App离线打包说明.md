@@ -70,7 +70,26 @@ xcrun devicectl device process launch --device 00008101-001E19923001401E cn.hdda
 | 平台 | 命令 | 做什么 |
 |---|---|---|
 | iOS | `./scripts/build-ipa.sh [development\|ad-hoc\|app-store]` | 同步前端资源 → **生成图标/启动图** → archive → 导出 IPA → 校验 `DTSDKName` |
-| Android | `./scripts/build-apk.sh [--install] [--no-web]` | 构建前端 → **投放资源（先删再拷）** → **生成图标** → `gradle assembleRelease`；`--install` 顺带装机启动 |
+| Android | `./scripts/build-apk.sh [--install] [--no-web] [--configure]` | 构建前端 → **投放资源（先删再拷）** → **生成图标** → `gradle assembleRelease` → 装机启动 → **自动填好网关配置** |
+
+一键从零到能用（含把手机上的网关地址与 Cookie 填好）：
+
+```bash
+echo "https://<你的隧道域名>" > ~/.hdara-base-url
+echo "<43 字符的 codebuddy_admin_session>" > ~/.hdara-cookie
+chmod 600 ~/.hdara-cookie
+./scripts/build-apk.sh --install --configure
+```
+
+| 脚本 | 用途 |
+|---|---|
+| `scripts/configure-device.sh` | 单独配置设备（`--show` 只读且**遮蔽凭据**，`--show-full` 才显示明文） |
+
+**为什么是 UI 自动化而不是直写存储**：release 包 `not debuggable`，`adb run-as` 被拒；
+Android 10+ 起 adb 也无法写剪贴板；而 Cookie 是会话密钥，不能编进 APK。
+「像用户一样填表」是唯一不改包、不降级安全性的路径。
+坐标全部来自实时 `uiautomator dump`（含**沿父链上溯**取可点容器），不硬编码 ——
+屏幕 `wm size` override 会让手敲的坐标偏移近 20px。
 
 **为什么脚本放在 `scripts/` 而不是壳工程里**：`dcloud-ios/`、`dcloud-android/` 整体被
 `.gitignore` 排除（体积数 GB），脚本若放在里面会**跟着一起不入库** —— 换机克隆后就没了，
@@ -250,8 +269,10 @@ cd dcloud-android/shell
 JAVA_HOME=$HOME/Library/Java/JavaVirtualMachines/ms-21.0.11/Contents/Home \
   ./gradlew :simpleDemo:assembleRelease --no-daemon
 
-# 5) 装机（会清空 App 存储，网关地址与 Cookie 需重填）
+# 5) 装机（install -r **保留**应用数据；要清空需显式 pm clear）
 ~/Library/Android/sdk/platform-tools/adb install -r simpleDemo/build/outputs/apk/release/simpleDemo-release.apk
+# 清空配置（模拟全新安装）：
+# ~/Library/Android/sdk/platform-tools/adb shell pm clear cn.hddara.ai
 ```
 
 ## 2.3 验收自检
