@@ -78,8 +78,56 @@ xcrun devicectl device process launch --device 00008101-001E19923001401E cn.hdda
 | 5 | 资源目录 `Pandora/apps/__UNI__DC81923/www`（目录名必须与 appid 一致；由 `build-ipa.sh` 自动灌入）；**删掉 mall 的 `__UNI__1CBF901`** |
 | 6 | 部署目标：`Podfile` 的 `post_install` 逐 target 设 `IPHONEOS_DEPLOYMENT_TARGET='15.0'`（5.26 podspec 声明 13.0，Xcode 26/27 最低 15.0）→ `pod install` |
 | 7 | `HEADER_SEARCH_PATHS` 不要硬编码 `/Applications/Xcode.app/…`，改 `"$(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/include"`（否则双 Xcode 头文件冲突报 `redefinition of module 'SwiftBridging'`） |
-| 8 | 启动图品牌化：`dclogo@2x/@3x.png` 换成产品图标，三个 storyboard 的 `text="HBuilder Hello"` 改成产品名 |
+| 8 | **品牌资产**：运行 `python3 design/make-app-icon.py` 一次生成全部（见 §3.1），再改三个 storyboard 的 `text="HBuilder Hello"` 为产品名 |
 | 9 | 🔴 **必须用 Xcode 26.x 出包**：iOS 27 起 Apple 强制「用最新 SDK 构建的 App」采用 UIScene，DCloud 5.26 壳仍是纯 AppDelegate ⇒ 用 Xcode 27 打的包在 iOS 27 上**启动即崩**。`build-ipa.sh` 已内置校验，产物 `DTSDKName` 必须是 `iphoneos26.*` |
+
+### 3.1 品牌资产：图标与启动图
+
+**一个脚本生成全部**，不要手工替换任何一张图：
+
+```bash
+cd HDdaraAi && python3 design/make-app-icon.py
+```
+
+产物与去向：
+
+| 产物 | 目标位置 | 说明 |
+|---|---|---|
+| `design/app-icon-1024.png` | —— | 主图（母版），供预览与再分发 |
+| `design/preview/*.png` | —— | 48/80/120/180 预览，用于检查小尺寸可读性 |
+| （1024） | iOS `Assets.xcassets/AppIcon.appiconset/icon1024.png` | 新版 Xcode 单尺寸模式，**只需这一张** |
+| （`dclogo@2x/@3x`） | iOS 壳根目录 | 启动图，**与 App 图标是两套资产**，容易只换一个 |
+| （各 dpi） | Android `res/drawable-*/icon.png` | 常规图标（Manifest 的 `android:icon`） |
+| （各 dpi） | Android `res/mipmap-*/ic_launcher.png` | `roundIcon` 兜底；**API < 26 会真的读它** |
+| （各 dpi） | Android `res/drawable-*/icon_foreground.png` | 自适应前景，已限制在 66% 安全区内 |
+| （各 dpi） | Android `res/drawable-*/icon_monochrome.png` | Android 13+ 主题图标；条形是**镂空**，系统着色后才有轮廓 |
+| `design/palette.json` | —— | 配色与设计说明，改色时先看它 |
+
+Android 侧另有两个**不在脚本里**的手写文件：
+
+- `res/mipmap-anydpi-v26/ic_launcher.xml` —— 自适应图标定义（引用上面两个 drawable + 背景色）
+- `res/values/ic_launcher_background.xml` —— 背景色 `#0A84FF`
+
+> ⚠️ 背景色**必须等于**脚本里的 `GRADIENT_TOP`：自适应前景的条形用的是这个蓝，
+> 一旦两侧不一致，条形会溶进背景，看起来像一条纯色方块。
+
+> ⚠️ `mipmap-anydpi-v26` 只在 API 26+ 生效，所以 `mipmap-<dpi>` 的位图**不能省**，
+> 否则 Android 7 及以下取值失败会**启动崩溃**（不是回退）。
+
+**改图后必须重新打包**，图标是编译进 APK 的资源，不会热更：
+
+```bash
+cd dcloud-android/shell && JAVA_HOME=$HOME/Library/Java/JavaVirtualMachines/ms-21.0.11/Contents/Home \
+  ./gradlew :simpleDemo:assembleRelease --no-daemon
+```
+
+自检（改完图标值得跑一次，确认进包的不是旧图）：
+
+```bash
+BT=$HOME/Library/Android/sdk/build-tools/36.1.0
+APK=dcloud-android/shell/simpleDemo/build/outputs/apk/release/simpleDemo-release.apk
+$BT/aapt dump badging $APK | grep application-icon   # 各密度应有独立条目
+```
 
 ---
 
@@ -89,6 +137,8 @@ xcrun devicectl device process launch --device 00008101-001E19923001401E cn.hdda
 2. **`tests/deploy/ios-shell-patch/patch-ios-review.py` 不在本仓库**：`build-ipa.sh` 会 warning 后跳过。只影响 App Store 审核用的权限文案裁剪，**开发直装不需要**；要上架需从 mall 拷该补丁目录。
 3. **DCloud 云打包（HBuilderX `cli pack`）走不通**：HBuilderX 5.26 对 CLI 项目报「当前cli项目版本较低不支持App的运行和发行」，且把 `@dcloudio/*` 对齐到它内置的 `3.0.0-alpha-5020520260821001` 后**仍然报错**。结论：**本项目一律走离线壳工程打包，不要用云打包。**
 4. **DCloud appid / 离线 Key 是两件事**：appid 在「应用列表 → 创建应用」拿；iOS 离线 Key 在「应用 → 各平台信息 → 新增(iOS App，填 BundleId) → 创建离线Key」。每个 AppID 前 6 个 Key 免费。
+5. **壳工程的图标一直是 mall 的「梦想购」购物车**：`android:icon`、`AppIcon`、`dclogo`（启动图）**三处都要换**，而它们分散在 iOS/Android 两套壳里，容易只改一处。曾出现「App 图标换了但启动瞬间仍闪出购物车」的情况。**处置：统一走 `design/make-app-icon.py`（§3.1），不要手工替换。**
+6. **`android:roundIcon` 需要 `@mipmap/ic_launcher` 在旧 API 上也能解析**：`mipmap-anydpi-v26/ic_launcher.xml` 从 API 26 起才存在，所以必须同时提供 `mipmap-<dpi>/ic_launcher.png` 位图，否则 Android 7 及以下**启动崩溃**。
 
 ---
 
