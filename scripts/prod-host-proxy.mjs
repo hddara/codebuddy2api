@@ -57,12 +57,22 @@ const DUMP_HEADERS = process.env.DUMP_HEADERS === '1';
 
 const server = http.createServer((req, res) => {
   if (DUMP_HEADERS) {
-    const interesting = ['authorization', 'cookie', 'x-client-platform', 'host'];
+    const interesting = [
+      'authorization',
+      'cookie',
+      'x-client-platform',
+      'host',
+    ];
     const seen = interesting
       .filter((name) => req.headers[name])
-      .map((name) => `${name}=${String(req.headers[name]).slice(0, 24)}(len ${String(req.headers[name]).length})`);
+      .map(
+        (name) =>
+          `${name}=${String(req.headers[name]).slice(0, 24)}(len ${String(req.headers[name]).length})`,
+      );
 
-    process.stdout.write(`${req.method} ${req.url} :: ${seen.join(' | ') || '(no auth headers)'}\n`);
+    process.stdout.write(
+      `${req.method} ${req.url} :: ${seen.join(' | ') || '(no auth headers)'}\n`,
+    );
   }
 
   const headers = {};
