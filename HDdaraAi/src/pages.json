@@ -30,7 +30,27 @@
       "style": {
         "navigationBarTitleText": "设置"
       }
+    },
+    // #ifdef APP || H5
+    {
+      "path": "pages/sessions/live",
+      "type": "page",
+      "name": "session-live",
+      "style": {
+        "navigationBarTitleText": "实时回复"
+      }
+    },
+    // #endif
+    // #ifdef APP || H5
+    {
+      "path": "pages/sessions/transcript",
+      "type": "page",
+      "name": "session-transcript",
+      "style": {
+        "navigationBarTitleText": "问答详情"
+      }
     }
+    // #endif
   ],
   "subPackages": [],
   "tabBar": {

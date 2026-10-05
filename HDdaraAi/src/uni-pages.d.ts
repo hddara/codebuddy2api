@@ -6,6 +6,8 @@
 type _LocationUrl =
   "/pages/sessions/index" |
   "/pages/sessions/detail" |
+  "/pages/sessions/live" |
+  "/pages/sessions/transcript" |
   "/pages/settings/index";
 
 interface NavigateToOptions {

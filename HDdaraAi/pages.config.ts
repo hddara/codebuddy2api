@@ -28,6 +28,20 @@ export default defineUniPages({
       },
     },
     {
+      // Holds the conversation overview: both the live reply and the stored
+      // turns are entries from here, not content rendered in place.
+      path: 'pages/sessions/live',
+      style: {
+        navigationBarTitleText: '实时回复',
+      },
+    },
+    {
+      path: 'pages/sessions/transcript',
+      style: {
+        navigationBarTitleText: '问答详情',
+      },
+    },
+    {
       path: 'pages/settings/index',
       style: {
         navigationBarTitleText: '设置',
