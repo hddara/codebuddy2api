@@ -4,7 +4,7 @@ import { onLoad } from '@dcloudio/uni-app'
 
 import { computed, ref } from 'vue'
 import { clearManualBaseUrlVerdict } from '@/api/core/base-url'
-import { fetchSessions } from '@/api/sessions'
+import { fetchSessions, loginWithPassword } from '@/api/sessions'
 import { useAuthStore } from '@/store/authStore'
 import { parseStored } from '@/store/persist'
 import {
@@ -26,7 +26,13 @@ definePage({
 const auth = useAuthStore()
 
 const baseUrl = ref('')
+/** Account credentials — the login a user can actually complete. */
+const username = ref('admin')
+const password = ref('')
+/** Advanced path: a session cookie copied from a signed-in browser. */
 const adminCookie = ref('')
+/** Whether the advanced (cookie) fields are shown instead of the account form. */
+const useCookieMode = ref(false)
 const cookieVisible = ref(false)
 const busy = ref(false)
 const errorMessage = ref('')
@@ -53,9 +59,14 @@ function probeBiometric(): BiometricSupport {
   return biometric.value
 }
 
-const canSubmit = computed(
-  () => Boolean(baseUrl.value.trim()) && Boolean(adminCookie.value.trim()),
-)
+const canSubmit = computed(() => {
+  if (!baseUrl.value.trim())
+    return false
+
+  return useCookieMode.value
+    ? Boolean(adminCookie.value.trim())
+    : Boolean(username.value.trim() && password.value.trim())
+})
 
 /**
  * Reads the credential from persistent storage.
@@ -156,24 +167,48 @@ async function signIn() {
 
   busy.value = true
   errorMessage.value = ''
-  statusText.value = '正在验证凭据…'
+  statusText.value = useCookieMode.value ? '正在验证凭据…' : '正在登录…'
 
   auth.setBaseUrl(baseUrl.value.trim())
-  auth.setAdminCookie(adminCookie.value.trim())
   // Typing an address here is the same explicit signal as saving it on the
   // settings page: a previous failed probe must not keep it benched, or the
   // user would type a working address and still be routed elsewhere.
   clearManualBaseUrlVerdict(baseUrl.value.trim())
 
   try {
-    await fetchSessions(1_440)
+    if (useCookieMode.value) {
+      auth.setAdminCookie(adminCookie.value.trim())
+      // Confirm the pasted cookie works before letting the user in.
+      await fetchSessions(1_440)
+    }
+    else {
+      const result = await loginWithPassword(
+        username.value.trim(),
+        password.value,
+      )
+      const token = String(result?.token ?? '').trim()
+
+      if (!token) {
+        // The server only returns the token to clients that declare themselves
+        // cookie-incapable. Getting here means it decided otherwise, and
+        // without a token there is nothing to authenticate subsequent calls
+        // with — so say so instead of appearing to succeed.
+        throw new Error('网关未返回会话令牌，请确认服务端版本已支持 App 登录')
+      }
+
+      auth.setAdminCookie(token)
+      // Clear the plaintext password the moment it is no longer needed.
+      password.value = ''
+    }
   }
   catch (error) {
     const message = error instanceof Error ? error.message : '登录失败'
 
     auth.logout()
     errorMessage.value = /session required|401|unauthor/i.test(message)
-      ? '凭据无效，请检查控制台 Cookie'
+      ? (useCookieMode.value
+          ? '凭据无效，请检查控制台 Cookie'
+          : '账号或密码不正确')
       : message
     busy.value = false
     statusText.value = ''
@@ -193,6 +228,15 @@ async function signIn() {
   }
 
   enterApp()
+}
+
+/** Switches between the account form and the advanced cookie entry. */
+function toggleCookieMode() {
+  useCookieMode.value = !useCookieMode.value
+  errorMessage.value = ''
+  statusText.value = ''
+  adminCookie.value = ''
+  password.value = ''
 }
 
 function enterApp() {
@@ -243,6 +287,7 @@ onLoad(async () => {
   // gate at all. Leaving it empty means reaching the app requires either the
   // biometric match or the credential being typed again.
   adminCookie.value = ''
+  password.value = ''
 
   try {
     biometricEnabled.value = Boolean(uni.getStorageSync('biometric-enabled'))
@@ -297,9 +342,12 @@ async function enterWithStored() {
 /** Switches to the form, with an empty credential field. */
 function useCredentialForm() {
   adminCookie.value = ''
+  password.value = ''
   errorMessage.value = ''
   statusText.value = ''
   hasStored.value = false
+  // Always start on the account form: it is the path a user can complete.
+  useCookieMode.value = false
 }
 
 function toggleBiometric() {
@@ -400,8 +448,9 @@ function toggleBiometric() {
     <view v-else class="card">
       <text class="card-title">登录</text>
       <text class="card-hint">
-        填入网关地址与控制台 Cookie。Cookie 可在浏览器登录控制台后，
-        从开发者工具的请求头里复制 codebuddy_admin_session 的值。
+        {{ useCookieMode
+          ? '粘贴控制台会话 Cookie。仅当你有办法从浏览器取出它时才使用这种方式。'
+          : '使用控制台账号登录。网关地址默认已填好，通常无需改动。' }}
       </text>
 
       <view class="field">
@@ -414,7 +463,35 @@ function toggleBiometric() {
         >
       </view>
 
-      <view class="field">
+      <template v-if="!useCookieMode">
+        <view class="field">
+          <text class="field-label">账号</text>
+          <input
+            v-model="username"
+            class="input"
+            placeholder="admin"
+            type="text"
+          >
+        </view>
+
+        <view class="field">
+          <view class="field-head">
+            <text class="field-label">密码</text>
+            <text class="field-toggle" @tap="toggleCookieVisible">
+              {{ cookieVisible ? '隐藏' : '显示' }}
+            </text>
+          </view>
+          <input
+            v-model="password"
+            class="input"
+            :password="!cookieVisible"
+            placeholder="控制台登录密码"
+            type="text"
+          >
+        </view>
+      </template>
+
+      <view v-else class="field">
         <view class="field-head">
           <text class="field-label">控制台 Cookie</text>
           <text class="field-toggle" @tap="toggleCookieVisible">
@@ -439,6 +516,10 @@ function toggleBiometric() {
 
       <button class="primary" :disabled="busy || !canSubmit" @tap="signIn">
         {{ busy ? '登录中…' : '登录' }}
+      </button>
+
+      <button class="ghost" @tap="toggleCookieMode">
+        {{ useCookieMode ? '改用账号密码登录' : '改用 Cookie 登录（高级）' }}
       </button>
     </view>
 

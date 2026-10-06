@@ -1,4 +1,5 @@
 import { ADMIN_COOKIE_NAME, useAuthStore } from '@/store/authStore'
+import { getPlatformType } from '@/utils/app-info'
 import { createUtf8Decoder } from '@/utils/utf8-stream'
 import { getApiBaseUrl } from './core/base-url'
 import { alovaInstance } from './core/instance'
@@ -37,6 +38,56 @@ function consoleHeaders(): Record<string, string> {
   const token = useAuthStore().adminCookie.trim()
 
   return token ? { Cookie: `${ADMIN_COOKIE_NAME}=${token}` } : {}
+}
+
+export interface PasswordLoginResult {
+  session: {
+    authenticated?: boolean
+    username?: string
+  }
+  success?: boolean
+  /**
+   * The signed session token, returned only to native clients.
+   *
+   * A browser receives it as an `HttpOnly` cookie and this field is absent. The
+   * App runtime cannot read `Set-Cookie` at all, so the same token is echoed in
+   * the body — see `buildSessionResponse` on the server for why.
+   */
+  token?: string
+}
+
+/**
+ * Signs in with the console account and stores the resulting session token.
+ *
+ * This is the login a user can actually complete. The previous flow asked for a
+ * `codebuddy_admin_session` cookie, which is a browser artifact produced by
+ * signing in somewhere else: it is not reachable from the phone, and pasting it
+ * required opening devtools on a desktop. Password auth is what the console
+ * itself offers, so the app uses it too.
+ *
+ * The request deliberately bypasses alova's auth interceptor (`skipToken`): the
+ * credential being established here is what that interceptor would attach, and
+ * sending a stale one alongside the password only invites a 401.
+ */
+export async function loginWithPassword(
+  username: string,
+  password: string,
+): Promise<PasswordLoginResult> {
+  return alovaInstance
+    .Post<PasswordLoginResult>(
+      '/admin-api/auth/session',
+      { password, username },
+      {
+        headers: {
+          // Tells the gateway this client cannot read `Set-Cookie`, so it should
+          // return the token in the body. Set explicitly rather than relying on
+          // the shared interceptor, because `skipToken` skips that whole block.
+          'x-client-platform': getPlatformType() || 'APP',
+          'skipToken': true,
+        },
+      } as never,
+    )
+    .send()
 }
 
 export async function fetchSessions(windowMinutes: number): Promise<SessionListPayload> {

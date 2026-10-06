@@ -48,6 +48,7 @@ const makeRequest = (
   pathname: string,
   init?: {
     cookie?: string;
+    headers?: Record<string, string>;
     host?: string;
     protocol?: 'http' | 'https';
   },
@@ -58,6 +59,7 @@ const makeRequest = (
   return new Request(`${protocol}://${host}${pathname}`, {
     headers: {
       ...(init?.cookie ? { cookie: init.cookie } : {}),
+      ...init?.headers,
       host,
       'x-forwarded-host': host,
       'x-forwarded-proto': protocol,
@@ -433,6 +435,57 @@ describe('admin auth and storage', () => {
     expect(
       await getAdminSessionErrorResponse(makeRequest('/admin-api/settings')),
     ).toBeNull();
+  });
+
+  it('returns the session token to clients that cannot read Set-Cookie', async () => {
+    await setupAdminPassword(
+      makeRequest('/admin-api/auth/setup'),
+      'correct horse battery staple',
+    );
+
+    // A browser keeps relying on the HttpOnly cookie and must not receive the
+    // token in the payload.
+    const browserLogin = await loginWithAdminPassword(
+      makeRequest('/admin-api/auth/session'),
+      'correct horse battery staple',
+    );
+    const browserPayload = (await browserLogin.json()) as { token?: string };
+    expect(browserLogin.status).toBe(200);
+    expect(browserPayload.token).toBeUndefined();
+    expect(getCookieHeader(browserLogin)).toContain('HttpOnly');
+
+    // The App runtime exposes no response headers at all, so the cookie alone
+    // left it authenticated server-side but empty-handed on the device: it got
+    // `{"success":true}` and still had nothing to send on the next request.
+    // Exactly the values `getPlatformType()` returns at runtime. `APP-PLUS` is
+    // the conditional-compilation macro name, not a runtime value, and `H5` is
+    // a browser — asserted separately below.
+    for (const client of ['APP', 'WX_MA', 'MP_ALIPAY']) {
+      const nativeLogin = await loginWithAdminPassword(
+        makeRequest('/admin-api/auth/session', {
+          headers: { 'x-client-platform': client },
+        }),
+        'correct horse battery staple',
+      );
+      const nativePayload = (await nativeLogin.json()) as { token?: unknown };
+
+      expect(nativeLogin.status).toBe(200);
+      expect(typeof nativePayload.token).toBe('string');
+      expect(String(nativePayload.token).length).toBeGreaterThan(20);
+      // The cookie is still attached: the two transports are not exclusive.
+      expect(getCookieHeader(nativeLogin)).toContain('HttpOnly');
+    }
+
+    // H5 is a browser and must stay on the cookie-only path.
+    const h5Login = await loginWithAdminPassword(
+      makeRequest('/admin-api/auth/session', {
+        headers: { 'x-client-platform': 'H5' },
+      }),
+      'correct horse battery staple',
+    );
+    const h5Payload = (await h5Login.json()) as { token?: unknown };
+    expect(h5Login.status).toBe(200);
+    expect(h5Payload.token).toBeUndefined();
   });
 
   it('requires an admin session before starting or polling OAuth credentials', async () => {

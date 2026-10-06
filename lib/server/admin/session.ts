@@ -362,6 +362,53 @@ const attachSessionCookie = (
   return response;
 };
 
+/**
+ * Header a native client sets to say "I cannot read `Set-Cookie`".
+ *
+ * Not a security boundary — any caller can send it. It exists so that only the
+ * clients that genuinely cannot use the cookie get the token in the body, and
+ * the browser flow keeps relying on `HttpOnly`.
+ */
+export const NATIVE_CLIENT_HEADER = 'x-client-platform';
+
+/**
+ * Clients whose HTTP stack hides response headers, so a cookie is unusable.
+ *
+ * Values are the ones the mobile app actually sends (`getPlatformType()` in
+ * `HDdaraAi/src/utils/app-info.ts`): `APP`, `WX_MA`, `MP_ALIPAY`, `H5`.
+ * Compared case-insensitively, so the casing here is not load-bearing — but the
+ * members are, and `wx_ma` is the one that is easy to miss.
+ */
+const COOKIE_INCAPABLE_CLIENTS = new Set(['app', 'wx_ma', 'mp_alipay']);
+
+/**
+ * Builds a login response the client can actually consume.
+ *
+ * A browser gets the session through `Set-Cookie` and never needs the token in
+ * the payload. Native clients are different: uni-app's App runtime does not
+ * expose `Set-Cookie` at all, so authenticating with a password produced a
+ * session the client could not then use — it saw `{"success":true}` and still
+ * had no credential to send. The only workable handoff is the body.
+ *
+ * `HttpOnly` is therefore kept for browsers and relaxed only for clients that
+ * declared themselves cookie-incapable. The token is the same one the cookie
+ * carries; this widens transport, not authority.
+ */
+const buildSessionResponse = (
+  request: RequestLike,
+  payload: Record<string, unknown>,
+  token: string,
+): Response => {
+  const client = (request.headers.get(NATIVE_CLIENT_HEADER) ?? '')
+    .trim()
+    .toLowerCase();
+  const body: Record<string, unknown> = COOKIE_INCAPABLE_CLIENTS.has(client)
+    ? { ...payload, token }
+    : payload;
+
+  return attachSessionCookie(request, Response.json(body), token);
+};
+
 const attachLogoutCookie = (
   request: RequestLike,
   response: Response,
@@ -779,9 +826,9 @@ export const setupAdminPassword = async (
     );
   }
 
-  return attachSessionCookie(
+  return buildSessionResponse(
     request,
-    Response.json({
+    {
       success: true,
       session: {
         accountConfigured: true,
@@ -791,7 +838,7 @@ export const setupAdminPassword = async (
         passwordConfigured: true,
         username: normalizedUsername,
       },
-    }),
+    },
     token,
   );
 };
@@ -837,9 +884,9 @@ export const loginWithAdminPassword = async (
     current.sessions.push(session);
   });
 
-  return attachSessionCookie(
+  return buildSessionResponse(
     request,
-    Response.json({
+    {
       success: true,
       session: {
         accountConfigured: true,
@@ -849,7 +896,7 @@ export const loginWithAdminPassword = async (
         passwordConfigured: true,
         username: state.username,
       },
-    }),
+    },
     token,
   );
 };
@@ -1239,9 +1286,9 @@ export const finishAdminPasskeyAuthentication = async (
     });
   });
 
-  return attachSessionCookie(
+  return buildSessionResponse(
     request,
-    Response.json({
+    {
       success: true,
       session: {
         accountConfigured: true,
@@ -1251,7 +1298,7 @@ export const finishAdminPasskeyAuthentication = async (
         passwordConfigured: Boolean(state.password),
         username: state.username,
       },
-    }),
+    },
     token,
   );
 };
