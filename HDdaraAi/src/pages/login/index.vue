@@ -3,6 +3,7 @@ import type { BiometricSupport } from '@/utils/biometric'
 import { onLoad } from '@dcloudio/uni-app'
 
 import { computed, ref } from 'vue'
+import { clearManualBaseUrlVerdict } from '@/api/core/base-url'
 import { fetchSessions } from '@/api/sessions'
 import { useAuthStore } from '@/store/authStore'
 import { parseStored } from '@/store/persist'
@@ -159,6 +160,10 @@ async function signIn() {
 
   auth.setBaseUrl(baseUrl.value.trim())
   auth.setAdminCookie(adminCookie.value.trim())
+  // Typing an address here is the same explicit signal as saving it on the
+  // settings page: a previous failed probe must not keep it benched, or the
+  // user would type a working address and still be routed elsewhere.
+  clearManualBaseUrlVerdict(baseUrl.value.trim())
 
   try {
     await fetchSessions(1_440)
@@ -220,7 +225,17 @@ const biometricEnabled = ref(false)
 onLoad(async () => {
   // The origin is safe to prefill — it is not a secret and typing a URL on a
   // phone is tedious.
-  baseUrl.value = auth.baseUrl || ''
+  //
+  // Read it from persistent storage first, for the same reason the settings page
+  // does: on a cold start this page runs before the store is hydrated, so
+  // `auth.baseUrl` can still be empty even though an origin is on disk. Relying
+  // on the store alone left the field blank and asked the user to retype a URL
+  // the app already had. The compiled-in origin is the last resort, and matches
+  // what `App.vue` seeds the store with.
+  baseUrl.value
+    = (parseStored(uni.getStorageSync('auth'))?.baseUrl as string | undefined)
+      || auth.baseUrl
+      || String(import.meta.env.VITE_API_BASE_URL ?? '')
 
   // The credential is deliberately NOT prefilled. Prefilling it turned the
   // "改用凭据登录" button into a one-tap bypass: the form was already valid, so a

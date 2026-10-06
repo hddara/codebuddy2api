@@ -27,7 +27,7 @@
  *     → 改为失效后立即主动重选，并加选路代际号防止旧结果覆盖新状态。
  */
 import type { RemoteEndpointConfig } from './remote-endpoint'
-import { fetchRemoteConfig, resolveEndpoints } from './remote-endpoint'
+import { fetchRemoteConfig, readConfigCache, resolveEndpoints } from './remote-endpoint'
 
 /** 编译期基址：作为无候选时的兜底（也是配置服务不可用时的最后一道保险） */
 const PRIMARY = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '')
@@ -86,6 +86,16 @@ let outcomes: { at: number, ok: boolean }[] = []
 let networkStrikes = 0
 /** 判定失效的节点 → 可再次尝试的时间戳 */
 const unavailable = new Map<string, number>()
+/**
+ * Hand-entered origins whose probe failed → when the verdict expires.
+ *
+ * Kept separate from `unavailable`: an explicit user choice is re-checked on the
+ * next cold start rather than being distrusted for the rest of the launch, and it
+ * must survive `invalidateApiBase` resetting the automatic-selection counters.
+ */
+const manualPresumedDead = new Map<string, number>()
+/** 手动基址探测失败后的复核间隔（到期重新探测，避免把「暂时关机」当永久失效） */
+const MANUAL_PRESUMED_DEAD_TTL = 10 * 60 * 1000
 /** 主动重选的时间戳（滑动窗口，见 canActivelyReselect） */
 let reselectTimes: number[] = []
 
@@ -112,21 +122,20 @@ export function isNgrokBaseUrl(url: string = getApiBaseUrl()): boolean {
  *  3. 本地基址不可用（被配置移除 / 校验不过 / 近期判过失效）→ 候选按「未失效优先」排序后逐个健康校验。
  */
 export function resolveApiBaseUrl(): Promise<string> {
-  // A hand-entered origin short-circuits the whole selection pipeline: there is
-  // nothing to discover, probe or fail over to. Reading it first also keeps the
-  // remote-config fetch out of the request path when the user points the app at
-  // their own gateway.
+  // A hand-entered origin still wins over every automatic candidate, but only
+  // after it answers a probe.
+  //
+  // Why the probe is not optional: the settings field is sticky — it is read
+  // back from persistent storage on every cold start and, when present, used to
+  // short-circuit the whole selection pipeline. A leftover debugging address
+  // (`http://127.0.0.1:8097` from a local dev server, say) therefore survived
+  // forever: every request failed with "Failed to connect", the app never fell
+  // back to the compiled-in production origin, and nothing on screen said why.
+  // Probing first turns that silent dead end into an automatic recovery.
   const manualBase = readManualBaseUrl()
 
   if (manualBase) {
-    if (currentBaseUrl !== manualBase) {
-      console.log(`[api] 使用设置页指定的基址 ${manualBase}`)
-    }
-
-    currentBaseUrl = manualBase
-    bootResolved = true
-
-    return Promise.resolve(manualBase)
+    return resolveManualBaseUrl(manualBase)
   }
 
   // 本次会话已完成启动选路：后续请求直接用结果，不再重复拉配置（否则每个请求都会打一次对象存储）
@@ -162,6 +171,91 @@ export function resolveApiBaseUrl(): Promise<string> {
 }
 
 /**
+ * Resolves a hand-entered origin, probing it before trusting it.
+ *
+ * The happy path is unchanged and stays cheap: a reachable address is adopted
+ * immediately, with no remote-config fetch and no candidate scan, which is what
+ * keeps a self-hosted or on-device gateway usable.
+ *
+ * The failure path is the fix. If the address does not answer, it is remembered
+ * as unusable and the normal selection pipeline runs instead — so a stale
+ * address degrades into "the app uses a working origin and says so in the log"
+ * rather than "every request fails forever".
+ *
+ * A failed probe is provisional rather than permanent: the user may simply have
+ * the gateway switched off right now, so the verdict expires (see
+ * MANUAL_PRESUMED_DEAD_TTL) and the address gets re-probed on a later start.
+ */
+async function resolveManualBaseUrl(manualBase: string): Promise<string> {
+  if (bootResolved && currentBaseUrl === manualBase) {
+    return manualBase
+  }
+
+  if (isManualPresumedDead(manualBase)) {
+    console.warn(
+      `[api] 设置页指定的基址 ${manualBase} 近期探测失败，本次回退到自动选路`,
+    )
+
+    return fallbackFromManual(manualBase)
+  }
+
+  try {
+    const { path: probePath, timeout: probeTimeout } = probeOptions(
+      readConfigCache(true),
+    )
+
+    await probe(manualBase, probePath, probeTimeout)
+    currentBaseUrl = manualBase
+    bootResolved = true
+    console.log(`[api] 使用设置页指定的基址 ${manualBase}（探测通过）`)
+
+    return manualBase
+  }
+  catch (error: any) {
+    markManualPresumedDead(manualBase)
+    console.warn(
+      `[api] 设置页指定的基址 ${manualBase} 探测失败（${error?.message || error}），`
+      + '已回退到自动选路；请到设置页确认该地址，或使用「恢复默认地址」',
+    )
+
+    return fallbackFromManual(manualBase)
+  }
+}
+
+/**
+ * Runs the automatic pipeline after a hand-entered origin was rejected.
+ *
+ * `unavailable` already holds the rejected address, and `orderCandidates` sorts
+ * it last, so simply letting the normal path run is enough — but the manual
+ * address must not be injected back in as a candidate, because it never appears
+ * in the remote config and would otherwise be re-adopted by `readCache()`.
+ */
+function fallbackFromManual(manualBase: string): Promise<string> {
+  markUnavailable(manualBase)
+  clearCache()
+
+  if (resolvePromise) {
+    return resolvePromise
+  }
+
+  bootResolved = false
+  // `ignoreManual` is what makes the fallback real: without it `bootResolve`
+  // reads the same stored address back and adopts it again, so a dead origin
+  // would be re-selected on every attempt.
+  resolvePromise = bootResolve('', epoch, true)
+    .then((base) => {
+      bootResolved = true
+
+      return base
+    })
+    .finally(() => {
+      resolvePromise = null
+    })
+
+  return resolvePromise
+}
+
+/**
  * Base URL the user typed on the settings page, if any.
  *
  * A hand-entered origin has to win over every automatic candidate: it is the
@@ -190,13 +284,25 @@ function readManualBaseUrl(): string {
   }
 }
 
-/** 冷启动决策：配置优先于本地缓存（配置里没有的节点一律不再使用） */
-async function bootResolve(cachedBase: string, myEpoch: number): Promise<string> {
-  const manualBase = readManualBaseUrl()
+/**
+ * 冷启动决策：配置优先于本地缓存（配置里没有的节点一律不再使用）
+ * @param cachedBase 本地缓存的基址（可为空串）
+ * @param myEpoch 调用时的选路代际号
+ * @param ignoreManual 忽略设置页指定的基址。回退路径必须传 true：手动地址在
+ *   存储里仍然存在，若这里再读一次就会把它重新采纳，回退等于没做。
+ */
+async function bootResolve(
+  cachedBase: string,
+  myEpoch: number,
+  ignoreManual = false,
+): Promise<string> {
+  if (!ignoreManual) {
+    const manualBase = readManualBaseUrl()
 
-  if (manualBase) {
-    console.log(`[api] 使用设置页指定的基址 ${manualBase}`)
-    return manualBase
+    if (manualBase) {
+      console.log(`[api] 使用设置页指定的基址 ${manualBase}`)
+      return manualBase
+    }
   }
 
   const startedAt = Date.now()
@@ -296,16 +402,42 @@ export function markApiHealthy() {
  * @param reason 失败原因（用于日志排查）
  */
 export function invalidateApiBase(reason: string) {
-  // A hand-entered origin is the user's explicit choice, not a discovered node:
-  // marking it unavailable and reselecting would silently move requests back to
-  // the compiled-in production origin, which is exactly the behaviour the
-  // settings field exists to override. Report the failure and keep the origin.
   const manualBase = readManualBaseUrl()
 
   if (manualBase) {
+    // A hand-entered origin is an explicit choice, so it is not abandoned on the
+    // first failure — a restarting gateway, a laptop that just woke up or a
+    // brief tunnel drop all look identical from here, and silently switching to
+    // the compiled-in production origin would be the exact behaviour the field
+    // exists to override.
+    //
+    // It is not immortal either. The earlier code returned unconditionally,
+    // which meant a stale debugging address stayed pinned forever: every request
+    // failed, `reportApiFailure` was called on each one, and nothing ever fell
+    // back. Now a persistent failure (the same sliding-window verdict that
+    // governs discovered nodes) marks the address as presumed-dead, drops the
+    // cached choice and lets the automatic pipeline take over.
+    if (!shouldFailover()) {
+      const failed = outcomes.filter(o => !o.ok).length
+      console.warn(
+        `[api] 基址 ${manualBase} 请求失败（${reason}）；窗口内失败 ${failed}/${outcomes.length}、`
+        + `网络连击 ${networkStrikes}，未达切换阈值，继续沿用设置页地址`,
+      )
+
+      return
+    }
+
+    markManualPresumedDead(manualBase)
+    clearCache()
+    outcomes = []
+    networkStrikes = 0
+    bootResolved = false
+    epoch += 1
     console.warn(
-      `[api] 基址 ${manualBase} 请求失败（${reason}），但该地址由设置页指定，不做自动重选`,
+      `[api] 设置页指定的基址 ${manualBase} 持续失败（${reason}），判定不可用并回退到自动选路；`
+      + '请到设置页确认该地址，或使用「恢复默认地址」',
     )
+
     return
   }
 
@@ -382,6 +514,48 @@ function markUnavailable(base: string) {
   if (base) {
     unavailable.set(base, Date.now() + UNAVAILABLE_TTL)
   }
+}
+
+/** 记录一次手动基址探测失败；到期自动放行以便复核 */
+function markManualPresumedDead(base: string) {
+  if (base) {
+    manualPresumedDead.set(base, Date.now() + MANUAL_PRESUMED_DEAD_TTL)
+  }
+}
+
+/** 该手动基址当前是否处于「探测失败、暂不采用」状态（到期自动恢复） */
+function isManualPresumedDead(base: string): boolean {
+  const until = manualPresumedDead.get(base)
+
+  if (!until) {
+    return false
+  }
+
+  if (Date.now() > until) {
+    manualPresumedDead.delete(base)
+
+    return false
+  }
+
+  return true
+}
+
+/**
+ * Clears the "probe failed" verdict for an origin.
+ *
+ * Called when the user saves settings: editing the field is an explicit signal
+ * that the address changed or the gateway is back, so the next resolve must
+ * re-probe instead of remembering an old failure.
+ */
+export function clearManualBaseUrlVerdict(base?: string) {
+  if (base) {
+    manualPresumedDead.delete(base)
+    unavailable.delete(base)
+
+    return
+  }
+
+  manualPresumedDead.clear()
 }
 
 /** 该节点当前是否处于「近期判定失效」状态（到期自动恢复） */

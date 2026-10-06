@@ -2,6 +2,7 @@
 import { onShow } from '@dcloudio/uni-app'
 import { ref } from 'vue'
 
+import { clearManualBaseUrlVerdict } from '@/api/core/base-url'
 import { useAuthStore } from '@/store/authStore'
 import { parseStored } from '@/store/persist'
 import { ensureUnlocked } from '@/utils/app-guard'
@@ -111,11 +112,37 @@ function load() {
   probeStorage()
 }
 
+/**
+ * Drops the stored origin so the app goes back to discovery.
+ *
+ * Needed because a hand-entered origin outranks every automatic candidate, and
+ * it is read back from storage on each cold start. Without this the field is a
+ * one-way door: once a stale address (a local dev server, a dead tunnel) is in
+ * there, the only way out is editing this form — which is unreachable if the
+ * app cannot reach anything to begin with. Clearing it restores the compiled-in
+ * and remote-config candidates.
+ */
+function restoreDefaultBaseUrl() {
+  baseUrl.value = ''
+  auth.setBaseUrl('')
+  // The address is gone, so any recorded probe failure for it is meaningless;
+  // drop it too, or a later re-entry of the same address would be distrusted.
+  clearManualBaseUrlVerdict()
+  uni.removeStorageSync('API_BASE_URL_CACHE_V1')
+  saved.value = false
+  persistStatus.value = ''
+  probeStorage()
+  uni.showToast({ icon: 'none', title: '已恢复默认地址' })
+}
+
 function save() {
   auth.setBaseUrl(baseUrl.value.trim())
   auth.setAdminCookie(adminCookie.value)
   auth.setApiKey(apiKey.value)
   saved.value = true
+  // Saving is the user saying "this address is the one to use", so a previous
+  // failed probe must not keep it benched.
+  clearManualBaseUrlVerdict(baseUrl.value.trim())
 
   // Verify the credentials actually reached persistent storage. On the App
   // runtime an early `setStorageSync` is dropped silently, and reporting
@@ -203,6 +230,16 @@ onShow(() => {
       </button>
     </view>
 
+    <view class="actions">
+      <button class="ghost" @tap="restoreDefaultBaseUrl">
+        恢复默认地址
+      </button>
+    </view>
+
+    <view class="section-hint hint-block">
+      地址不可达时 App 会自动回退到内置地址，无需手动清理。
+    </view>
+
     <view class="status">
       <text>当前状态：{{ auth.hasCredentials ? '已配置' : '未配置' }}</text>
       <text v-if="saved" class="status-saved">{{ persistStatus || '已保存' }}</text>
@@ -250,6 +287,11 @@ onShow(() => {
   color: #8a8f99;
   line-height: 1.6;
   margin-bottom: 16rpx;
+}
+
+/* 说明文字独立成段：贴在按钮下方，不再依赖所在 section 的下间距。 */
+.hint-block {
+  margin: 16rpx 8rpx 0;
 }
 
 .input {
