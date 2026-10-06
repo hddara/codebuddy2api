@@ -3,11 +3,25 @@
 .venv
 .ruff_cache
 __pycache__/
-*/__pycache__/
+**/__pycache__/
 *.pyc
 .next
 coverage
 node_modules
+**/node_modules
 dist
+**/dist
 build
+**/build
 tsconfig.tsbuildinfo
+
+# The mobile app is a separate project living inside this repository. Its native
+# packaging shells are ~5GB and none of it belongs in the service image, yet the
+# bare `node_modules`/`dist` patterns above only match the repository root — so
+# the whole directory was being shipped as Docker build context.
+HDdaraAi
+
+# Local-only state and secrets.
+.codebuddy_data
+.codebuddy_creds
+.brv
