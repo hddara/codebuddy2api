@@ -18,9 +18,27 @@ import type { PiniaPluginContext } from 'pinia'
  * each cold start. `JSON` round-trip is enough because these states are plain
  * data, and `structuredClone` is not guaranteed in the App JS runtime.
  */
-function snapshotState(state: unknown): unknown {
+/**
+ * Fields that must never be written to storage, keyed by store id.
+ *
+ * `unlocked` records that the lock screen was passed in the current launch. If
+ * it were persisted, relaunching the app would restore it and skip the unlock
+ * entirely — the fingerprint prompt would only ever appear once, which makes it
+ * decorative. Keeping it in memory means every cold start asks again.
+ */
+const EPHEMERAL_FIELDS: Record<string, string[]> = {
+  auth: ['unlocked'],
+}
+
+function snapshotState(state: unknown, storeId?: string): unknown {
   try {
-    return JSON.parse(JSON.stringify(state))
+    const clone = JSON.parse(JSON.stringify(state)) as Record<string, unknown>
+
+    for (const field of EPHEMERAL_FIELDS[storeId ?? ''] ?? []) {
+      delete clone[field]
+    }
+
+    return clone
   }
   catch {
     return state
@@ -53,7 +71,7 @@ function writeThrough(
   store: { $id: string, $state: unknown },
   attempt = 0,
 ): void {
-  const payload = snapshotState(store.$state)
+  const payload = snapshotState(store.$state, store.$id)
 
   // Nothing to persist yet: writing `{}` would erase a good snapshot that we
   // simply have not restored yet.
@@ -165,6 +183,12 @@ function persist({ store }: PiniaPluginContext, excludedIds: string[]) {
       //
       // The record is cast because a snapshot is untyped by nature; Pinia's
       // overloads only accept a `_DeepPartial` of the concrete state.
+      // A snapshot written by an earlier build may still carry an ephemeral
+      // field; clear it here too, so upgrading cannot leave the app unlocked.
+      for (const field of EPHEMERAL_FIELDS[store.$id] ?? []) {
+        delete (storageState as Record<string, unknown>)[field]
+      }
+
       store.$patch(storageState as never)
       console.log(`[persist] restored ${store.$id}`, Object.keys(storageState as object).join(','))
     }

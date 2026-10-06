@@ -218,8 +218,16 @@ function toggleCookieVisible() {
 const biometricEnabled = ref(false)
 
 onLoad(async () => {
+  // The origin is safe to prefill — it is not a secret and typing a URL on a
+  // phone is tedious.
   baseUrl.value = auth.baseUrl || ''
-  adminCookie.value = auth.adminCookie || ''
+
+  // The credential is deliberately NOT prefilled. Prefilling it turned the
+  // "改用凭据登录" button into a one-tap bypass: the form was already valid, so a
+  // stray tap signed the user straight in and the lock screen stopped being a
+  // gate at all. Leaving it empty means reaching the app requires either the
+  // biometric match or the credential being typed again.
+  adminCookie.value = ''
 
   try {
     biometricEnabled.value = Boolean(uni.getStorageSync('biometric-enabled'))
@@ -245,6 +253,39 @@ onLoad(async () => {
     statusText.value = '设备未设置指纹或面容，请在下方确认凭据'
   }
 })
+
+/**
+ * Enters using the credential already on the device.
+ *
+ * Reached only by an explicit press. This is the path for a build without the
+ * fingerprint module: the user still has to act on the lock screen, they just
+ * are not asked to retype a 43-character token to get back into their own app.
+ */
+async function enterWithStored() {
+  if (busy.value)
+    return
+
+  busy.value = true
+  errorMessage.value = ''
+  statusText.value = '正在确认登录状态…'
+
+  if (await verifyStored()) {
+    enterApp()
+    return
+  }
+
+  busy.value = false
+  statusText.value = ''
+  hasStored.value = false
+}
+
+/** Switches to the form, with an empty credential field. */
+function useCredentialForm() {
+  adminCookie.value = ''
+  errorMessage.value = ''
+  statusText.value = ''
+  hasStored.value = false
+}
 
 function toggleBiometric() {
   biometricEnabled.value = !biometricEnabled.value
@@ -291,7 +332,10 @@ function toggleBiometric() {
         {{ biometricEnabled ? '使用指纹或面容快速解锁' : '已保存登录信息' }}
       </text>
 
-      <view class="switch-row" @tap="toggleBiometric">
+      <!-- A <button> rather than a tappable <view>: on the App runtime a tap that
+           lands on a child <text> does not reliably reach a handler bound to the
+           parent view, which is why tapping the row did nothing. -->
+      <button class="switch-row" @tap="toggleBiometric">
         <view class="switch-body">
           <text class="switch-label">指纹 / 面容解锁</text>
           <text class="switch-hint">
@@ -301,13 +345,13 @@ function toggleBiometric() {
         <view class="switch" :class="[biometricEnabled ? 'switch-on' : '']">
           <view class="switch-knob" />
         </view>
-      </view>
+      </button>
 
-      <view v-if="statusText" class="status">
-        {{ statusText }}
-      </view>
       <view v-if="errorMessage" class="error">
         {{ errorMessage }}
+      </view>
+      <view v-if="statusText" class="status">
+        {{ statusText }}
       </view>
 
       <button
@@ -318,7 +362,21 @@ function toggleBiometric() {
       >
         {{ busy ? '验证中…' : '解锁' }}
       </button>
-      <button class="ghost" @tap="hasStored = false">
+
+      <!-- Only offered when biometrics are off, so it cannot compete with the
+           prompt. It is a deliberate press rather than a prefilled form, which
+           is what keeps the lock screen meaningful while still not stranding
+           anyone on a build that has no fingerprint module. -->
+      <button
+        v-if="!biometricEnabled"
+        class="primary"
+        :disabled="busy"
+        @tap="enterWithStored"
+      >
+        {{ busy ? '进入中…' : '使用已保存的凭据进入' }}
+      </button>
+
+      <button class="ghost" @tap="useCredentialForm">
         改用凭据登录
       </button>
     </view>
@@ -460,14 +518,26 @@ function toggleBiometric() {
   line-height: 1.65;
 }
 
+/* A <button> carries a default background, border, radius and centring on both
+   platforms; all of it is reset here so the row reads as a list item. */
 .switch-row {
   display: flex;
   align-items: center;
   gap: 20rpx;
-  margin-top: 32rpx;
+  width: 100%;
+  margin: 32rpx 0 0;
   padding: 24rpx 0;
+  border: none;
   border-top: 1rpx solid #f0f1f3;
   border-bottom: 1rpx solid #f0f1f3;
+  border-radius: 0;
+  background-color: transparent;
+  line-height: normal;
+  text-align: left;
+}
+
+.switch-row::after {
+  border: none;
 }
 
 .switch-body {
