@@ -171,6 +171,34 @@ interface PlusXhrConstructor {
 }
 
 /**
+ * One turn in a conversation, in the shape the gateway forwards upstream.
+ */
+export interface ChatMessage {
+  content: string
+  role: 'assistant' | 'user'
+}
+
+/**
+ * Handle for a message that is still being answered.
+ *
+ * `stop()` ends the turn from the app's side: the request is aborted, no further
+ * deltas arrive, and the caller can leave whatever was received on screen. The
+ * model itself keeps generating upstream — the gateway does not thread the client
+ * disconnect into the provider request — so the finished answer still lands in
+ * the conversation record. That is a deliberate trade: cancelling in the UI has
+ * to be instant, and waiting for a server round trip would make the button feel
+ * broken on a slow link.
+ */
+export interface ChatHandle {
+  /** True once the turn ended, whether it completed, failed or was stopped. */
+  readonly finished: boolean
+  /** Aborts the request. Safe to call more than once, and after completion. */
+  stop: () => void
+  /** Resolves when the turn ends. `stopped` distinguishes a cancel from a finish. */
+  readonly done: Promise<{ stopped: boolean }>
+}
+
+/**
  * Sends a message to the gateway and streams the answer back.
  *
  * Uses `/admin-api/chat/completions`, which authenticates with the console
@@ -182,22 +210,33 @@ interface PlusXhrConstructor {
  * `conversationId` is threaded through as the upstream conversation id so the
  * answer joins the same thread the IDE is using; it is carried as a header
  * because the body is forwarded verbatim to the provider.
+ *
+ * `messages` is the whole turn history, not just the new question: a follow-up
+ * only makes sense with the earlier turns in front of it, and the endpoint is
+ * stateless. `history` is the convenience form for callers that hold one.
  */
-export async function sendChatMessage({
+export function sendChatMessage({
   conversationId,
   message,
+  messages,
   model,
   onDelta,
+  onDone,
   onError,
   onStart,
 }: {
   conversationId?: string
+  /** The new question. Appended to `messages` when both are given. */
   message: string
+  /** Full turn history. Ignored when absent, in which case `message` is the only turn. */
+  messages?: ChatMessage[]
   model?: string
   onDelta: (text: string) => void
+  /** Called once when the turn ends without error. Not called after `stop()`. */
+  onDone?: () => void
   onError: (message: string) => void
   onStart?: () => void
-}): Promise<void> {
+}): ChatHandle {
   const auth = useAuthStore()
   const base = auth.baseUrl || getApiBaseUrl()
   const headers: Record<string, string> = {
@@ -209,95 +248,199 @@ export async function sendChatMessage({
     headers['x-conversation-id'] = conversationId
   }
 
-  const response = await new Promise<{
-    onChunkReceived?: (handler: (result: { data: ArrayBuffer }) => void) => void
-    onHeadersReceived?: (handler: (result: { header: Record<string, string> }) => void) => void
-    abort?: () => void
-  }>((resolve, reject) => {
-    const request = uni.request({
-      data: {
-        messages: [{ content: message, role: 'user' }],
-        model: model || 'deepseek-v4.1-flash',
-        stream: true,
-      },
-      enableChunked: true,
-      header: headers,
-      method: 'POST',
-      timeout: 2_147_483_647 as never,
-      url: `${base}/admin-api/chat/completions`,
-      fail: (error: { errMsg?: string }) => {
-        reject(new Error(String(error?.errMsg ?? '请求失败')))
-      },
-      success: () => {
-        // Streaming responses end here once the server closes; nothing to do.
-      },
-    } as never) as never
+  const turns: ChatMessage[] = messages?.length
+    ? messages
+    : [{ content: message, role: 'user' }]
 
-    resolve(request)
-  }).catch((error: Error) => {
-    onError(error.message)
-    return null
+  let stopped = false
+  let finished = false
+  let aborter: (() => void) | null = null
+  /** Set once the request exists, so `stop` has something to call. */
+  let stopRef: (() => void) | null = null
+  let settle: (value: { stopped: boolean }) => void = () => {}
+
+  const done = new Promise<{ stopped: boolean }>((resolve) => {
+    settle = resolve
   })
 
-  if (!response)
-    return
+  const finish = (): void => {
+    if (finished)
+      return
 
-  if (!response.onChunkReceived) {
-    onError('当前运行时不支持流式响应，无法显示回答')
-    return
+    finished = true
+    settle({ stopped })
   }
 
-  onStart?.()
+  /**
+   * Starts the request and hands back a handle straight away.
+   *
+   * The request is created inside an async IIFE rather than at the top level so
+   * this function can stay synchronous — the page uses the returned handle to
+   * wire its 终止 button, and `await`ing first would leave a window where the
+   * button exists but has nothing to stop.
+   *
+   * `onChunkReceived` is read one tick after `uni.request` returns: the App
+   * runtime attaches it to the `plus.net` object asynchronously, and reading it
+   * synchronously reported "当前运行时不支持流式响应" on a runtime that supports
+   * it — which is what the previous promise wrapper was really guarding.
+   */
+  void (async () => {
+    const request = await new Promise<{
+      abort?: () => void
+      onChunkReceived?: (handler: (result: { data: ArrayBuffer }) => void) => void
+    }>((resolve) => {
+      const created = uni.request({
+        data: {
+          messages: turns,
+          model: model || 'deepseek-v4.1-flash',
+          stream: true,
+        },
+        enableChunked: true,
+        header: headers,
+        method: 'POST',
+        timeout: 2_147_483_647 as never,
+        url: `${base}/admin-api/chat/completions`,
+        fail: (error: { errMsg?: string }) => {
+          // An abort surfaces here as well. Reporting it as a failure would put
+          // an error on screen for something the user asked for, so it is
+          // swallowed when a stop was requested.
+          if (!stopped) {
+            onError(String(error?.errMsg ?? '请求失败'))
+          }
 
-  const decodeChunk = createUtf8Decoder()
-  let buffer = ''
+          finish()
+        },
+        success: () => {
+          // Streaming responses end here once the server closes; nothing to do.
+          finish()
+        },
+      } as never) as never as {
+        abort?: () => void
+        onChunkReceived?: (handler: (result: { data: ArrayBuffer }) => void) => void
+      }
 
-  await new Promise<void>((resolve) => {
-    response.onChunkReceived?.((result) => {
-      buffer += decodeChunk(result.data)
+      resolve(created)
+    })
 
-      const frames = buffer.split(/\n\n/)
-      buffer = frames.pop() ?? ''
+    aborter = typeof request?.abort === 'function' ? () => request.abort?.() : null
 
-      for (const frame of frames) {
-        const dataLine = frame
-          .split(/\n/)
-          .find(line => line.startsWith('data: '))
+    // Stopped before the request object even arrived: nothing left to do.
+    if (stopped) {
+      aborter?.()
+      finish()
 
-        if (!dataLine)
-          continue
+      return
+    }
 
-        const payload = dataLine.slice(6)
+    const stop = (): void => {
+      if (finished)
+        return
 
-        if (payload === '[DONE]') {
+      stopped = true
+      aborter?.()
+      // The runtime does not always fire `fail` on abort, and the caller must not
+      // be left believing the turn is still running.
+      finish()
+    }
+
+    stopRef = stop
+
+    const onChunkReceived = request.onChunkReceived
+
+    if (!onChunkReceived) {
+      onError('当前运行时不支持流式响应，无法显示回答')
+      finish()
+
+      return
+    }
+
+    onStart?.()
+
+    const decodeChunk = createUtf8Decoder()
+    let buffer = ''
+
+    await new Promise<void>((resolve) => {
+      onChunkReceived((result) => {
+        if (stopped) {
           resolve()
+
           return
         }
 
-        try {
-          const parsed = JSON.parse(payload) as {
-            choices?: Array<{ delta?: { content?: string } }>
-            error?: { message?: string }
-          }
+        buffer += decodeChunk(result.data)
 
-          if (parsed.error?.message) {
-            onError(parsed.error.message)
+        const frames = buffer.split(/\n\n/)
+        buffer = frames.pop() ?? ''
+
+        for (const frame of frames) {
+          const dataLine = frame
+            .split(/\n/)
+            .find(line => line.startsWith('data: '))
+
+          if (!dataLine)
+            continue
+
+          const payload = dataLine.slice(6)
+
+          if (payload === '[DONE]') {
             resolve()
             return
           }
 
-          const text = parsed.choices?.[0]?.delta?.content
+          try {
+            const parsed = JSON.parse(payload) as {
+              choices?: Array<{ delta?: { content?: string } }>
+              error?: { message?: string }
+            }
 
-          if (typeof text === 'string' && text) {
-            onDelta(text)
+            if (parsed.error?.message) {
+              onError(parsed.error.message)
+              resolve()
+              return
+            }
+
+            const text = parsed.choices?.[0]?.delta?.content
+
+            if (typeof text === 'string' && text) {
+              onDelta(text)
+            }
+          }
+          catch {
+            // A malformed frame is skipped rather than aborting the whole answer.
           }
         }
-        catch {
-          // A malformed frame is skipped rather than aborting the whole answer.
-        }
-      }
+      })
     })
-  })
+
+    if (!stopped && !finished) {
+      onDone?.()
+    }
+
+    finish()
+  })()
+
+  return {
+    done,
+    get finished() {
+      return finished
+    },
+    /**
+     * Aborts the turn.
+     *
+     * Delegates to the inner implementation once the request object exists. A
+     * stop requested before that point is recorded in `stopped`, and the async
+     * block above aborts as soon as it has something to abort — so pressing 终止
+     * in the first moments still works.
+     */
+    stop: () => {
+      if (finished)
+        return
+
+      stopped = true
+      stopRef?.()
+      finish()
+    },
+  }
 }
 
 export interface LiveSnapshot {

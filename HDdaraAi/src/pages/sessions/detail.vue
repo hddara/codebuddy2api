@@ -2,8 +2,9 @@
 import type { TranscriptEntry } from '@/api/sessions'
 import { onLoad, onShow } from '@dcloudio/uni-app'
 
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { fetchTranscripts } from '@/api/sessions'
+import StateBlock from '@/components/StateBlock.vue'
 import { toSnippet } from '@/utils/markdown'
 
 definePage({
@@ -27,8 +28,36 @@ const totalStored = ref(0)
 
 const PREVIEW_LIMIT = 40
 
+/**
+ * Shortened conversation id shown in the header.
+ *
+ * The full value is long and not useful to read, but it is what a person needs
+ * when correlating the app with a gateway log, so it is copyable rather than
+ * merely truncated.
+ */
+const shortId = computed(() =>
+  conversationId.value ? `${conversationId.value.slice(0, 20)}…` : '',
+)
+
+function copyConversationId() {
+  if (!conversationId.value)
+    return
+
+  uni.setClipboardData({
+    data: conversationId.value,
+    success: () => uni.showToast({ icon: 'none', title: '已复制会话标识' }),
+  })
+}
+
+/** Reloads after a failure; previously the only way out was leaving the page. */
+function retry() {
+  loading.value = true
+  void load()
+}
+
 async function load() {
   if (!conversationId.value) {
+    errorMessage.value = '缺少会话标识'
     loading.value = false
     return
   }
@@ -97,17 +126,29 @@ onShow(() => {
 <template>
   <view class="page">
     <view class="head">
-      <text class="head-id">{{ conversationId.slice(0, 20) }}…</text>
+      <view class="head-row">
+        <text class="head-id">{{ shortId }}</text>
+        <text class="head-copy" @tap="copyConversationId">复制</text>
+      </view>
       <text class="head-caption">会话标识</text>
     </view>
 
-    <view v-if="errorMessage" class="error">
-      {{ errorMessage }}
-    </view>
+    <StateBlock
+      v-if="errorMessage"
+      tone="danger"
+      :text="errorMessage"
+      retry-text="重试"
+      @retry="retry"
+    />
 
     <!-- Entry 1: live output, kept separate from stored history because it is
-         transient and is the thing you want while waiting on an answer. -->
-    <view class="entry entry-primary" @tap="openLive">
+         transient and is the thing you want while waiting on an answer.
+
+         A <button>, not a tappable <view>: on the App runtime a tap landing on a
+         child <text> does not reliably reach a handler bound to the parent view,
+         so these rows silently ignored presses. That is the same defect the
+         login screen documents, and it is why "点不动" kept being reported. -->
+    <button class="entry entry-primary" @tap="openLive">
       <view class="entry-body">
         <text class="entry-title">实时回复</text>
         <text class="entry-sub">
@@ -115,7 +156,7 @@ onShow(() => {
         </text>
       </view>
       <text class="entry-arrow">›</text>
-    </view>
+    </button>
 
     <!-- Entry 2: stored turns, one row each, preview only. -->
     <view class="section-head">
@@ -125,16 +166,16 @@ onShow(() => {
       </text>
     </view>
 
-    <view v-if="loading" class="hint">
-      加载中…
-    </view>
+    <StateBlock v-if="loading" :loading="true" text="加载中…" />
 
-    <view v-else-if="!entries.length" class="hint">
-      还没有记录。网关会保存每次问答，可在设置里调整保留天数与条数。
-    </view>
+    <StateBlock
+      v-else-if="!entries.length"
+      text="还没有记录"
+      hint="网关会保存每次问答，可在设置里调整保留天数与条数。"
+    />
 
     <view v-else class="list">
-      <view
+      <button
         v-for="entry in entries"
         :key="entry.id"
         class="entry"
@@ -155,7 +196,7 @@ onShow(() => {
           </view>
         </view>
         <text class="entry-arrow">›</text>
-      </view>
+      </button>
     </view>
 
     <view v-if="entries.length && totalStored > entries.length" class="footnote">
@@ -164,50 +205,67 @@ onShow(() => {
   </view>
 </template>
 
-<style scoped>
+<style scoped lang="scss">
+@use '@/styles/tokens.scss' as *;
+
 .page {
   min-height: 100vh;
-  padding: 20rpx 24rpx 60rpx;
+  padding: 20rpx $gap-page 60rpx;
   box-sizing: border-box;
-  background-color: #f5f6f8;
+  background-color: $color-page;
 }
 
 .head {
   padding: 8rpx 4rpx 20rpx;
 }
 
+.head-row {
+  display: flex;
+  align-items: center;
+  gap: $gap-inline;
+}
+
 .head-id {
-  display: block;
-  font-size: 25rpx;
-  color: #4a4f57;
+  flex: 1;
+  min-width: 0;
+  font-size: $font-meta;
+  color: $color-text-secondary;
   word-break: break-all;
+}
+
+.head-copy {
+  flex: none;
+  font-size: $font-meta;
+  color: $color-primary;
 }
 
 .head-caption {
   display: block;
   margin-top: 4rpx;
-  font-size: 22rpx;
-  color: #a8adb5;
+  font-size: $font-micro;
+  color: $color-text-faint;
 }
 
-.error {
-  margin-bottom: 16rpx;
-  padding: 18rpx 20rpx;
-  border-radius: 16rpx;
-  background-color: #fff1f0;
-  font-size: 25rpx;
-  color: #cf1322;
-  line-height: 1.6;
-}
-
+/* Reset the platform button chrome so a row still reads as a list item:
+   uni gives <button> its own background, border, radius and centring, and its
+   ::after pseudo-element draws an extra hairline border. */
 .entry {
   display: flex;
   align-items: center;
   gap: 16rpx;
-  margin-bottom: 16rpx;
+  width: 100%;
+  margin: 0 0 16rpx;
   padding: 26rpx 24rpx;
-  border-radius: 20rpx;
-  background-color: #ffffff;
+  border: none;
+  border-radius: $radius-card;
+  background-color: $color-surface;
+  font-weight: normal;
+  line-height: normal;
+  text-align: left;
+}
+
+.entry::after {
+  border: none;
 }
 
 .entry-primary {
@@ -223,13 +281,13 @@ onShow(() => {
   display: block;
   font-size: 30rpx;
   font-weight: 600;
-  color: #0a84ff;
+  color: $color-primary;
 }
 
 .entry-sub {
   display: block;
   margin-top: 6rpx;
-  font-size: 24rpx;
+  font-size: $font-meta;
   color: #6b7280;
   line-height: 1.6;
 }
@@ -240,8 +298,8 @@ onShow(() => {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   overflow: hidden;
-  font-size: 28rpx;
-  color: #1f2329;
+  font-size: $font-section;
+  color: $color-text;
   line-height: 1.6;
 }
 
@@ -253,20 +311,20 @@ onShow(() => {
 }
 
 .entry-time {
-  font-size: 23rpx;
-  color: #a8adb5;
+  font-size: $font-micro;
+  color: $color-text-faint;
 }
 
 .entry-status {
-  font-size: 23rpx;
+  font-size: $font-micro;
 }
 
 .status-completed {
-  color: #22a06b;
+  color: $color-success;
 }
 
 .status-failed {
-  color: #cf1322;
+  color: $color-danger;
 }
 
 .entry-arrow {
@@ -284,9 +342,9 @@ onShow(() => {
 }
 
 .section-title {
-  font-size: 27rpx;
+  font-size: $font-section;
   font-weight: 600;
-  color: #1f2329;
+  color: $color-text;
 }
 
 .section-count {

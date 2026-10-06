@@ -4,6 +4,7 @@ import { onLoad } from '@dcloudio/uni-app'
 
 import { computed, ref } from 'vue'
 import { fetchTranscripts } from '@/api/sessions'
+import StateBlock from '@/components/StateBlock.vue'
 import { extractQuestion, renderMarkdown } from '@/utils/markdown'
 
 definePage({
@@ -52,10 +53,47 @@ async function load(conversationId: string, entryId: string) {
   }
 }
 
+const conversationId = ref('')
+
 const question = computed(() => extractQuestion(entry.value?.question ?? ''))
+/**
+ * The question is rendered as Markdown too.
+ *
+ * It used to be a plain `<text>`, so a question containing a code snippet or a
+ * list looked different from the same content in the answer below it. Both sides
+ * of a Q&A go through the same renderer now.
+ */
+const questionHtml = computed(() => {
+  const text = question.value
+
+  return text ? renderMarkdown(text, { codeMaxHeight: 320 }) : ''
+})
+
 const answerHtml = computed(() =>
   entry.value?.answer ? renderMarkdown(entry.value.answer) : '',
 )
+
+/**
+ * Whether the answer itself failed.
+ *
+ * Shown *instead of* the answer, not above it: the error was previously rendered
+ * alongside `answerHtml`, so a failed turn displayed both the failure and
+ * whatever partial content had been captured, with no way to tell which was
+ * authoritative.
+ */
+const answerFailed = computed(
+  () => entry.value?.status === 'failed' || Boolean(entry.value?.error),
+)
+
+/** Opens the live page on this conversation, so a follow-up can be asked. */
+function continueInSession() {
+  if (!conversationId.value)
+    return
+
+  uni.navigateTo({
+    url: `/pages/sessions/live?conversationId=${encodeURIComponent(conversationId.value)}`,
+  })
+}
 
 function formatTime(value: string): string {
   const parsed = new Date(value)
@@ -75,8 +113,10 @@ function copyAnswer() {
 
 onLoad((query) => {
   const params = query as Record<string, string>
+
+  conversationId.value = decodeURIComponent(String(params?.conversationId ?? ''))
   void load(
-    decodeURIComponent(String(params?.conversationId ?? '')),
+    conversationId.value,
     decodeURIComponent(String(params?.entryId ?? '')),
   )
 })
@@ -84,13 +124,14 @@ onLoad((query) => {
 
 <template>
   <view class="page">
-    <view v-if="loading" class="hint">
-      加载中…
-    </view>
+    <StateBlock v-if="loading" :loading="true" text="加载中…" />
 
-    <view v-else-if="errorMessage" class="error">
-      {{ errorMessage }}
-    </view>
+    <StateBlock
+      v-else-if="errorMessage"
+      tone="danger"
+      :text="errorMessage"
+      hint="记录可能已被裁剪，或该会话不再保留这么久的问答。"
+    />
 
     <template v-else-if="entry">
       <view class="meta">
@@ -105,9 +146,7 @@ onLoad((query) => {
         <view class="card-head">
           <text class="card-title">提问</text>
         </view>
-        <text v-if="question" class="question">
-          {{ question }}
-        </text>
+        <rich-text v-if="questionHtml" class="rich" :nodes="questionHtml" />
         <text v-else class="muted">
           （这条记录没有捕获到提问文本）
         </text>
@@ -116,12 +155,20 @@ onLoad((query) => {
       <view class="card">
         <view class="card-head">
           <text class="card-title">回答</text>
-          <text class="card-action" @tap="copyAnswer">复制</text>
+          <text v-if="entry.answer" class="card-action" @tap="copyAnswer">复制</text>
         </view>
 
-        <text v-if="entry.error" class="answer-error">{{ entry.error }}</text>
+        <!-- Failure and content are mutually exclusive: showing both left the
+             reader unable to tell whether the partial text was the answer. -->
+        <StateBlock
+          v-if="answerFailed"
+          variant="plain"
+          tone="danger"
+          text="这一轮回答失败"
+          :hint="entry.error || '网关没有返回内容'"
+        />
 
-        <rich-text v-if="answerHtml" class="answer" :nodes="answerHtml" />
+        <rich-text v-else-if="answerHtml" class="rich" :nodes="answerHtml" />
         <text v-else class="muted">
           （没有回答内容）
         </text>
@@ -130,37 +177,30 @@ onLoad((query) => {
       <view class="footnote">
         回答共 {{ entry.answerChars }} 字，提问 {{ entry.questionChars }} 字。
       </view>
+
+      <!-- Ask a follow-up on the same conversation without going back through
+           the list to find the live page. -->
+      <button class="primary" @tap="continueInSession">
+        在这个会话里继续提问
+      </button>
     </template>
   </view>
 </template>
 
-<style scoped>
+<style scoped lang="scss">
+@use '@/styles/tokens.scss' as *;
+
 .page {
   min-height: 100vh;
-  padding: 20rpx 24rpx 60rpx;
+  padding: 20rpx $gap-page 60rpx;
   box-sizing: border-box;
-  background-color: #f5f6f8;
+  background-color: $color-page;
 }
 
-.hint,
 .muted {
-  font-size: 26rpx;
-  color: #8a8f99;
+  font-size: $font-label;
+  color: $color-text-muted;
   line-height: 1.8;
-}
-
-.hint {
-  padding: 40rpx 0;
-  text-align: center;
-}
-
-.error {
-  padding: 20rpx;
-  border-radius: 16rpx;
-  background-color: #fff1f0;
-  font-size: 26rpx;
-  color: #cf1322;
-  line-height: 1.7;
 }
 
 .meta {
@@ -171,33 +211,33 @@ onLoad((query) => {
 }
 
 .meta-time {
-  font-size: 24rpx;
-  color: #8a8f99;
+  font-size: $font-meta;
+  color: $color-text-muted;
 }
 
 .meta-status {
-  font-size: 24rpx;
+  font-size: $font-meta;
 }
 
 .status-completed {
-  color: #22a06b;
+  color: $color-success;
 }
 
 .status-failed {
-  color: #cf1322;
+  color: $color-danger;
 }
 
 .meta-model {
   margin-left: auto;
-  font-size: 23rpx;
-  color: #a8adb5;
+  font-size: $font-micro;
+  color: $color-text-faint;
 }
 
 .card {
-  margin-bottom: 20rpx;
+  margin-bottom: $gap-section;
   padding: 24rpx;
-  border-radius: 20rpx;
-  background-color: #ffffff;
+  border-radius: $radius-card;
+  background-color: $color-surface;
 }
 
 .card-head {
@@ -208,44 +248,38 @@ onLoad((query) => {
 }
 
 .card-title {
-  font-size: 26rpx;
+  font-size: $font-label;
   font-weight: 600;
-  color: #1f2329;
+  color: $color-text;
 }
 
 .card-action {
-  font-size: 24rpx;
-  color: #0a84ff;
+  font-size: $font-meta;
+  color: $color-primary;
 }
 
-.question {
+/* One class for both question and answer now that both are rendered HTML. */
+.rich {
   display: block;
-  font-size: 29rpx;
-  font-weight: 500;
-  color: #1f2329;
+  font-size: $font-section;
   line-height: 1.75;
+  color: $color-text;
   word-break: break-word;
-}
-
-.answer {
-  display: block;
-  font-size: 28rpx;
-  line-height: 1.75;
-  color: #1f2329;
-  word-break: break-word;
-}
-
-.answer-error {
-  display: block;
-  margin-bottom: 12rpx;
-  font-size: 25rpx;
-  color: #cf1322;
 }
 
 .footnote {
-  padding: 8rpx 4rpx;
-  font-size: 22rpx;
-  color: #a8adb5;
+  padding: 8rpx 4rpx 20rpx;
+  font-size: $font-micro;
+  color: $color-text-faint;
   text-align: center;
+}
+
+.primary {
+  height: 88rpx;
+  line-height: 88rpx;
+  border-radius: $radius-control;
+  background-color: $color-primary;
+  color: #ffffff;
+  font-size: $font-section;
 }
 </style>

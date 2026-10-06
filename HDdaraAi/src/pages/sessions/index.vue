@@ -4,6 +4,7 @@ import { onPullDownRefresh, onShow } from '@dcloudio/uni-app'
 
 import { computed, ref } from 'vue'
 import { fetchSessions } from '@/api/sessions'
+import StateBlock from '@/components/StateBlock.vue'
 import { useAuthStore } from '@/store/authStore'
 import { parseStored } from '@/store/persist'
 import { ensureUnlocked } from '@/utils/app-guard'
@@ -132,6 +133,18 @@ async function changeWindow(value: number) {
   await load()
 }
 
+/**
+ * Retries after a failure without leaving the page.
+ *
+ * Also clears the error first: the block that shows it is what carries the retry
+ * affordance, so leaving it up during the reload would keep a stale message on
+ * screen next to a spinner.
+ */
+function retry() {
+  errorMessage.value = ''
+  void load()
+}
+
 function formatRelative(value: string): string {
   const parsed = new Date(value)
 
@@ -195,20 +208,27 @@ onPullDownRefresh(async () => {
       </text>
     </view>
 
-    <view v-if="errorMessage" class="error">
-      {{ errorMessage }}
-    </view>
+    <StateBlock
+      v-if="errorMessage"
+      tone="danger"
+      :text="errorMessage"
+      retry-text="重试"
+      @retry="retry"
+    />
 
-    <view v-if="loading" class="hint">
-      加载中…
-    </view>
+    <StateBlock v-if="loading" :loading="true" text="加载中…" />
 
-    <view v-else-if="!sessions.length" class="hint">
-      该时间范围内没有会话
-    </view>
+    <StateBlock
+      v-else-if="!sessions.length"
+      text="该时间范围内没有会话"
+      hint="换个时间范围看看，或在 IDE 里发起一次请求。"
+    />
 
     <view v-else class="list">
-      <view
+      <!-- A <button>: taps on a child <text> do not reliably reach a handler on
+           a plain <view> in the App runtime, which made these cards ignore
+           presses. Same reason the rows on the detail page are buttons. -->
+      <button
         v-for="item in sessions"
         :key="item.conversationId"
         class="card"
@@ -219,13 +239,15 @@ onPullDownRefresh(async () => {
           <text class="card-time">{{ formatRelative(item.lastActiveAt) }}</text>
         </view>
         <view class="card-meta">
-          <text>{{ item.models.join(', ') || '-' }}</text>
+          <!-- Clamped to one line: a session can carry several models and the
+               joined list used to push the card taller than its neighbours. -->
+          <text class="card-model">{{ item.models.join(', ') || '-' }}</text>
         </view>
         <view class="card-stats">
           <text>{{ item.callCount }} 次请求</text>
           <text>{{ item.totalTokens }} tokens</text>
         </view>
-      </view>
+      </button>
     </view>
 
     <view class="footer-hint">
@@ -234,11 +256,13 @@ onPullDownRefresh(async () => {
   </view>
 </template>
 
-<style scoped>
+<style scoped lang="scss">
+@use '@/styles/tokens.scss' as *;
+
 .page {
   min-height: 100vh;
-  background-color: #f5f6f8;
-  padding: 24rpx;
+  background-color: $color-page;
+  padding: $gap-page;
   box-sizing: border-box;
 }
 
@@ -254,14 +278,14 @@ onPullDownRefresh(async () => {
   display: inline-block;
   padding: 12rpx 28rpx;
   margin-right: 16rpx;
-  border-radius: 999rpx;
-  background-color: #ffffff;
-  color: #4a4f57;
-  font-size: 26rpx;
+  border-radius: $radius-pill;
+  background-color: $color-surface;
+  color: $color-text-secondary;
+  font-size: $font-label;
 }
 
 .chip-active {
-  background-color: #0a84ff;
+  background-color: $color-primary;
   color: #ffffff;
 }
 
@@ -272,67 +296,76 @@ onPullDownRefresh(async () => {
 }
 
 .summary-main {
-  font-size: 26rpx;
-  color: #4a4f57;
+  font-size: $font-label;
+  color: $color-text-secondary;
 }
 
 .summary-sub {
   margin-top: 6rpx;
-  font-size: 24rpx;
-  color: #8a8f99;
+  font-size: $font-meta;
+  color: $color-text-muted;
 }
 
-.error {
-  margin-bottom: 16rpx;
-  padding: 20rpx;
-  border-radius: 16rpx;
-  background-color: #fff1f0;
-  color: #cf1322;
-  font-size: 26rpx;
-}
-
-.hint {
-  padding: 60rpx 0;
-  text-align: center;
-  color: #8a8f99;
-  font-size: 26rpx;
-}
-
+/* Reset the platform button chrome so a card still reads as a card. */
 .card {
-  margin-bottom: 20rpx;
+  display: block;
+  width: 100%;
+  margin: 0 0 $gap-section;
   padding: 24rpx;
-  border-radius: 20rpx;
-  background-color: #ffffff;
+  border: none;
+  border-radius: $radius-card;
+  background-color: $color-surface;
+  font-weight: normal;
+  line-height: normal;
+  text-align: left;
+}
+
+.card::after {
+  border: none;
 }
 
 .card-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: $gap-inline;
 }
 
 .card-id {
-  font-size: 28rpx;
+  flex: 1;
+  min-width: 0;
+  font-size: $font-section;
   font-weight: 600;
-  color: #1f2329;
+  color: $color-text;
+  word-break: break-all;
 }
 
 .card-time {
-  font-size: 24rpx;
-  color: #8a8f99;
+  flex: none;
+  font-size: $font-meta;
+  color: $color-text-muted;
 }
 
 .card-meta {
   margin-top: 10rpx;
-  font-size: 24rpx;
-  color: #4a4f57;
+  font-size: $font-meta;
+  color: $color-text-secondary;
+}
+
+/* One line, ellipsised. A session can list several models and the unclamped
+   value made one card taller than the rest of the list. */
+.card-model {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .card-stats {
   margin-top: 14rpx;
   display: flex;
   gap: 32rpx;
-  font-size: 24rpx;
+  font-size: $font-meta;
   color: #8a8f99;
 }
 

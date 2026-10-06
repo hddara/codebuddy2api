@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onShow } from '@dcloudio/uni-app'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 import { clearManualBaseUrlVerdict } from '@/api/core/base-url'
 import { useAuthStore } from '@/store/authStore'
@@ -21,6 +21,18 @@ const cookieVisible = ref(false)
 const apiKey = ref('')
 const saved = ref(false)
 const persistStatus = ref('')
+
+/**
+ * Whether there is anything to save.
+ *
+ * The button used to be unconditional, so pressing 保存 with every field empty
+ * wrote an empty credential over a working one and reported success. A gateway
+ * address or a cookie is the minimum, and either of them alone is a legitimate
+ * configuration, so both count.
+ */
+const canSave = computed(
+  () => Boolean(baseUrl.value.trim()) || Boolean(adminCookie.value.trim()),
+)
 
 /**
  * True when the saved credentials can be read back from persistent storage.
@@ -222,7 +234,7 @@ onShow(() => {
     </view>
 
     <view class="actions">
-      <button class="primary" @tap="save">
+      <button class="primary" :disabled="!canSave" @tap="save">
         保存
       </button>
       <button class="ghost" @tap="clear">
@@ -334,6 +346,12 @@ onShow(() => {
   color: #ffffff;
   font-size: 28rpx;
   border-radius: 14rpx;
+}
+
+/* Dimmed rather than merely inert, so the state is visible before the tap. */
+.primary[disabled] {
+  background-color: #b9d4f5;
+  color: #ffffff;
 }
 
 .ghost {

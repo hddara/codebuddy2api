@@ -1,0 +1,53 @@
+/**
+ * Design tokens.
+ *
+ * Why this exists: every page used to hard-code the same colours and radii in its
+ * own `<style scoped>` block — `#f5f6f8` for the page background appeared in all
+ * six, and the card radius disagreed (20rpx everywhere except the login card at
+ * 24rpx). Changing the accent meant finding every literal.
+ *
+ * Variables rather than UnoCSS theme entries: the pages style themselves through
+ * scoped CSS in rpx, and `var()` works in both the App webview and the H5 build.
+ * The same values are mirrored into `uno.config.ts` for the places that do use
+ * utility classes.
+ */
+
+/* Surfaces */
+$color-page: #f5f6f8;
+$color-surface: #ffffff;
+$color-surface-sunken: #f5f6f8;
+$color-border: #e6e8eb;
+$color-border-strong: #f0f1f3;
+
+/* Text */
+$color-text: #1f2329;
+$color-text-secondary: #4a4f57;
+$color-text-muted: #8a8f99;
+$color-text-faint: #a8adb5;
+
+/* Accent and status */
+$color-primary: #0a84ff;
+$color-primary-active: #0060df;
+$color-primary-disabled: #b9d4f5;
+$color-success: #22a06b;
+$color-danger: #cf1322;
+$color-danger-surface: #fff1f0;
+$color-warning: #d48806;
+
+/* Radii */
+$radius-card: 20rpx;
+$radius-control: 16rpx;
+$radius-pill: 999rpx;
+
+/* Spacing */
+$gap-page: 24rpx;
+$gap-section: 20rpx;
+$gap-inline: 12rpx;
+
+/* Type scale. Kept to a small set so sizes stop drifting per page. */
+$font-title: 34rpx;
+$font-section: 28rpx;
+$font-body: 27rpx;
+$font-label: 26rpx;
+$font-meta: 24rpx;
+$font-micro: 22rpx;
