@@ -160,6 +160,47 @@ else
   echo "   [警告] 缺少 python3 或 ${ICON_SCRIPT}，跳过图标生成"
 fi
 
+# 明文 HTTP 放行：`targetSdkVersion` 34 下 Android 默认阻断明文，指向局域网/回环的
+# 本地联调地址会在平台层被拒（表现为「地址存了但不生效、目标实例一个请求都收不到」）。
+# 壳工程被 .gitignore 排除，所以这份配置每次都重新投放，否则壳一重建就静默失效。
+NSC_SRC="$APP_ROOT/native/android/network_security_config.xml"
+NSC_DEST_DIR="$ROOT/shell/simpleDemo/src/main/res/xml"
+MANIFEST="$ROOT/shell/simpleDemo/src/main/AndroidManifest.xml"
+if [ -f "$NSC_SRC" ]; then
+  mkdir -p "$NSC_DEST_DIR"
+  cp "$NSC_SRC" "$NSC_DEST_DIR/network_security_config.xml"
+
+  # 清单也必须引用它，否则文件在但不生效（Android 只读 application 的属性）。
+  # 幂等：已有引用就不再插入，重复打包不会叠加。
+  if [ -f "$MANIFEST" ] && ! grep -q 'android:networkSecurityConfig' "$MANIFEST"; then
+    python3 - "$MANIFEST" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+source = open(path, encoding='utf-8').read()
+# 插到 <application 的第一个属性前，缩进沿用该行；只改第一次出现。
+pattern = re.compile(r'(<application\s*\n)(\s*)')
+updated, count = pattern.subn(
+    lambda m: (
+        f'{m.group(1)}{m.group(2)}'
+        f'android:networkSecurityConfig="@xml/network_security_config"\n{m.group(2)}'
+    ),
+    source,
+    count=1,
+)
+if count:
+    open(path, 'w', encoding='utf-8').write(updated)
+    print('   + AndroidManifest.xml 已引用 networkSecurityConfig')
+else:
+    print('   [警告] 未在 AndroidManifest.xml 找到 <application>，请手动确认')
+PY
+  fi
+  echo "   ← native/android/network_security_config.xml（仅放行私有网段明文）"
+else
+  echo "   [警告] 缺少 ${NSC_SRC}，本地 http 联调地址会在 Android 上被阻断"
+fi
+
 # ---- [3/5] 打包 --------------------------------------------------------
 echo "== [3/5] gradle assembleRelease =="
 ( cd "$SHELL_DIR" && JAVA_HOME="$JAVA_HOME" ./gradlew :simpleDemo:assembleRelease --no-daemon )

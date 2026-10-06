@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext HTTP policy.
+
+  Why this file exists: `targetSdkVersion` is 34, and Android has blocked
+  cleartext by default since API 28. Without an exemption, pointing the app at a
+  local gateway (`http://192.168.1.13:8001`, or `adb reverse` on
+  `http://127.0.0.1:8001`) fails inside the platform before the request leaves
+  the process. The visible symptom is misleading: the settings field saves and
+  redisplays the address, the target instance receives zero requests, and the app
+  silently falls back to the compiled-in HTTPS origin — so it looks like the
+  field was ignored rather than like a transport rejection.
+
+  Found by watching the target instance receive nothing while the device shell
+  could `curl` the same URL happily: the shell is a separate process and is not
+  subject to the app manifest.
+
+  ⚠️ `domain-config` matches **hostnames**, not networks. Writing
+  `<domain>192.168.0.0</domain>` (the intent being a CIDR block) does not work —
+  it is read as the literal host `192.168.0.0`, so no LAN address matches and
+  cleartext stays blocked. Each development address has to be listed by its own
+  literal IP. Add the machine you are developing against here; this file is
+  re-copied into the shell by `scripts/build-apk.sh` on every build.
+
+  Scope: cleartext stays refused everywhere else, including the production
+  origin (which is HTTPS anyway). That is deliberately narrower than
+  `usesCleartextTraffic="true"`, which would re-enable cleartext for every host.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <!-- Loopback: `adb reverse tcp:8001 tcp:8001` forwards the device's own
+             port to the development machine. -->
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+
+        <!-- LAN address of the development machine. One entry per literal
+             address; a network range cannot be expressed here. -->
+        <domain includeSubdomains="false">192.168.1.13</domain>
+    </domain-config>
+</network-security-config>

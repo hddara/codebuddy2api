@@ -242,7 +242,14 @@ export function fetchRemoteConfig(force = false, timeout = FETCH_TIMEOUT): Promi
   })
 }
 
-function safeParse(text: string) {
+/**
+ * Parses a response body that may arrive as a JSON string.
+ *
+ * Exported because the base-URL probe hits the same platform quirk: the App
+ * runtime does not always decode JSON for the caller, so a body that is an
+ * object on the wire arrives here as a string.
+ */
+export function safeParse(text: string) {
   try {
     return JSON.parse(text)
   }

@@ -65,9 +65,12 @@ async function bundle() {
 
 /**
  * Minimal `uni` stub. `behaviour` decides what each origin answers:
- *   'ok'     -> 200 with a JSON body (the probe passes)
- *   'html'   -> 200 with an HTML string (the ngrok interstitial; probe fails)
- *   'refuse' -> transport failure
+ *   'ok'      -> 200 with a JSON body (the probe passes)
+ *   'ok-text' -> 200 with the JSON body as an *unparsed string*. The App runtime
+ *                does this, and a probe that only accepts an object then reads a
+ *                healthy gateway as unreachable.
+ *   'html'    -> 200 with an HTML string (the ngrok interstitial; probe fails)
+ *   'refuse'  -> transport failure
  */
 function makeUni({ behaviour = () => 'ok', log = [], storage = {} }) {
   return {
@@ -97,10 +100,15 @@ function makeUni({ behaviour = () => 'ok', log = [], storage = {} }) {
           return
         }
 
-        success({
-          data: mode === 'ok' ? { status: 'healthy' } : '<!DOCTYPE html>',
-          statusCode: 200,
-        })
+        let data
+        if (mode === 'ok')
+          data = { status: 'healthy' }
+        else if (mode === 'ok-text')
+          data = JSON.stringify({ status: 'healthy' })
+        else
+          data = '<!DOCTYPE html>'
+
+        success({ data, statusCode: 200 })
       })
     },
     setStorage: () => {},
@@ -146,6 +154,18 @@ const scenarios = [
     name: '存的是失效地址 + 无远端配置 -> 回退到编译期内置地址',
     setup: () => ({
       behaviour: origin => (origin === PRODUCTION ? 'ok' : 'refuse'),
+      storage: { auth: JSON.stringify({ baseUrl: STALE }) },
+    }),
+  },
+  {
+    // The reason this case exists: the App runtime does not always decode JSON
+    // for the caller, so the health check arrives as a string. A probe that only
+    // accepted an object rejected a working gateway, set the hand-entered
+    // address aside and quietly used another origin instead.
+    expect: STALE,
+    name: '地址可达但响应体是字符串 -> 仍被采用（不误判为不可达）',
+    setup: () => ({
+      behaviour: origin => (origin === STALE ? 'ok-text' : 'refuse'),
       storage: { auth: JSON.stringify({ baseUrl: STALE }) },
     }),
   },

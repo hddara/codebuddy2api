@@ -27,7 +27,7 @@
  *     → 改为失效后立即主动重选，并加选路代际号防止旧结果覆盖新状态。
  */
 import type { RemoteEndpointConfig } from './remote-endpoint'
-import { fetchRemoteConfig, readConfigCache, resolveEndpoints } from './remote-endpoint'
+import { fetchRemoteConfig, readConfigCache, resolveEndpoints, safeParse } from './remote-endpoint'
 
 /** 编译期基址：作为无候选时的兜底（也是配置服务不可用时的最后一道保险） */
 const PRIMARY = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '')
@@ -659,11 +659,25 @@ function probe(base: string, probePath: string, timeout: number): Promise<string
       timeout,
       header: { 'ngrok-skip-browser-warning': '1' },
       success: (res: any) => {
-        if (res.statusCode === 200 && res.data && typeof res.data === 'object') {
+        // `res.data` is not guaranteed to be an object: the App runtime hands
+        // back the raw body as a string unless the response declares JSON in a
+        // way it recognises, which made a perfectly healthy gateway look
+        // unreachable — the probe rejected, the hand-entered address was set
+        // aside, and the app fell back to another origin with no hint why.
+        // `remote-endpoint.ts` already parses defensively for this reason.
+        const payload = typeof res.data === 'string' ? safeParse(res.data) : res.data
+
+        if (res.statusCode === 200 && payload && typeof payload === 'object') {
           resolve(base)
           return
         }
-        reject(new Error(`候选 ${base} 探测响应异常：statusCode=${res.statusCode}`))
+
+        reject(
+          new Error(
+            `候选 ${base} 探测响应异常：statusCode=${res.statusCode}`
+            + `，body 类型=${typeof res.data}`,
+          ),
+        )
       },
       // 注：URL 里的 _probe 时间戳用于绕开 CDN/网关缓存（否则探测可能命中缓存的 200 造成「假通过」），
       // 同时也让「探测请求」可与业务请求区分开（业务 GET 用的是 _t）
