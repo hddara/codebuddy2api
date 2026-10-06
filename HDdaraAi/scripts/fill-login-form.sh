@@ -34,10 +34,14 @@ dump() {
 
 # Prints: `<index> <centreX> <centreY> <visible length>` per EditText.
 #
+# Takes a fresh dump every call. Callers used to read fields from a stale file,
+# which reported the state before their own edits.
+#
 # The length rather than the value: the credential fields are masked, so a dump
 # only ever shows dots. Length is what catches a stray leading character, which
 # is the failure this script exists to avoid.
 fields() {
+  dump >/dev/null
   python3 - "$DUMP" <<'PY'
 import re
 import sys
@@ -58,8 +62,22 @@ for i, node in enumerate(re.finditer(r'<node[^>]*class="android.widget.EditText"
 PY
 }
 
-# Centre of the first clickable ancestor of a node whose text matches exactly.
+# Length of the field at `index`, re-dumped each time.
+field_length() {
+  fields | awk -v i="$1" '$1 == i { print $4; exit }'
+}
+
+# Centre of the nearest clickable ancestor of every node whose text matches.
+#
+# Prints one line per match, in document order. Callers that want a button rather
+# than a heading take the last line — the page title can share the same text.
+#
+# Only `clickable="true"` ancestors are returned. Walking up to the first
+# ancestor with any area instead returns a plain layout container, whose centre
+# presses nothing: that produced taps that did nothing and looked like the app
+# was ignoring them.
 button() {
+  dump >/dev/null
   python3 - "$DUMP" "$1" <<'PY'
 import sys
 import xml.etree.ElementTree as ET
@@ -95,10 +113,11 @@ for node in root.iter():
         continue
     current = node
     while current is not None:
-        found = centre(current)
-        if found:
-            print(*found)
-            raise SystemExit(0)
+        if current.get('clickable') == 'true':
+            found = centre(current)
+            if found:
+                print(*found)
+            break
         current = parents.get(current)
 PY
 }
@@ -111,27 +130,34 @@ PY
 # behind, which is reported rather than assumed.
 set_empty_field() {
   local label="$1" x="$2" y="$3" want="$4" index="$5"
-  local got i
+  local got i attempt
 
   "$ADB" shell input tap "$x" "$y"
-  sleep 2
+  sleep 3
 
-  got="$(fields | awk -v i="$index" '$1 == i { print $4 }')"
+  got="$(field_length "$index")"
   if [ "${got:-0}" != '0' ]; then
     for ((i = 0; i < got + 20; i += 1)); do
       "$ADB" shell input keyevent KEYCODE_DEL
     done
-    sleep 1
+    sleep 2
   fi
 
   "$ADB" shell input text "$want"
-  sleep 2
 
-  got="$(fields | awk -v i="$index" '$1 == i { print $4 }')"
-  if [ "$got" = "${#want}" ]; then
-    echo "  ok    ${label}（${got} 字符）"
-    return 0
-  fi
+  # Read back with retries. A single read a fixed delay after `input text` is not
+  # reliable: `uiautomator dump` occasionally returns the pre-input snapshot, and
+  # treating that as "nothing was typed" is what made an earlier run report 0
+  # characters for a field that had in fact been filled.
+  for attempt in 1 2 3 4 5 6; do
+    sleep 2
+    got="$(field_length "$index")"
+
+    if [ "$got" = "${#want}" ]; then
+      echo "  ok    ${label}（${got} 字符）"
+      return 0
+    fi
+  done
 
   echo "✗ 「${label}」回读 ${got} 字符，期望 ${#want}" >&2
   return 1
@@ -169,7 +195,7 @@ set_field() {
     "$ADB" shell input text "$want"
     sleep 2
 
-    got="$(fields | awk -v i="$index" '$1 == i { print $4 }')"
+    got="$(field_length "$index")"
 
     if [ "$got" = "${#want}" ]; then
       echo "  ok    ${label}（${got} 字符）"
@@ -185,7 +211,7 @@ set_field() {
     "$ADB" shell input text "$want"
     sleep 2
 
-    got="$(fields | awk -v i="$index" '$1 == i { print $4 }')"
+    got="$(field_length "$index")"
     if [ "$got" = "${#want}" ]; then
       echo "  ok    ${label}（${got} 字符）"
       return 0
@@ -285,18 +311,77 @@ set_empty_field '密码' "$PASS_X" "$PASS_Y" "$PASSWORD" 2
 echo "== 提交前回读 =="
 fields | while read -r idx _ _ len; do
   case "$idx" in
-    0) echo "  网关地址: ${len} 字符（期望 ${#BASE_URL}）" ;;
+    0) echo "  网关地址: ${len} 字符" ;;
     1) echo "  账号    : ${len} 字符（期望 ${#USERNAME}）" ;;
     2) echo "  密码    : ${len} 字符（期望 ${#PASSWORD}）" ;;
   esac
 done
 
 dump >/dev/null
+# `tail -1` matters: the page title is also 登录, so the first match is the
+# heading rather than the button. The button is the last one on screen.
 read -r BTN_X BTN_Y < <(button '登录' | tail -1)
 if [ -z "${BTN_X:-}" ]; then
   echo "找不到「登录」按钮" >&2
   exit 1
 fi
+
+# Sanity-check that the target is a real, sizeable button rather than a stray
+# text node: a mistargeted press silently does nothing and is indistinguishable
+# from the app ignoring the tap.
+"$ADB" shell uiautomator dump /sdcard/hdara-fill.xml >/dev/null 2>&1
+"$ADB" pull /sdcard/hdara-fill.xml "$DUMP" >/dev/null 2>&1
+BTN_BOUNDS="$(python3 - "$DUMP" "$BTN_X" "$BTN_Y" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+try:
+    root = ET.parse(sys.argv[1]).getroot()
+except Exception:
+    raise SystemExit(0)
+
+tx, ty = int(sys.argv[2]), int(sys.argv[3])
+
+for node in root.iter():
+    raw = node.get('bounds') or ''
+    try:
+        left, rest = raw.split(',', 1)
+        top, rest = rest.split('][', 1)
+        right, bottom = rest.rstrip(']').split(',', 1)
+        x1, y1, x2, y2 = int(left.lstrip('[')), int(top), int(right), int(bottom)
+    except ValueError:
+        continue
+    if x1 <= tx <= x2 and y1 <= ty <= y2 and node.get('clickable') == 'true':
+        print(f'{x2 - x1}x{y2 - y1}')
+        break
+PY
+)"
+echo "  目标按钮尺寸：${BTN_BOUNDS:-未找到可点容器}"
+
+# Focus must leave the field before the button can be pressed.
+#
+# This was the whole failure for several rounds: with the password field still
+# focused, `input tap` on the 登录 button is delivered as text input to the
+# focused field instead of a press. Nothing happened, no toast appeared, and it
+# read as "the button does not work" — while the actual cause was that every tap
+# was being swallowed by the input field. Tapping a neutral area first drops the
+# focus (`dumpsys input_method` then reports `mInputShown=false`) and the button
+# starts responding.
+echo "== 移除输入焦点 =="
+NEUTRAL_Y=$(( ADDR_Y / 2 ))
+"$ADB" shell input tap "$ADDR_X" "$NEUTRAL_Y"
+sleep 2
+
+for attempt in 1 2 3; do
+  shown="$("$ADB" shell dumpsys input_method 2>/dev/null | grep -m1 'mInputShown' || true)"
+  case "$shown" in
+    *mInputShown=true*) ;;
+    *) echo "  ok    焦点已离开输入框"; break ;;
+  esac
+  "$ADB" shell input keyevent KEYCODE_ESCAPE >/dev/null 2>&1 || true
+  "$ADB" shell input tap "$ADDR_X" "$NEUTRAL_Y"
+  sleep 2
+done
 
 echo "== 提交（点 ${BTN_X},${BTN_Y}）=="
 "$ADB" shell input tap "$BTN_X" "$BTN_Y"
@@ -312,7 +397,7 @@ known='pages/login/index HDdaraAI 查看 AI 会话状态 登录 使用控制台�
 for attempt in 1 2 3 4 5 6 7 8; do
   sleep 1
   dump >/dev/null
-  message="$(python3 - "$DUMP" "$known" <<'PY'
+  message="$(python3 - "$DUMP" <<'PY'
 import re
 import sys
 
@@ -321,14 +406,36 @@ try:
 except OSError:
     raise SystemExit(0)
 
-known = sys.argv[2].split()
+# Text that belongs to the form itself. Anything else that appears is the
+# feedback for the attempt — most often a toast, which the app shows for about
+# two seconds.
+known = {
+    'HDdaraAI',
+    '查看 AI 会话状态',
+    '登录',
+    '网关地址',
+    '账号',
+    '密码',
+    '显示',
+    '隐藏',
+    'admin',
+    '改用 Cookie 登录（高级）',
+    '改用账号密码登录',
+    '凭据仅保存在本机，用于访问你自己的网关。',
+    '使用控制台账号登录。网关地址默认已填好，通常无需改动。',
+    '控制台会话 Cookie',
+    '控制台登录密码',
+}
+
 for text in (t.strip() for t in re.findall(r'text="([^"]*)"', xml)):
     if not text or text in known:
         continue
-    # Skip the field values and the masked password.
-    if text.startswith('http') or text == 'admin' or set(text) <= {'•'}:
+    if text.startswith('http') or text.startswith('pages/'):
+        continue
+    if text == 'admin' or set(text) <= {'•'}:
         continue
     print(text)
+    break
 PY
 )"
 
