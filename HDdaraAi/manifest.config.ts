@@ -25,6 +25,18 @@ export default defineManifestConfig({
       autoclose: true,
       delay: 0,
     },
+    // `Fingerprint` is deliberately NOT declared.
+    //
+    // Declaring the module does not add it — the offline shell only ships the
+    // aars that are copied into `simpleDemo/libs/`, and this SDK drops no
+    // fingerprint aar — but the declaration still makes `plus.fingerprint`
+    // advertise itself, so the first call raises a blocking "打包时未添加
+    // fingerprint 模块" dialog. That dialog cannot be dismissed from code and
+    // took the whole cold start down.
+    //
+    // The lock screen instead treats biometrics as an opt-in enhancement and
+    // never probes unless the user turns it on (see pages/login/index.vue).
+    // Copying the aar in is what would make it actually work.
     modules: {},
     distribute: {
       android: {
@@ -32,7 +44,15 @@ export default defineManifestConfig({
         minSdkVersion: 23,
         targetSdkVersion: 34,
       },
-      ios: {},
+      ios: {
+        // iOS refuses to launch a process that requests Face ID without a usage
+        // string — it terminates rather than prompting, so this is required for
+        // the unlock screen to work at all on Face ID devices.
+        privacyDescription: {
+          NSFaceIDUsageDescription:
+            '用于快速解锁 HDdaraAI，验证后才能查看你的会话数据。',
+        },
+      },
       sdkConfigs: {},
     },
   },

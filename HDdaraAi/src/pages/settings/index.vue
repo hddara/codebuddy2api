@@ -4,6 +4,7 @@ import { ref } from 'vue'
 
 import { useAuthStore } from '@/store/authStore'
 import { parseStored } from '@/store/persist'
+import { ensureUnlocked } from '@/utils/app-guard'
 
 definePage({
   name: 'settings',
@@ -138,7 +139,12 @@ function clear() {
   uni.showToast({ icon: 'none', title: '已清除凭据' })
 }
 
-onShow(load)
+onShow(() => {
+  if (!ensureUnlocked())
+    return
+
+  load()
+})
 </script>
 
 <template>

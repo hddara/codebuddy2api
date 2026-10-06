@@ -67,6 +67,14 @@ export const useAuthStore = defineStore('auth', {
     /** Display name resolved from the console session, when available. */
     displayName: '',
     isLoggedIn: false,
+    /**
+     * Whether the lock screen has been passed in *this* launch.
+     *
+     * Deliberately not persisted: storing it would let anyone with the device
+     * skip the unlock by relaunching the app, which defeats the point of
+     * requiring a fingerprint at all. It resets to false on every cold start.
+     */
+    unlocked: false,
   }),
   getters: {
     /**
@@ -109,6 +117,19 @@ export const useAuthStore = defineStore('auth', {
      */
     syncLoginState() {
       this.isLoggedIn = Boolean(this.adminCookie || this.apiKey)
+    },
+    /** Marks the lock screen as passed for this launch. */
+    unlock() {
+      this.unlocked = true
+    },
+    /**
+     * Re-locks without signing out.
+     *
+     * Called when the app goes to the background so that returning to it asks
+     * for the fingerprint again — the credential itself stays on disk.
+     */
+    lock() {
+      this.unlocked = false
     },
     setBaseUrl(baseUrl: string) {
       this.baseUrl = baseUrl.replace(/\/+$/, '')

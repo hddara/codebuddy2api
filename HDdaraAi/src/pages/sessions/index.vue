@@ -6,6 +6,7 @@ import { computed, ref } from 'vue'
 import { fetchSessions } from '@/api/sessions'
 import { useAuthStore } from '@/store/authStore'
 import { parseStored } from '@/store/persist'
+import { ensureUnlocked } from '@/utils/app-guard'
 
 definePage({
   name: 'sessions',
@@ -156,6 +157,11 @@ function openDetail(item: SessionRow) {
 }
 
 onShow(() => {
+  // Guarded on every show, not just at launch: a tab switch or a restored
+  // stack can reach this page without the lock screen having run.
+  if (!ensureUnlocked())
+    return
+
   void load()
 })
 

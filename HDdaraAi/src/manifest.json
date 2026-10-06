@@ -23,7 +23,11 @@
         "minSdkVersion": 23,
         "targetSdkVersion": 34
       },
-      "ios": {},
+      "ios": {
+        "privacyDescription": {
+          "NSFaceIDUsageDescription": "用于快速解锁 HDdaraAI，验证后才能查看你的会话数据。"
+        }
+      },
       "sdkConfigs": {}
     }
   },
