@@ -25,3 +25,21 @@ HDdaraAi
 .codebuddy_data
 .codebuddy_creds
 .brv
+
+# Development-time files that must never ship.
+#
+# `next build` writes the project root into `.next/standalone`, and the runner
+# stage copies that directory wholesale — so anything left out of this file ends
+# up inside the production image. Verified by pulling the published image:
+# `.env` (local values) and `.mcp.json` (a Grafana service-account token plus
+# GitHub and docker-swarm auth headers) were both in there.
+.env
+.env.*
+.mcp.json
+.codebuddy
+.agents
+.github
+.husky
+.vscode
+.playwright-mcp
+AGENTS.md
