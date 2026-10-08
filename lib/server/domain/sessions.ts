@@ -119,7 +119,13 @@ export const summarizeSessions = (
     }
   }
 
-  const sessions = [...byConversation.values()]
+  const all = [...byConversation.values()];
+
+  // Totals are taken before the list is capped. Summing the returned page made
+  // the window's own summary shrink with it: past 200 conversations the header
+  // under-reported the calls and tokens it was describing, in the same response
+  // that carried the full window's `windowMinutes`.
+  const sessions = all
     .sort(
       (left, right) =>
         Date.parse(right.lastActiveAt) - Date.parse(left.lastActiveAt),
@@ -129,9 +135,9 @@ export const summarizeSessions = (
   return {
     sessions,
     totals: {
-      calls: sessions.reduce((sum, item) => sum + item.callCount, 0),
-      sessions: sessions.length,
-      totalTokens: sessions.reduce((sum, item) => sum + item.totalTokens, 0),
+      calls: all.reduce((sum, item) => sum + item.callCount, 0),
+      sessions: all.length,
+      totalTokens: all.reduce((sum, item) => sum + item.totalTokens, 0),
     },
     ungroupedEvents,
     windowMinutes,

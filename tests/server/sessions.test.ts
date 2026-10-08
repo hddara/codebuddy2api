@@ -48,6 +48,26 @@ const makeEvent = (
 });
 
 describe('session summaries', () => {
+  it('counts the whole window even when the list is capped', () => {
+    // `MAX_SESSIONS_RETURNED` is 200. The 201st conversation is not listed, but
+    // it must still be counted: the totals describe the window, and summing the
+    // returned page made the header shrink with the cap.
+    const events = Array.from({ length: 201 }, (_, index) =>
+      makeEvent({
+        conversationId: `conv-${index}`,
+        timestamp: new Date(Date.now() - index * 1_000).toISOString(),
+        totalTokens: 2,
+      }),
+    );
+
+    const summary = summarizeSessions(events, { windowMinutes: 60 });
+
+    expect(summary.sessions).toHaveLength(200);
+    expect(summary.totals.sessions).toBe(201);
+    expect(summary.totals.calls).toBe(201);
+    expect(summary.totals.totalTokens).toBe(402);
+  });
+
   it('groups events by conversation id and sums their usage', () => {
     // `conv-a` is pinned as the most recent so the ordering assertion is not a
     // race between two `new Date()` calls inside `makeEvent`.

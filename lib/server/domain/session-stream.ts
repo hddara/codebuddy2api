@@ -39,6 +39,14 @@ export interface SessionEvent {
   /** Monotonic publish time, epoch milliseconds. */
   occurredAt: number;
   /**
+   * When the turn began, epoch milliseconds.
+   *
+   * `occurredAt` is when the event was published, which for a completion is the
+   * end of the turn — so a record built from it alone reported a start time
+   * identical to its finish. Carried on the terminal event instead.
+   */
+  startedAt?: number;
+  /**
    * The user prompt that started this turn, extracted from the request body.
    * Carried on start/completion so a recorder can persist a readable Q&A pair
    * without reaching back into the request.
@@ -50,6 +58,16 @@ export interface SessionEvent {
    * `session.delta`, where it would be resent in full for every chunk.
    */
   text?: string;
+  /**
+   * Set when the turn ended by calling tools rather than by answering.
+   *
+   * A task the IDE runs issues dozens of these on the way to one answer, and
+   * measured against production they made up 142 of 500 stored turns — each a
+   * fragment like "Now re-run the RV to confirm…" filed as if it were a
+   * question and its answer. Marking them lets a viewer keep them out of the
+   * Q&A without discarding what the gateway saw.
+   */
+  toolTurn?: boolean;
   type: SessionEventType;
 }
 
@@ -80,6 +98,8 @@ interface AccumulatedTurn {
   chunks: string[];
   model: string | null;
   question: string;
+  /** Publish time of `session.started`, or of the first delta if none arrived. */
+  startedAt: number;
   totalChars: number;
   updatedAt: number;
 }
@@ -265,6 +285,7 @@ export const publishSessionStarted = ({
     chunks: [],
     model: model ?? null,
     question: prompt,
+    startedAt: now,
     totalChars: 0,
     updatedAt: now,
   });
@@ -307,6 +328,9 @@ export const publishSessionDelta = ({
     chunks: [],
     model: null,
     question: '',
+    // No `session.started` was seen, so the first delta is the best available
+    // start: the turn cannot have begun later than its first output.
+    startedAt: now,
     totalChars: 0,
     updatedAt: now,
   };
@@ -333,9 +357,12 @@ export const publishSessionDelta = ({
 export const publishSessionCompleted = ({
   conversationId,
   error,
+  toolTurn,
 }: {
   conversationId: string;
   error?: string;
+  /** True when the turn ended in tool calls rather than in an answer. */
+  toolTurn?: boolean;
 }): void => {
   if (!conversationId) return;
 
@@ -351,7 +378,9 @@ export const publishSessionCompleted = ({
     model: existing?.model ?? null,
     occurredAt: now,
     question: existing?.question ?? '',
+    startedAt: existing?.startedAt ?? now,
     text,
+    toolTurn: toolTurn ? true : undefined,
     type: error ? 'session.failed' : 'session.completed',
   });
 

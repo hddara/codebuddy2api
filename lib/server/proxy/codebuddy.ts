@@ -2059,7 +2059,13 @@ const mapResponsesStreamToChat = (
     if (streamCompleted || !conversationId) return;
     streamCompleted = true;
     if (!streamStarted) return;
-    publishSessionCompleted({ conversationId, error });
+    publishSessionCompleted({
+      conversationId,
+      error,
+      // `hasToolCalls` is final by the time this runs: it is set while the
+      // upstream frames are folded, and every call site below is past that.
+      toolTurn: hasToolCalls,
+    });
   };
 
   const encodeChunk = (choice: Record<string, unknown>): Uint8Array => {
@@ -2771,6 +2777,15 @@ const normalizeStreamingResponse = ({
   const teeConversationId = proxyContext.requestDetails.conversationId ?? '';
   let teeStarted = false;
   let teeCompleted = false;
+  /**
+   * Whether this turn asked for tools instead of finishing.
+   *
+   * A task the IDE runs is a chain of these turns; the intermediate ones carry a
+   * sentence or two and a tool call, and stored as ordinary Q&A they buried the
+   * real ones (142 of 500 measured turns). The flag travels with the completion
+   * event so a viewer can keep them apart without the gateway dropping them.
+   */
+  let sawToolCalls = false;
 
   const teeContent = (delta: unknown): void => {
     if (!teeConversationId || typeof delta !== 'string' || !delta) return;
@@ -2792,7 +2807,11 @@ const normalizeStreamingResponse = ({
     if (!teeConversationId || teeCompleted) return;
     teeCompleted = true;
     if (!teeStarted) return;
-    publishSessionCompleted({ conversationId: teeConversationId, error });
+    publishSessionCompleted({
+      conversationId: teeConversationId,
+      error,
+      toolTurn: sawToolCalls,
+    });
   };
 
   const stream = new ReadableStream<Uint8Array>({
@@ -2828,6 +2847,12 @@ const normalizeStreamingResponse = ({
           ).choices?.[0];
           const delta = choice?.delta;
           if (delta) {
+            if (
+              Array.isArray(delta.tool_calls) &&
+              delta.tool_calls.length > 0
+            ) {
+              sawToolCalls = true;
+            }
             teeContent(delta.content);
             if (typeof delta.content !== 'string' || !delta.content) {
               teeContent(delta.reasoning_content);

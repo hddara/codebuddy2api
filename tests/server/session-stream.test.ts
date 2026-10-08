@@ -64,6 +64,28 @@ describe('session stream', () => {
     expect(events[0]?.model).toBe('deepseek-v4.1-flash');
   });
 
+  it('dates a turn from its start rather than its completion', () => {
+    const { events, subscriber } = collect();
+
+    subscribeToSessionEvents(subscriber);
+
+    const clock = vi.spyOn(Date, 'now');
+
+    clock.mockReturnValue(1_000);
+    publishSessionStarted({ conversationId: 'conv-a' });
+
+    clock.mockReturnValue(5_000);
+    publishSessionCompleted({ conversationId: 'conv-a' });
+
+    clock.mockRestore();
+
+    const completed = events.at(-1);
+
+    // `occurredAt` alone would have stored a zero-length turn.
+    expect(completed?.startedAt).toBe(1_000);
+    expect(completed?.occurredAt).toBe(5_000);
+  });
+
   it('reports failures as session.failed with the error text', () => {
     const { events, subscriber } = collect();
 

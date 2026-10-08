@@ -120,6 +120,109 @@ describe('extractQuestionText', () => {
 
     expect(question).toHaveLength(4_000);
   });
+
+  it('prefers the tagged question buried in the IDE preamble', () => {
+    // The real shape of an IDE request: environment block first, the question
+    // past the point where the old implementation stopped reading.
+    const prompt = [
+      '<user_info>',
+      'OS Version: darwin',
+      'Workspace Folder: /Users/hddara/HDdaraProject/HDdara/codebuddy2api',
+      '</user_info>',
+      'x'.repeat(5_000),
+      '<user_query>帮我看下这个页面的数据</user_query>',
+    ].join('\n');
+
+    expect(
+      extractQuestionText({ messages: [{ content: prompt, role: 'user' }] }),
+    ).toBe('帮我看下这个页面的数据');
+  });
+
+  it('drops closed preamble blocks and keeps what follows them', () => {
+    const prompt = [
+      '<additional_data>noise</additional_data>',
+      '<system_reminder>more noise</system_reminder>',
+      '真正的问题在这里',
+    ].join('\n');
+
+    expect(
+      extractQuestionText({ messages: [{ content: prompt, role: 'user' }] }),
+    ).toBe('真正的问题在这里');
+  });
+
+  it('reports no question when the preamble swallowed it', () => {
+    // Measured on production: the capture cap cut the prompt before
+    // `<user_query>`, so all that survived was environment details.
+    const prompt =
+      '<cb_summary>\nSummary of the conversation so far:\nThe conversation is between an AI agent and a user';
+
+    expect(
+      extractQuestionText({ messages: [{ content: prompt, role: 'user' }] }),
+    ).toBe('');
+  });
+
+  it('falls back to an earlier user turn when the last one has no question', () => {
+    expect(
+      extractQuestionText({
+        messages: [
+          { content: '前面那个问题', role: 'user' },
+          { content: '<cb_summary>\nno question here', role: 'user' },
+        ],
+      }),
+    ).toBe('前面那个问题');
+  });
+
+  it('reports no question for any scaffolding block left at the front', () => {
+    // A second block name surfaced in production *after* the first fix, which is
+    // why the rule is the tag's shape rather than a list of names.
+    const prompt =
+      '<artifact_directory_path>\n/Users/x/brain/abc\n</artifact_directory_path>\n\n<user_info>\nOS Version: darwin';
+
+    expect(
+      extractQuestionText({ messages: [{ content: prompt, role: 'user' }] }),
+    ).toBe('');
+  });
+
+  it('keeps a question that legitimately opens with markup', () => {
+    expect(
+      extractQuestionText({
+        messages: [{ content: '<div> 为什么不渲染', role: 'user' }],
+      }),
+    ).toBe('<div> 为什么不渲染');
+  });
+
+  it("drops a client's input label but keeps the question behind it", () => {
+    // Measured in production on a turn from an upstream client.
+    const prompt =
+      "User's input is: uTools 基础文档总览：功能指令/匹配指令/关键字";
+
+    expect(
+      extractQuestionText({ messages: [{ content: prompt, role: 'user' }] }),
+    ).toBe('uTools 基础文档总览：功能指令/匹配指令/关键字');
+  });
+
+  it('leaves an English prompt that opens with its own label alone', () => {
+    // No Chinese behind the label, so it is the user's own wording — an English
+    // question is not something to rewrite.
+    expect(
+      extractQuestionText({
+        messages: [
+          { content: 'Note: this build crashes on launch', role: 'user' },
+        ],
+      }),
+    ).toBe('Note: this build crashes on launch');
+  });
+
+  it('reports no question for a block whose name is not snake_case', () => {
+    // `<rules>` is why the rule is "tag alone on its line" rather than a name
+    // pattern: the block names turned out to be neither exhaustive nor uniform.
+    const prompt =
+      '<rules>\nThe rules section has a number of possible rules/memories/context';
+
+    expect(
+      extractQuestionText({ messages: [{ content: prompt, role: 'user' }] }),
+    ).toBe('');
+  });
 });
 
 describe('session transcripts', () => {
@@ -328,6 +431,82 @@ describe('session transcripts', () => {
       'a3',
       'a2',
     ]);
+  });
+
+  it('marks intermediate tool steps and counts them separately', async () => {
+    await recordSessionTurn({
+      answer: 'Now re-run the RV to confirm…',
+      completedAt: '2026-10-04T01:00:00.000Z',
+      conversationId: 'conv-a',
+      question: '继续4',
+      toolTurn: true,
+    });
+    await recordSessionTurn({
+      answer: 'the final answer',
+      completedAt: '2026-10-04T01:01:00.000Z',
+      conversationId: 'conv-a',
+      question: '继续4',
+    });
+
+    const listed = await listSessionTranscripts({ conversationId: 'conv-a' });
+    const step = listed.entries.find(
+      (entry) => entry.answer === 'Now re-run the RV to confirm…',
+    );
+    const answer = listed.entries.find(
+      (entry) => entry.answer === 'the final answer',
+    );
+
+    // The flag rides on the record so a viewer can leave the step out of the Q&A…
+    expect(step?.toolTurn).toBe(true);
+    // …and stays off an ordinary turn, which keeps stored documents unchanged.
+    expect(answer?.toolTurn).toBeUndefined();
+    expect(listed.totals.toolTurns).toBe(1);
+  });
+
+  it('dates a stored turn from the session start, not the completion', async () => {
+    ensureSessionTranscriptRecorder();
+
+    // Recent enough that the retention sweep leaves the turn alone: a fixed
+    // 1970 timestamp reads as 55 years old and is pruned on the way in.
+    const completed = Date.now();
+    const started = completed - 4_000;
+    const clock = vi.spyOn(Date, 'now');
+
+    clock.mockReturnValue(started);
+    publishSessionStarted({ conversationId: 'conv-start', question: 'q' });
+
+    clock.mockReturnValue(completed);
+    publishSessionCompleted({ conversationId: 'conv-start' });
+
+    clock.mockRestore();
+
+    await flushRecorder();
+
+    const listed = await listSessionTranscripts({
+      conversationId: 'conv-start',
+    });
+
+    expect(listed.entries[0]?.startedAt).toBe(new Date(started).toISOString());
+    expect(listed.entries[0]?.completedAt).toBe(
+      new Date(completed).toISOString(),
+    );
+  });
+
+  it('carries the tool-step flag from the session bus into storage', async () => {
+    ensureSessionTranscriptRecorder();
+
+    publishSessionStarted({ conversationId: 'conv-tool', question: '继续4' });
+    publishSessionDelta({ conversationId: 'conv-tool', delta: 'Now re-run…' });
+    publishSessionCompleted({ conversationId: 'conv-tool', toolTurn: true });
+
+    await flushRecorder();
+
+    const listed = await listSessionTranscripts({
+      conversationId: 'conv-tool',
+    });
+
+    expect(listed.entries[0]?.toolTurn).toBe(true);
+    expect(listed.totals.toolTurns).toBe(1);
   });
 
   it('clamps a sub-minimum entry count up to the supported floor', async () => {

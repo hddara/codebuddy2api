@@ -77,6 +77,8 @@ interface SessionTranscriptMeta {
   questionChars: number;
   startedAt: string;
   status: SessionTranscriptStatus;
+  /** Absent on turns that ended with an answer; see `SessionEvent.toolTurn`. */
+  toolTurn?: boolean;
 }
 
 /** API-facing turn, metadata joined with its answer body. */
@@ -96,6 +98,11 @@ export interface SessionTranscriptRecord {
   questionChars: number;
   startedAt: string;
   status: SessionTranscriptStatus;
+  /**
+   * True when this was one step of a longer task rather than a finished
+   * exchange. Present so a viewer can leave them out of the Q&A list.
+   */
+  toolTurn?: boolean;
 }
 
 export interface SessionTranscriptListResponse {
@@ -105,6 +112,8 @@ export interface SessionTranscriptListResponse {
     answerChars: number;
     questionChars: number;
     stored: number;
+    /** How many of `stored` are intermediate tool steps. */
+    toolTurns: number;
   };
 }
 
@@ -144,6 +153,96 @@ const isContentPart = (value: unknown): value is { text?: unknown } =>
   typeof value === 'object' && value !== null;
 
 /**
+ * The user's own words, as the IDE marks them inside its preamble.
+ *
+ * Everything the IDE sends is one user message: instructions, environment
+ * details, recalled context and the question, in that order. This tag is the
+ * only part a person recognises as their own, so it is what the transcript
+ * shows.
+ */
+const USER_QUERY_PATTERN = /<user_query>([\s\S]*?)<\/user_query>/i;
+
+/**
+ * Preamble blocks dropped as whole units when both of their tags survived.
+ *
+ * A closed block is unambiguously scaffolding, and removing it leaves whatever
+ * the prompt said after it — which is where the question lives when the tag is
+ * absent but the prompt is short enough to be stored intact.
+ */
+const SCAFFOLD_BLOCK_PATTERNS: RegExp[] = [
+  /<additional_data>[\s\S]*?<\/additional_data>/gi,
+  /<system_reminder>[\s\S]*?<\/system_reminder>/gi,
+  /<user_info>[\s\S]*?<\/user_info>/gi,
+  /<artifact_directory_path>[\s\S]*?<\/artifact_directory_path>/gi,
+  /<rules>[\s\S]*?<\/rules>/gi,
+  // A tag whose body held nothing usable: the extractor above already declined
+  // it, so all that remains is markup.
+  /<user_query>[\s\S]*?<\/user_query>/gi,
+];
+
+/**
+ * A scaffolding tag left at the front of whatever was captured.
+ *
+ * The storage cap can cut a prompt off before it ever reaches `<user_query>`,
+ * leaving nothing but the IDE's preamble. Measured against production, 39 of 500
+ * stored turns rendered as `OS Version: darwin …` and a further 24 as
+ * `<artifact_directory_path>…`.
+ *
+ * Matched by shape, not by name: the block names are neither exhaustive nor even
+ * uniform (`<rules>` is not snake_case), and two batches only surfaced one after
+ * the other as each was fixed. What they share is that the tag sits **alone on
+ * its line** — every block is a section of the preamble — while a question that
+ * legitimately opens with markup keeps text on the same line, as in
+ * `<div> 为什么不渲染`.
+ */
+const SCAFFOLD_TAG_PATTERN = /^<[a-z][a-z0-9_]*>\s*\n/i;
+
+/**
+ * A label some upstream clients put in front of the input itself.
+ *
+ * Measured in production: `User's input is: uTools 基础文档总览…`. It is not our
+ * format and not something a person types, but it is also unbranded — the next
+ * client will word it differently, so matching a name list would miss it.
+ *
+ * Anchored on a Chinese question following the label: an English prompt that
+ * legitimately opens with its own label (`Note: …`) is left exactly as written.
+ */
+const INPUT_WRAPPER_PATTERN =
+  /^[A-Za-z][A-Za-z'\u2019\s-]{2,30}[:：]\s*(?=[\s\S]{0,40}[\u4E00-\u9FFF])/;
+
+/**
+ * Reduces one prompt to what the user actually asked.
+ *
+ * The tag is consulted **before** truncating, which is the whole fix: the
+ * question sits near the end of the IDE's preamble, so truncating first threw
+ * away exactly the part worth keeping and stored the scaffolding instead.
+ *
+ * Returns an empty string when the prompt carries no question — a continuation
+ * whose last user turn is tool output, for instance.
+ */
+const readQuestion = (value: string): string => {
+  const tagged = USER_QUERY_PATTERN.exec(value)?.[1]?.trim();
+
+  if (tagged) {
+    return truncate(tagged, MAX_QUESTION_CHARS);
+  }
+
+  let stripped = value;
+
+  for (const pattern of SCAFFOLD_BLOCK_PATTERNS) {
+    stripped = stripped.replace(pattern, '');
+  }
+
+  const unwrapped = stripped.trim().replace(INPUT_WRAPPER_PATTERN, '');
+
+  if (!unwrapped || SCAFFOLD_TAG_PATTERN.test(unwrapped)) {
+    return '';
+  }
+
+  return truncate(unwrapped, MAX_QUESTION_CHARS);
+};
+
+/**
  * Pulls the user prompt out of an OpenAI-style chat body.
  *
  * Walks backwards to the last `user` message and joins its text parts, because
@@ -168,10 +267,10 @@ export const extractQuestionText = (body?: object): string => {
     const content = message.content;
 
     if (typeof content === 'string') {
-      const trimmed = content.trim();
+      const question = readQuestion(content);
 
-      if (trimmed) {
-        return truncate(trimmed, MAX_QUESTION_CHARS);
+      if (question) {
+        return question;
       }
 
       continue;
@@ -187,7 +286,11 @@ export const extractQuestionText = (body?: object): string => {
       .filter(Boolean);
 
     if (parts.length) {
-      return truncate(parts.join('\n').trim(), MAX_QUESTION_CHARS);
+      const question = readQuestion(parts.join('\n'));
+
+      if (question) {
+        return question;
+      }
     }
   }
 
@@ -425,6 +528,8 @@ export interface RecordSessionTurnInput {
   model?: string | null;
   question?: string;
   startedAt?: string;
+  /** Marks an intermediate tool step; see `SessionEvent.toolTurn`. */
+  toolTurn?: boolean;
 }
 
 /**
@@ -440,6 +545,7 @@ export const recordSessionTurn = async ({
   model,
   question,
   startedAt,
+  toolTurn,
 }: RecordSessionTurnInput): Promise<SessionTranscriptRecord | null> => {
   if (!conversationId || !canEnumerateTurns()) {
     return null;
@@ -470,6 +576,12 @@ export const recordSessionTurn = async ({
 
     if (error) {
       meta.error = error;
+    }
+
+    // Only ever written when true: the field is optional, and omitting it keeps
+    // the stored document identical for ordinary turns.
+    if (toolTurn) {
+      meta.toolTurn = true;
     }
 
     // Metadata first: a prune reading between the two writes sees a turn that is
@@ -517,10 +629,16 @@ export const listSessionTranscripts = async ({
   return {
     entries,
     settings,
+    // Every total describes the conversation, not the page. `entries` is a
+    // bounded slice, so summing it would have the same response report "695
+    // stored, 12k characters" for a page holding 40 of them — two numbers that
+    // cannot both be true. The character counts come from the metadata documents,
+    // which are already in hand, so counting everything costs no extra reads.
     totals: {
-      answerChars: entries.reduce((sum, turn) => sum + turn.answerChars, 0),
-      questionChars: entries.reduce((sum, turn) => sum + turn.questionChars, 0),
+      answerChars: sorted.reduce((sum, turn) => sum + turn.answerChars, 0),
+      questionChars: sorted.reduce((sum, turn) => sum + turn.questionChars, 0),
       stored: sorted.length,
+      toolTurns: sorted.filter((turn) => turn.toolTurn).length,
     },
   };
 };
@@ -569,7 +687,10 @@ export const ensureSessionTranscriptRecorder = (): void => {
         error: event.error,
         model: event.model ?? null,
         question: event.question ?? '',
-        startedAt: new Date(event.occurredAt).toISOString(),
+        // `occurredAt` is the completion's publish time, so using it for both
+        // ends stored every turn with a zero-length duration.
+        startedAt: new Date(event.startedAt ?? event.occurredAt).toISOString(),
+        toolTurn: event.toolTurn,
       });
 
       return true;
