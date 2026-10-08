@@ -318,6 +318,11 @@ export function renderMarkdown(
  * The IDE sends its entire preamble as one user message, so the transcript was
  * rendering a wall of instructions with the real question buried inside
  * `<user_query>`. Everything outside that tag is scaffolding.
+ *
+ * Turns stored before the gateway read that tag first were cut off in the middle
+ * of the preamble, so their text is scaffolding with no question in it at all.
+ * Those report an empty string — the pages already have a "no question captured"
+ * line — because `OS Version: darwin …` is not an answer to "what did I ask?".
  */
 export function extractQuestion(raw: string): string {
   if (!raw)
@@ -329,10 +334,28 @@ export function extractQuestion(raw: string): string {
     return match[1].trim()
 
   // No tag: strip the known wrapper blocks so at least the rest is readable.
-  return raw
+  const stripped = raw
     .replace(/<additional_data>[\s\S]*?<\/additional_data>/gi, '')
     .replace(/<system_reminder>[\s\S]*?<\/system_reminder>/gi, '')
+    .replace(/<user_info>[\s\S]*?<\/user_info>/gi, '')
+    .replace(/<artifact_directory_path>[\s\S]*?<\/artifact_directory_path>/gi, '')
+    .replace(/<rules>[\s\S]*?<\/rules>/gi, '')
+    .replace(/<user_query>[\s\S]*?<\/user_query>/gi, '')
     .trim()
+    // A label some clients put in front of the input (`User's input is: uTools …`).
+    // Anchored on a Chinese question following it, so an English prompt that
+    // opens with its own label (`Note: …`) is left as written.
+    .replace(/^[A-Z][A-Z'\u2019\s-]{2,30}[:：]\s*(?=[\s\S]{0,40}[\u4E00-\u9FFF])/i, '')
+
+  // A scaffolding tag sits alone on its line, because each block is a section of
+  // the preamble — and matched by that shape rather than by name: the block names
+  // are neither exhaustive nor uniform, and two batches only surfaced one after
+  // the other. A question that opens with markup keeps text on the same line
+  // (`<div> 为什么不渲染`), which is what this preserves.
+  if (!stripped || /^<[a-z]\w*>\s*\n/i.test(stripped))
+    return ''
+
+  return stripped
 }
 
 /** Single-line preview for list rows. */

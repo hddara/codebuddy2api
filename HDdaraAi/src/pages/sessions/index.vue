@@ -8,6 +8,8 @@ import StateBlock from '@/components/StateBlock.vue'
 import { useAuthStore } from '@/store/authStore'
 import { parseStored } from '@/store/persist'
 import { ensureUnlocked } from '@/utils/app-guard'
+import { describeError } from '@/utils/errors'
+import { formatCount, formatRelative } from '@/utils/format'
 
 definePage({
   name: 'sessions',
@@ -87,13 +89,29 @@ async function awaitCredential(timeoutMs = 5_000): Promise<boolean> {
   return false
 }
 
+/**
+ * Identifies the newest `load()`.
+ *
+ * Tapping through the time-range chips starts overlapping requests, and the one
+ * that resolved last used to win — which is not necessarily the one just asked
+ * for. The list could therefore settle on the previous range's sessions while
+ * the newly selected chip stayed highlighted, and it stayed wrong until the
+ * page was left and reopened. Only the current request may write.
+ */
+let loadToken = 0
+
 async function load() {
+  const token = (loadToken += 1)
+
   loading.value = true
 
   if (!(await awaitCredential())) {
-    errorMessage.value = '尚未登录，请先到「设置」填写控制台凭据'
-    sessions.value = []
-    loading.value = false
+    if (token === loadToken) {
+      errorMessage.value = '尚未登录，请先到「设置」填写控制台凭据'
+      sessions.value = []
+      loading.value = false
+    }
+
     return
   }
 
@@ -101,6 +119,9 @@ async function load() {
 
   try {
     const payload = await fetchSessions(windowMinutes.value)
+
+    if (token !== loadToken)
+      return
 
     sessions.value = payload.sessions ?? []
     totals.value = payload.totals ?? {
@@ -111,21 +132,37 @@ async function load() {
     ungroupedEvents.value = payload.ungroupedEvents ?? 0
   }
   catch (error) {
-    const message = error instanceof Error ? error.message : '加载会话失败'
+    if (token !== loadToken)
+      return
 
-    // The gateway's own wording ("Admin session required") describes the server's
-    // view, not what the user should do about it. A stale cookie is by far the
-    // most common cause — sessions expire while the app keeps holding the old
-    // value — so it is translated into an actionable instruction.
-    errorMessage.value
-      = /session required|401|unauthor/i.test(message)
-        ? '控制台凭据已失效，请到「设置」重新填入新的 Cookie'
-        : message
+    // The gateway's own wording ("Admin session required") describes the
+    // server's view, not what the user should do about it. A stale cookie is by
+    // far the most common cause — sessions expire while the app keeps holding
+    // the old value — so it is translated into an actionable instruction.
+    errorMessage.value = describeError(error, '加载会话失败')
     sessions.value = []
   }
   finally {
-    loading.value = false
+    if (token === loadToken) {
+      loading.value = false
+    }
   }
+}
+
+/**
+ * One line of context per row.
+ *
+ * The id alone identifies nothing to a reader — every row looked identical. The
+ * model and the console key are what a person actually uses to tell sessions
+ * apart.
+ */
+function describeSession(item: SessionRow): string {
+  const parts = [item.models.join(', ') || '未知模型']
+
+  if (item.accessKeyName)
+    parts.push(item.accessKeyName)
+
+  return parts.join(' · ')
 }
 
 async function changeWindow(value: number) {
@@ -143,24 +180,6 @@ async function changeWindow(value: number) {
 function retry() {
   errorMessage.value = ''
   void load()
-}
-
-function formatRelative(value: string): string {
-  const parsed = new Date(value)
-
-  if (Number.isNaN(parsed.getTime()))
-    return value
-
-  const seconds = Math.round((Date.now() - parsed.getTime()) / 1000)
-
-  if (seconds < 60)
-    return `${seconds} 秒前`
-  if (seconds < 3600)
-    return `${Math.round(seconds / 60)} 分钟前`
-  if (seconds < 86_400)
-    return `${Math.round(seconds / 3600)} 小时前`
-
-  return `${Math.round(seconds / 86_400)} 天前`
 }
 
 function openDetail(item: SessionRow) {
@@ -187,15 +206,18 @@ onPullDownRefresh(async () => {
 <template>
   <view class="page">
     <view class="toolbar">
+      <!-- Each option is a <button>: as a plain <view> inside a horizontal
+           scroll-view, a tap lost the race against the scroll gesture and the
+           time range could not be changed at all. -->
       <scroll-view class="chips" scroll-x>
-        <view
+        <button
           v-for="option in windowOptions"
           :key="option.value"
           class="chip" :class="[option.value === windowMinutes ? 'chip-active' : '']"
           @tap="changeWindow(option.value)"
         >
           {{ option.label }}
-        </view>
+        </button>
       </scroll-view>
     </view>
 
@@ -241,11 +263,13 @@ onPullDownRefresh(async () => {
         <view class="card-meta">
           <!-- Clamped to one line: a session can carry several models and the
                joined list used to push the card taller than its neighbours. -->
-          <text class="card-model">{{ item.models.join(', ') || '-' }}</text>
+          <text class="card-model">{{ describeSession(item) }}</text>
         </view>
         <view class="card-stats">
           <text>{{ item.callCount }} 次请求</text>
-          <text>{{ item.totalTokens }} tokens</text>
+          <!-- Shortened: a real session reports 517158574 tokens, which wrapped
+               onto a second line and pushed the row out of the card. -->
+          <text>{{ formatCount(item.totalTokens) }} tokens</text>
         </view>
       </button>
     </view>
@@ -282,6 +306,14 @@ onPullDownRefresh(async () => {
   background-color: $color-surface;
   color: $color-text-secondary;
   font-size: $font-label;
+  line-height: 1.5;
+  /* uni-app gives every <button> a default border, background and full width;
+     all three fight the pill styling above. */
+  border: none;
+}
+
+.chip::after {
+  border: none;
 }
 
 .chip-active {

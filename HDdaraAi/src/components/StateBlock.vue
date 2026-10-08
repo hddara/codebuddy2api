@@ -38,9 +38,12 @@ const emit = defineEmits<{
     <view v-if="loading" class="state-spinner" />
     <text class="state-text">{{ text }}</text>
     <text v-if="hint" class="state-hint">{{ hint }}</text>
-    <text v-if="retryText" class="state-retry" @tap="emit('retry')">
+    <!-- A <button>, not a <text> with @tap: in the App runtime a tap on a text
+         node does not reliably reach a handler, so every retry affordance this
+         component renders (it is reused by all four pages) was dead. -->
+    <button v-if="retryText" class="state-retry" @tap="emit('retry')">
       {{ retryText }}
-    </text>
+    </button>
   </view>
 </template>
 
@@ -92,6 +95,19 @@ const emit = defineEmits<{
   border-radius: $radius-pill;
   font-size: $font-meta;
   color: $color-primary;
+  line-height: 1.6;
+  background-color: transparent;
+}
+
+/* uni-app draws a 1px hairline border and a default background on every
+   <button>; both would double up with the pill border above. */
+.state-retry::after {
+  border: none;
+}
+
+.state-retry[disabled] {
+  color: $color-text-faint;
+  border-color: $color-border;
 }
 
 .state-spinner {

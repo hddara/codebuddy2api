@@ -3,8 +3,10 @@ import type { TranscriptEntry } from '@/api/sessions'
 import { onLoad, onShow } from '@dcloudio/uni-app'
 
 import { computed, ref } from 'vue'
-import { fetchTranscripts } from '@/api/sessions'
+import { fetchTranscripts, MAX_TRANSCRIPT_PAGE } from '@/api/sessions'
 import StateBlock from '@/components/StateBlock.vue'
+import { describeError } from '@/utils/errors'
+import { formatRelative } from '@/utils/format'
 import { toSnippet } from '@/utils/markdown'
 
 definePage({
@@ -26,7 +28,49 @@ const loading = ref(true)
 const errorMessage = ref('')
 const totalStored = ref(0)
 
-const PREVIEW_LIMIT = 40
+/**
+ * Rows fetched per page, and the most the endpoint will ever return.
+ *
+ * A conversation on real traffic held 684 turns while the list showed 40 of them
+ * with no way to reach the rest — the footnote admitted the cut but offered
+ * nothing to act on. Paging is what turns that note into a usable history.
+ */
+const PAGE_SIZE = 40
+/** The endpoint's own page ceiling, so a request past it can never be a no-op. */
+const MAX_PREVIEW = MAX_TRANSCRIPT_PAGE
+const previewLimit = ref(PAGE_SIZE)
+const loadingMore = ref(false)
+
+/**
+ * Whether intermediate tool steps are listed next to the exchanges.
+ *
+ * Off by default. A task the IDE runs issues dozens of steps on the way to one
+ * answer, and on real traffic they made up 142 of 500 stored turns — each a
+ * fragment like "Now re-run the RV to confirm…" filed as if it were a question
+ * and its answer, which is what made the history unreadable.
+ *
+ * They are hidden rather than dropped: they are still the record of what the
+ * gateway saw, and they are one tap away when that is what you are after.
+ */
+const showToolTurns = ref(false)
+
+/** Steps inside the fetched page, i.e. how many the toggle would add. */
+const pageToolTurns = computed(
+  () => entries.value.filter(entry => entry.toolTurn).length,
+)
+
+const visibleEntries = computed(() => (showToolTurns.value
+  ? entries.value
+  : entries.value.filter(entry => !entry.toolTurn)))
+
+/**
+ * Steps across the whole conversation, as counted by the gateway.
+ *
+ * Separate from `pageToolTurns`: the header reports the conversation, the
+ * toggle reports what is actually on screen. Zero for turns stored before the
+ * gateway marked them, which is why it is a count and not a claim.
+ */
+const toolTurnTotal = ref(0)
 
 /**
  * Shortened conversation id shown in the header.
@@ -55,30 +99,87 @@ function retry() {
   void load()
 }
 
-async function load() {
+/**
+ * Identifies the newest `load()`.
+ *
+ * `onShow` reloads on every return, and `onPullDownRefresh` and `retry` do too,
+ * with nothing stopping them from overlapping — leave and re-enter quickly and
+ * two requests are in flight at once. Whichever resolved last used to win, which
+ * is not necessarily the newest, so the list could settle on a stale response
+ * and stay there until the next show. Only the request that is still current is
+ * allowed to write.
+ */
+let loadToken = 0
+
+async function load(options: { more?: boolean } = {}) {
   if (!conversationId.value) {
     errorMessage.value = '缺少会话标识'
     loading.value = false
     return
   }
 
+  const token = (loadToken += 1)
+
+  if (options.more) {
+    loadingMore.value = true
+  }
+  else {
+    loading.value = true
+  }
+
   try {
-    const payload = await fetchTranscripts(conversationId.value, PREVIEW_LIMIT)
+    const payload = await fetchTranscripts(
+      conversationId.value,
+      previewLimit.value,
+    )
+
+    if (token !== loadToken)
+      return
 
     entries.value = payload.entries ?? []
     totalStored.value = payload.totals?.stored ?? entries.value.length
+    toolTurnTotal.value = payload.totals?.toolTurns ?? 0
     errorMessage.value = ''
   }
   catch (error) {
-    const message = error instanceof Error ? error.message : '加载记录失败'
+    if (token !== loadToken)
+      return
 
-    errorMessage.value = /session required|401|unauthor/i.test(message)
-      ? '控制台凭据已失效，请到「设置」重新填入新的 Cookie'
-      : message
+    errorMessage.value = describeError(error, '加载记录失败')
   }
   finally {
-    loading.value = false
+    // Guarded too: a superseded request finishing must not clear the spinner
+    // while the current one is still in flight.
+    if (token === loadToken) {
+      loading.value = false
+      loadingMore.value = false
+    }
   }
+}
+
+/**
+ * Whether another page is both available and reachable.
+ *
+ * `totalStored` counts the whole conversation while a page is capped at
+ * `MAX_PREVIEW`: past that, the button would fetch the same rows again and read
+ * as a control that does nothing.
+ */
+const canLoadMore = computed(
+  () => entries.value.length > 0
+    && totalStored.value > entries.value.length
+    && previewLimit.value < MAX_PREVIEW,
+)
+
+/**
+ * Widens the page and reloads.
+ *
+ * `more` keeps the existing rows on screen: the plain path flips `loading`,
+ * which replaces the list with the spinner, and a reader asking for the next
+ * page would watch the list they were reading disappear.
+ */
+function showMore() {
+  previewLimit.value = Math.min(previewLimit.value + PAGE_SIZE, MAX_PREVIEW)
+  void load({ more: true })
 }
 
 function openLive() {
@@ -94,27 +195,19 @@ function openTranscript(entry: TranscriptEntry) {
   })
 }
 
-function formatClock(value: string): string {
-  const parsed = new Date(value)
-  if (Number.isNaN(parsed.getTime()))
-    return value
-
-  const minutes = Math.round((Date.now() - parsed.getTime()) / 60_000)
-
-  if (minutes < 1)
-    return '刚刚'
-  if (minutes < 60)
-    return `${minutes} 分钟前`
-  if (minutes < 1_440)
-    return `${Math.round(minutes / 60)} 小时前`
-
-  return parsed.toLocaleDateString()
-}
-
 onLoad((query) => {
-  conversationId.value = decodeURIComponent(
-    String((query as Record<string, string>)?.conversationId ?? ''),
-  )
+  const raw = String((query as Record<string, string>)?.conversationId ?? '')
+
+  // A malformed escape (`%`, or `%ZZ`) throws `URIError` and the value arrives
+  // straight from the route, so an edited URL or a bad deep link is enough to
+  // get one. Uncaught it aborts `onLoad` and the page stays blank instead of
+  // reporting that the id is bad.
+  try {
+    conversationId.value = decodeURIComponent(raw)
+  }
+  catch {
+    conversationId.value = raw
+  }
 })
 
 // Refreshed on every show so returning from a question shows the new turn.
@@ -128,7 +221,9 @@ onShow(() => {
     <view class="head">
       <view class="head-row">
         <text class="head-id">{{ shortId }}</text>
-        <text class="head-copy" @tap="copyConversationId">复制</text>
+        <button class="head-copy" @tap="copyConversationId">
+          复制
+        </button>
       </view>
       <text class="head-caption">会话标识</text>
     </view>
@@ -162,7 +257,7 @@ onShow(() => {
     <view class="section-head">
       <text class="section-title">历史问答</text>
       <text class="section-count">
-        {{ totalStored ? `共 ${totalStored} 条` : '' }}
+        {{ totalStored ? `共 ${totalStored} 条${toolTurnTotal ? `，含 ${toolTurnTotal} 条中间步骤` : ''}` : '' }}
       </text>
     </view>
 
@@ -176,7 +271,7 @@ onShow(() => {
 
     <view v-else class="list">
       <button
-        v-for="entry in entries"
+        v-for="entry in visibleEntries"
         :key="entry.id"
         class="entry"
         @tap="openTranscript(entry)"
@@ -186,7 +281,7 @@ onShow(() => {
             {{ toSnippet(entry.question, 80) || '(无提问文本)' }}
           </text>
           <view class="entry-meta">
-            <text class="entry-time">{{ formatClock(entry.completedAt) }}</text>
+            <text class="entry-time">{{ formatRelative(entry.completedAt) }}</text>
             <text
               class="entry-status"
               :class="[`status-${entry.status}`]"
@@ -199,7 +294,31 @@ onShow(() => {
       </button>
     </view>
 
-    <view v-if="entries.length && totalStored > entries.length" class="footnote">
+    <!-- Intermediate steps: hidden by default because they are what buried the
+         answers, but still the record of what happened, so they stay one tap
+         away instead of being dropped. -->
+    <button
+      v-if="pageToolTurns || showToolTurns"
+      class="footnote-action"
+      @tap="showToolTurns = !showToolTurns"
+    >
+      {{ showToolTurns ? '隐藏中间步骤' : `显示本页中间步骤（${pageToolTurns} 条）` }}
+    </button>
+
+    <!-- A <button>, not a note: the previous version only admitted the cut, so
+         the rest of the conversation was unreachable from the phone. -->
+    <button
+      v-if="canLoadMore"
+      class="footnote-action"
+      :disabled="loadingMore"
+      @tap="showMore"
+    >
+      {{ loadingMore ? '加载中…' : `加载更多（已显示 ${entries.length} / ${totalStored} 条）` }}
+    </button>
+
+    <!-- Past the ceiling the button would fetch the same page again and appear
+         to do nothing, so say where the list stops instead. -->
+    <view v-else-if="entries.length && totalStored > entries.length" class="footnote">
       仅显示最近 {{ entries.length }} 条，共 {{ totalStored }} 条。
     </view>
   </view>
@@ -237,6 +356,18 @@ onShow(() => {
   flex: none;
   font-size: $font-meta;
   color: $color-primary;
+  /* Inline text affordance: uni-app's <button> defaults to full width with its
+     own border and background, none of which belong here. */
+  display: inline-block;
+  width: auto;
+  margin: 0;
+  padding: 4rpx 12rpx;
+  line-height: 1.5;
+  background-color: transparent;
+}
+
+.head-copy::after {
+  border: none;
 }
 
 .head-caption {
@@ -366,5 +497,29 @@ onShow(() => {
   font-size: 22rpx;
   color: #a8adb5;
   text-align: center;
+}
+
+/* Reset the platform button chrome so this reads as a footnote that happens to
+   be tappable, not as a full-width primary action. */
+.footnote-action {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 20rpx 0 0;
+  border: none;
+  background-color: transparent;
+  font-size: 22rpx;
+  font-weight: normal;
+  line-height: 1.6;
+  color: $color-primary;
+  text-align: center;
+}
+
+.footnote-action::after {
+  border: none;
+}
+
+.footnote-action[disabled] {
+  color: $color-text-faint;
 }
 </style>

@@ -5,6 +5,9 @@
 #   ./build-apk.sh              # 构建 + 投放资源 + 打包
 #   ./build-apk.sh --install    # 上面全部，完了直接装机并启动
 #   ./build-apk.sh --no-web     # 跳过前端构建，复用 dist/build/app（只改了原生时用）
+#   ./build-apk.sh --debug      # 打 debug 变体：service 层的 console 与异常会进 logcat
+#                               # release 包什么都不输出，白屏时无从判断是渲染失败
+#                               # 还是没跑到渲染，这个变体就是为了看那一层
 #   ./build-apk.sh --install --configure
 #                               # 装机后再自动填好网关地址与控制台 Cookie
 #                               # 凭据取自 ${HDARA_BASE_URL} / ${HDARA_COOKIE}，
@@ -26,21 +29,37 @@ SHELL_DIR="$ROOT/shell"
 PROJ_DIR="$SHELL_DIR/simpleDemo"
 RES_SRC="$APP_ROOT/dist/build/app"                 # uni build -p app 的产物
 WWW_DEST="$PROJ_DIR/src/main/assets/apps/$APPID/www"
-APK="$PROJ_DIR/build/outputs/apk/release/simpleDemo-release.apk"
 ICON_SCRIPT="$APP_ROOT/design/make-app-icon.py"
 
 DO_INSTALL=0
 DO_WEB=1
 DO_CONFIGURE=0
+DO_DEBUG=0
 for arg in "$@"; do
   case "$arg" in
     --install)   DO_INSTALL=1 ;;
     --no-web)    DO_WEB=0 ;;
     --configure) DO_CONFIGURE=1; DO_INSTALL=1 ;;   # 配置必须在装机之后
+    --debug)     DO_DEBUG=1 ;;
     -h|--help)   sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "未知参数: ${arg}（可用: --install / --no-web / --configure）" >&2; exit 2 ;;
+    *) echo "未知参数: ${arg}（可用: --install / --no-web / --configure / --debug）" >&2; exit 2 ;;
   esac
 done
+
+# 变体只在装配阶段用得上，所以在这里定下来：路径是变体相关的（release/ 与 debug/），
+# 任务名也是。`--debug` 存在的唯一理由是**能看到 service 层的日志** ——
+# release 包的 JS 引擎进程什么都不输出，界面白屏时也就无从判断是渲染失败还是
+# 根本没跑到渲染。debug 包会把 console 与异常转发到 logcat。
+#
+# 两个变体共用同一套签名（build.gradle 里 debug 也指向 signingConfigs.config），
+# 所以 debug 包能直接覆盖安装 release 包，不需要先卸载。
+if [ "$DO_DEBUG" = "1" ]; then
+  GRADLE_TASK=":simpleDemo:assembleDebug"
+  APK="$PROJ_DIR/build/outputs/apk/debug/simpleDemo-debug.apk"
+else
+  GRADLE_TASK=":simpleDemo:assembleRelease"
+  APK="$PROJ_DIR/build/outputs/apk/release/simpleDemo-release.apk"
+fi
 
 # ---- 工具定位 ----------------------------------------------------------
 # Java 交给 gradle 自己找会很飘（本机装了 10 个 JDK，其中还有 1.8），显式钉一个 21。
@@ -202,8 +221,8 @@ else
 fi
 
 # ---- [3/5] 打包 --------------------------------------------------------
-echo "== [3/5] gradle assembleRelease =="
-( cd "$SHELL_DIR" && JAVA_HOME="$JAVA_HOME" ./gradlew :simpleDemo:assembleRelease --no-daemon )
+echo "== [3/5] gradle $GRADLE_TASK =="
+( cd "$SHELL_DIR" && JAVA_HOME="$JAVA_HOME" ./gradlew "$GRADLE_TASK" --no-daemon )
 
 if [ ! -f "$APK" ]; then
   echo "   打包结束但未找到 ${APK}" >&2

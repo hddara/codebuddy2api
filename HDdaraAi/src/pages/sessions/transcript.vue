@@ -3,8 +3,9 @@ import type { TranscriptEntry } from '@/api/sessions'
 import { onLoad } from '@dcloudio/uni-app'
 
 import { computed, ref } from 'vue'
-import { fetchTranscripts } from '@/api/sessions'
+import { fetchTranscripts, MAX_TRANSCRIPT_PAGE } from '@/api/sessions'
 import StateBlock from '@/components/StateBlock.vue'
+import { formatDateTime } from '@/utils/format'
 import { extractQuestion, renderMarkdown } from '@/utils/markdown'
 
 definePage({
@@ -32,9 +33,11 @@ async function load(conversationId: string, entryId: string) {
   }
 
   try {
-    // The endpoint returns a bounded page per conversation; the target id is
-    // matched locally because there is no per-entry route.
-    const payload = await fetchTranscripts(conversationId, 200)
+    // The endpoint returns a bounded page per conversation and the target id is
+    // matched locally, because there is no per-entry route. The page has to be
+    // as wide as the list's own paging limit: the list can open any row it has
+    // loaded, and a narrower lookup reported those rows as pruned.
+    const payload = await fetchTranscripts(conversationId, MAX_TRANSCRIPT_PAGE)
     const found = (payload.entries ?? []).find(item => item.id === entryId)
 
     if (!found) {
@@ -95,13 +98,6 @@ function continueInSession() {
   })
 }
 
-function formatTime(value: string): string {
-  const parsed = new Date(value)
-  if (Number.isNaN(parsed.getTime()))
-    return value
-  return parsed.toLocaleString()
-}
-
 function copyAnswer() {
   if (!entry.value?.answer)
     return
@@ -111,14 +107,30 @@ function copyAnswer() {
   })
 }
 
+/**
+ * Decodes a route parameter without letting a malformed escape through.
+ *
+ * Both ids come straight from the URL, and `decodeURIComponent` throws
+ * `URIError` on a lone `%` or a bad escape sequence — a hand-edited link or a
+ * truncated deep link is enough. Uncaught it aborted `onLoad`, so the page
+ * rendered empty and the real cause (a bad parameter) was never shown.
+ */
+function decodeParam(value: unknown): string {
+  const raw = String(value ?? '')
+
+  try {
+    return decodeURIComponent(raw)
+  }
+  catch {
+    return raw
+  }
+}
+
 onLoad((query) => {
   const params = query as Record<string, string>
 
-  conversationId.value = decodeURIComponent(String(params?.conversationId ?? ''))
-  void load(
-    conversationId.value,
-    decodeURIComponent(String(params?.entryId ?? '')),
-  )
+  conversationId.value = decodeParam(params?.conversationId)
+  void load(conversationId.value, decodeParam(params?.entryId))
 })
 </script>
 
@@ -135,7 +147,7 @@ onLoad((query) => {
 
     <template v-else-if="entry">
       <view class="meta">
-        <text class="meta-time">{{ formatTime(entry.completedAt) }}</text>
+        <text class="meta-time">{{ formatDateTime(entry.completedAt) }}</text>
         <text class="meta-status" :class="[`status-${entry.status}`]">
           {{ entry.status === 'failed' ? '失败' : '完成' }}
         </text>
@@ -155,7 +167,9 @@ onLoad((query) => {
       <view class="card">
         <view class="card-head">
           <text class="card-title">回答</text>
-          <text v-if="entry.answer" class="card-action" @tap="copyAnswer">复制</text>
+          <button v-if="entry.answer" class="card-action" @tap="copyAnswer">
+            复制
+          </button>
         </view>
 
         <!-- Failure and content are mutually exclusive: showing both left the
@@ -174,8 +188,13 @@ onLoad((query) => {
         </text>
       </view>
 
+      <!-- The question is counted after extraction, not from `questionChars`:
+           turns stored before the gateway learned to read `<user_query>` first
+           hold a whole prompt (209 characters of preamble around a 3-character
+           question), and reporting that number next to the extracted question
+           reads as a contradiction. -->
       <view class="footnote">
-        回答共 {{ entry.answerChars }} 字，提问 {{ entry.questionChars }} 字。
+        回答共 {{ entry.answerChars }} 字，提问 {{ question.length }} 字。
       </view>
 
       <!-- Ask a follow-up on the same conversation without going back through
@@ -256,6 +275,16 @@ onLoad((query) => {
 .card-action {
   font-size: $font-meta;
   color: $color-primary;
+  display: inline-block;
+  width: auto;
+  margin: 0;
+  padding: 4rpx 12rpx;
+  line-height: 1.5;
+  background-color: transparent;
+}
+
+.card-action::after {
+  border: none;
 }
 
 /* One class for both question and answer now that both are rendered HTML. */

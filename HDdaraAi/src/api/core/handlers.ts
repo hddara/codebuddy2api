@@ -60,7 +60,7 @@ function toastErrorOnce(msg: string): void {
  * something the user can configure, and persisting it would make one bad session
  * look worse after a restart.
  */
-const AUTH_REJECTION_THRESHOLD = 2
+const AUTH_REJECTION_THRESHOLD = 3
 
 let consecutiveAuthRejections = 0
 
@@ -110,12 +110,27 @@ export async function handleAlovaResponse(response: unknown): Promise<unknown> {
       const previous = store.adminCookie
       const failures = authRejectionStreak.record()
 
+      // The credential is deliberately **not** deleted here, not even when the
+      // rejection is genuine. Clearing it turns a recoverable 401 into a secret
+      // the user has to fetch again, and the gateway answers 401 during a cold
+      // start while its session store is still warming up — observed on a device
+      // signing the user out with a credential that was still good. Keeping it
+      // leaves the fix reachable (the settings page works with a stale
+      // credential) and loses nothing if the rejection was transient.
       if (previous && failures >= AUTH_REJECTION_THRESHOLD) {
-        store.setAdminCookie('')
-        toastErrorOnce('登录已失效，请到「设置」重新填写凭据')
+        // Once, not on every following request: the streak keeps growing while
+        // the credential is stale, and repeating the toast would bury the page.
+        if (failures === AUTH_REJECTION_THRESHOLD) {
+          toastErrorOnce('登录已失效，请到「设置」重新填写凭据')
+        }
       }
       else {
-        toastErrorOnce(message)
+        // Deliberately not the server's wording: rejection messages are English
+        // (`Invalid password`) and describe the gateway's view rather than the
+        // user's next step. The page that made the request shows the specific
+        // reason in Chinese, so the toast only has to say the credential was not
+        // accepted.
+        toastErrorOnce('凭据未被接受，请检查账号或密码')
       }
 
       throw new ApiError(message, status, data)

@@ -3,9 +3,12 @@ import { onShow } from '@dcloudio/uni-app'
 import { computed, ref } from 'vue'
 
 import { clearManualBaseUrlVerdict } from '@/api/core/base-url'
+import { clearTranscripts as clearStoredTranscripts } from '@/api/sessions'
 import { useAuthStore } from '@/store/authStore'
 import { parseStored } from '@/store/persist'
 import { ensureUnlocked } from '@/utils/app-guard'
+import { getAppVersion } from '@/utils/app-info'
+import { describeError } from '@/utils/errors'
 
 definePage({
   name: 'settings',
@@ -73,32 +76,38 @@ function verifyPersisted(): boolean {
   // #endif
 }
 
+/**
+ * The running version, from the same source the gateway is told about.
+ *
+ * The page used to carry a literal (`HDdaraAi v0.1.0`), which no release ever
+ * updated — the app would report one version to the gateway and show another to
+ * the person holding it, which is the exact contradiction `app-info` documents
+ * having been reported before.
+ */
+const appVersion = getAppVersion() || '未知'
+
 const storageProbe = ref('')
 
 /**
- * Reads the persisted snapshot and describes it.
+ * Storage state, in the app's own words.
  *
- * Shown on the settings page so the storage state is observable on the device
- * itself: there is no way to inspect the App sandbox from `adb` on a production
- * build, and "did the write land" cannot be answered by looking at the UI alone.
+ * The line exists because a production build's sandbox cannot be inspected from
+ * `adb`, so "did the credential actually land on disk" has to be answerable from
+ * the device. It used to print `存储：cookie(43) / https://…` — a debug dump: the
+ * address is already in the field above it, and a character count is not
+ * something a user asked for.
  */
 function probeStorage(): void {
   // #ifdef APP-PLUS
   try {
     const parsed = parseStored(uni.getStorageSync('auth'))
 
-    if (!parsed) {
-      storageProbe.value = '存储：空'
-      return
-    }
-
-    const cookie = (parsed.adminCookie as string | undefined) ?? ''
-    const url = (parsed.baseUrl as string | undefined) ?? ''
-
-    storageProbe.value = `存储：${cookie ? `cookie(${cookie.length})` : '无 cookie'} / ${url || '无地址'}`
+    storageProbe.value = parsed?.adminCookie || parsed?.apiKey
+      ? '本机凭据已保存'
+      : '本机未保存凭据'
   }
-  catch (error) {
-    storageProbe.value = `存储读取失败：${String(error)}`
+  catch {
+    storageProbe.value = '本机凭据读取失败'
   }
   // #endif
 }
@@ -168,14 +177,69 @@ function toggleCookieVisible() {
   cookieVisible.value = !cookieVisible.value
 }
 
+/**
+ * Clears the stored credential, after confirming.
+ *
+ * It shares a row with 保存 and takes effect immediately, so a misplaced tap
+ * logged the user out and deleted the credential that would have signed them
+ * back in — with no way back short of retyping a 43-character token.
+ */
 function clear() {
-  auth.logout()
-  adminCookie.value = ''
-  apiKey.value = ''
-  cookieVisible.value = false
-  saved.value = false
+  uni.showModal({
+    cancelText: '取消',
+    confirmText: '清除',
+    content: '将删除本机保存的网关地址与凭据，之后需要重新登录。',
+    success: (result) => {
+      if (!result.confirm)
+        return
 
-  uni.showToast({ icon: 'none', title: '已清除凭据' })
+      auth.logout()
+      adminCookie.value = ''
+      apiKey.value = ''
+      cookieVisible.value = false
+      saved.value = false
+      probeStorage()
+      uni.showToast({ icon: 'none', title: '已清除凭据' })
+    },
+    title: '清除凭据',
+  })
+}
+
+const clearing = ref(false)
+
+/**
+ * Clears the gateway's stored turns, after confirming.
+ *
+ * Destructive and server-side, so it gets its own section instead of sitting
+ * next to the credential buttons — and it is the app's answer to a history that
+ * cannot be repaired: turns stored before the gateway read `<user_query>` first
+ * hold a prompt instead of a question, and nothing on the device can rewrite
+ * them.
+ */
+function confirmClearTranscripts() {
+  uni.showModal({
+    cancelText: '取消',
+    confirmText: '清空',
+    content: '将删除网关上保存的全部问答记录（所有会话），无法恢复。',
+    success: async (result) => {
+      if (!result.confirm)
+        return
+
+      clearing.value = true
+
+      try {
+        const removed = await clearStoredTranscripts()
+        uni.showToast({ icon: 'none', title: `已清空 ${removed} 条记录` })
+      }
+      catch (error) {
+        uni.showToast({ icon: 'none', title: describeError(error, '清空失败') })
+      }
+      finally {
+        clearing.value = false
+      }
+    },
+    title: '清空会话记录',
+  })
 }
 
 onShow(() => {
@@ -203,9 +267,9 @@ onShow(() => {
         <text class="section-title">控制台 Cookie</text>
         <!-- 默认遮蔽：这个值可以直接冒充管理员会话，设置页又常被截图分享。
              需要核对时再手动展开。 -->
-        <text class="section-toggle" @tap="toggleCookieVisible">
+        <button class="section-toggle" @tap="toggleCookieVisible">
           {{ cookieVisible ? '隐藏' : '显示' }}
-        </text>
+        </button>
       </view>
       <text class="section-hint">
         在浏览器登录控制台后，从开发者工具复制 Cookie 头里的
@@ -260,8 +324,19 @@ onShow(() => {
       <text class="status-saved">{{ storageProbe }}</text>
     </view>
 
+    <view class="section">
+      <text class="section-title">会话记录</text>
+      <text class="section-hint">
+        网关保存的每次问答构成 App 里的历史列表。清空后无法恢复，
+        但之后的问答会继续记录。
+      </text>
+      <button class="danger" :disabled="clearing" @tap="confirmClearTranscripts">
+        {{ clearing ? '清空中…' : '清空会话记录' }}
+      </button>
+    </view>
+
     <view class="about">
-      <text class="about-title">HDdaraAi v0.1.0</text>
+      <text class="about-title">HDdaraAi v{{ appVersion }}</text>
       <text class="about-text">
         用于随时查看 AI 会话状态。会话列表与实时输出来自网关的
         /admin-api/sessions 接口。
@@ -332,6 +407,16 @@ onShow(() => {
 .section-toggle {
   font-size: 24rpx;
   color: #0a84ff;
+  display: inline-block;
+  width: auto;
+  margin: 0;
+  padding: 4rpx 12rpx;
+  line-height: 1.5;
+  background-color: transparent;
+}
+
+.section-toggle::after {
+  border: none;
 }
 
 .actions {
@@ -360,6 +445,20 @@ onShow(() => {
   color: #4a4f57;
   font-size: 28rpx;
   border-radius: 14rpx;
+}
+
+/* Destructive: white surface with red text, so it cannot be mistaken for the
+   primary action it sits near. */
+.danger {
+  width: 100%;
+  background-color: #ffffff;
+  color: #cf1322;
+  font-size: 28rpx;
+  border-radius: 14rpx;
+}
+
+.danger[disabled] {
+  color: #e8a0a0;
 }
 
 .status {

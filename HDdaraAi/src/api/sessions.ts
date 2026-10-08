@@ -5,8 +5,12 @@ import { getApiBaseUrl } from './core/base-url'
 import { alovaInstance } from './core/instance'
 
 export interface SessionRow {
+  /** Console key that served the conversation, when the gateway can attribute it. */
+  accessKeyName?: string | null
   callCount: number
   conversationId: string
+  /** First event inside the selected window, ISO 8601. */
+  firstSeenAt?: string
   lastActiveAt: string
   models: string[]
   totalTokens: number
@@ -101,6 +105,17 @@ export async function fetchSessions(windowMinutes: number): Promise<SessionListP
     .send()
 }
 
+/**
+ * Rows the transcripts endpoint returns in one page, and therefore the most the
+ * list can ever show.
+ *
+ * Shared rather than duplicated: the list pages up to this many while the detail
+ * view looks a turn up inside one page, and when the two disagreed (500 against
+ * 200) every row past the 200th reported "this record is no longer retained" for
+ * a turn that was sitting right there.
+ */
+export const MAX_TRANSCRIPT_PAGE = 500
+
 export interface TranscriptEntry {
   accessKeyId: string | null
   answer: string
@@ -114,12 +129,27 @@ export interface TranscriptEntry {
   questionChars: number
   startedAt: string
   status: 'completed' | 'failed'
+  /**
+   * One step of a longer task rather than a finished exchange.
+   *
+   * A task the IDE runs issues dozens of these on the way to its answer, and on
+   * real traffic they were 142 of 500 stored turns — fragments like
+   * "Now re-run the RV to confirm…" sitting in the list as if they were Q&A.
+   * Absent on turns stored before the gateway marked them.
+   */
+  toolTurn?: boolean
 }
 
 export interface TranscriptPayload {
   entries: TranscriptEntry[]
   settings: { enabled: boolean, maxEntries: number, retentionDays: number }
-  totals: { answerChars: number, questionChars: number, stored: number }
+  totals: {
+    answerChars: number
+    questionChars: number
+    stored: number
+    /** How many of `stored` are intermediate tool steps. */
+    toolTurns?: number
+  }
 }
 
 /**
@@ -144,6 +174,25 @@ export async function fetchTranscripts(
       headers: { ...consoleHeaders(), skipToken: true },
     } as never)
     .send()
+}
+
+/**
+ * Deletes every stored turn, returning how many were removed.
+ *
+ * Exposed in the app because the stored turns are the one thing here that can go
+ * stale on its own: retention is decided server-side, and a conversation whose
+ * history is all intermediate tool steps — or all turns stored before the
+ * gateway learned to read `<user_query>` first — is noise the user has no other
+ * way to clear.
+ */
+export async function clearTranscripts(): Promise<number> {
+  const result = await alovaInstance
+    .Delete<{ removed: number }>('/admin-api/sessions/transcripts', {
+      headers: { ...consoleHeaders(), skipToken: true },
+    } as never)
+    .send()
+
+  return Number(result?.removed ?? 0)
 }
 
 /**
@@ -293,9 +342,15 @@ export function sendChatMessage({
         data: {
           messages: turns,
           model: model || 'deepseek-v4.1-flash',
+          // The gateway is asked to stream, because that is what makes it publish
+          // the reply on the session stream this page is watching. The response to
+          // *this* request is not used for the text.
           stream: true,
         },
-        enableChunked: true,
+        // Deliberately not `enableChunked`. On App that flag is a no-op that also
+        // stops the request from reaching the network at all, which is how every
+        // question came back as an error; the reply arrives on the session stream
+        // instead, so an ordinary request is both sufficient and reliable.
         header: headers,
         method: 'POST',
         timeout: 2_147_483_647 as never,
@@ -347,9 +402,17 @@ export function sendChatMessage({
 
     const onChunkReceived = request.onChunkReceived
 
+    // No incremental callback is not a failure, and must not be reported as one.
+    //
+    // This used to raise "当前运行时不支持流式响应，无法显示回答" and finish, which on
+    // the App meant every question ended in an error state before it was sent:
+    // `uni.request`'s `enableChunked` is a mini-program feature and on App the
+    // pair is a no-op. But the reply does not need this channel — the gateway
+    // broadcasts it on the session stream, which the live page subscribes to
+    // separately. So the request's only job is to be delivered; whatever comes
+    // back is used if it can be, and ignored if it cannot.
     if (!onChunkReceived) {
-      onError('当前运行时不支持流式响应，无法显示回答')
-      finish()
+      onStart?.()
 
       return
     }

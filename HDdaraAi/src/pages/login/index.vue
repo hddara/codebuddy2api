@@ -12,6 +12,7 @@ import {
   biometricSupport,
 
 } from '@/utils/biometric'
+import { isAuthError } from '@/utils/errors'
 
 definePage({
   name: 'login',
@@ -111,11 +112,14 @@ async function verifyStored(): Promise<boolean> {
     return true
   }
   catch (error) {
-    const message = error instanceof Error ? error.message : ''
-
     // Only an auth rejection should force a re-login. A network problem is not
     // a reason to ask for the password again.
-    if (/session required|401|unauthor/i.test(message)) {
+    //
+    // `isAuthError`, not a hand-written pattern: the check must look at the
+    // status code, because the wording does not give it away — a rejected
+    // password comes back as `401 Invalid password`, which no pattern mentioning
+    // "session required" matches.
+    if (isAuthError(error)) {
       errorMessage.value = '登录已过期，请重新填写凭据'
       return false
     }
@@ -205,7 +209,10 @@ async function signIn() {
     const message = error instanceof Error ? error.message : '登录失败'
 
     auth.logout()
-    errorMessage.value = /session required|401|unauthor/i.test(message)
+    // Detected by status, not by wording: a wrong password is answered with
+    // `401 Invalid password`, so matching on the gateway's phrasing passed the
+    // English message straight through to a Chinese form.
+    errorMessage.value = isAuthError(error)
       ? (useCookieMode.value
           ? '凭据无效，请检查控制台 Cookie'
           : '账号或密码不正确')
@@ -477,9 +484,9 @@ function toggleBiometric() {
         <view class="field">
           <view class="field-head">
             <text class="field-label">密码</text>
-            <text class="field-toggle" @tap="toggleCookieVisible">
+            <button class="field-toggle" @tap="toggleCookieVisible">
               {{ cookieVisible ? '隐藏' : '显示' }}
-            </text>
+            </button>
           </view>
           <input
             v-model="password"
@@ -494,9 +501,9 @@ function toggleBiometric() {
       <view v-else class="field">
         <view class="field-head">
           <text class="field-label">控制台 Cookie</text>
-          <text class="field-toggle" @tap="toggleCookieVisible">
+          <button class="field-toggle" @tap="toggleCookieVisible">
             {{ cookieVisible ? '隐藏' : '显示' }}
-          </text>
+          </button>
         </view>
         <input
           v-model="adminCookie"
@@ -704,6 +711,16 @@ function toggleBiometric() {
 .field-toggle {
   font-size: 24rpx;
   color: #0a84ff;
+  display: inline-block;
+  width: auto;
+  margin: 0;
+  padding: 4rpx 12rpx;
+  line-height: 1.5;
+  background-color: transparent;
+}
+
+.field-toggle::after {
+  border: none;
 }
 
 .input {
