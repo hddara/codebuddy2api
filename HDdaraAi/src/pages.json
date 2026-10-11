@@ -70,7 +70,47 @@
       "style": {
         "navigationBarTitleText": "设置"
       }
+    },
+    // #ifdef APP || H5 || MP-HARMONY
+    {
+      "path": "pages/account/index",
+      "type": "page",
+      "name": "account",
+      "style": {
+        "navigationBarTitleText": "账户管理"
+      }
+    },
+    // #endif
+    // #ifdef APP || H5 || MP-HARMONY
+    {
+      "path": "pages/account/usage",
+      "type": "page",
+      "name": "account-usage",
+      "style": {
+        "navigationBarTitleText": "账户数据"
+      }
+    },
+    // #endif
+    // #ifdef APP || H5 || MP-HARMONY
+    {
+      "path": "pages/credentials/index",
+      "type": "page",
+      "name": "credentials",
+      "style": {
+        "navigationBarTitleText": "凭证管理"
+      }
+    },
+    // #endif
+    // #ifdef APP || H5 || MP-HARMONY
+    {
+      "path": "pages/credentials/keys",
+      "type": "page",
+      "name": "access-keys",
+      "style": {
+        "navigationBarTitleText": "访问密钥"
+      }
     }
+    // #endif
   ],
   "subPackages": [],
   "tabBar": {

@@ -66,6 +66,35 @@ export default defineUniPages({
         navigationBarTitleText: '设置',
       },
     },
+    {
+      // Account management: who is signed in and how they sign in.
+      //
+      // A sub-page of settings rather than a third tab: the tab bar is for the
+      // two things the app is opened to do, and these are occasional
+      // maintenance, entered deliberately.
+      path: 'pages/account/index',
+      style: {
+        navigationBarTitleText: '账户管理',
+      },
+    },
+    {
+      path: 'pages/account/usage',
+      style: {
+        navigationBarTitleText: '账户数据',
+      },
+    },
+    {
+      path: 'pages/credentials/index',
+      style: {
+        navigationBarTitleText: '凭证管理',
+      },
+    },
+    {
+      path: 'pages/credentials/keys',
+      style: {
+        navigationBarTitleText: '访问密钥',
+      },
+    },
   ],
   tabBar: {
     color: '#8a8f99',

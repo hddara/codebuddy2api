@@ -5,6 +5,10 @@
 
 type _LocationUrl =
   "/pages/login/index" |
+  "/pages/account/index" |
+  "/pages/account/usage" |
+  "/pages/credentials/index" |
+  "/pages/credentials/keys" |
   "/pages/sessions/detail" |
   "/pages/sessions/index" |
   "/pages/sessions/live" |

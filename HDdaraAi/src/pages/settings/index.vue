@@ -17,6 +17,45 @@ definePage({
 
 const auth = useAuthStore()
 
+/**
+ * The gateway-side screens, in the order a user is likely to want them.
+ *
+ * Declared here rather than as markup repeated four times, so the icon, the
+ * label and the destination stay in one place — the three drifted apart in the
+ * console's own navigation for exactly this reason.
+ */
+const accountEntries = [
+  {
+    hint: '登录方式、修改密码、通行密钥',
+    icon: 'i-carbon:user-avatar',
+    label: '账户管理',
+    path: '/pages/account/index',
+  },
+  {
+    hint: '剩余额度、套餐明细、每日签到',
+    icon: 'i-carbon:chart-line-data',
+    label: '账户数据',
+    path: '/pages/account/usage',
+  },
+  {
+    hint: '上游账号的轮询、限流与模型',
+    icon: 'i-carbon:credentials',
+    label: '凭证管理',
+    path: '/pages/credentials/index',
+  },
+] as const
+
+/**
+ * Opens one of the account sub-pages.
+ *
+ * A method rather than `uni.navigateTo` in the template: `uni` is a runtime
+ * global and the template scope does not have it, so the call there silently
+ * resolves to nothing and the row appears dead.
+ */
+function openAccountPage(path: string) {
+  uni.navigateTo({ url: path })
+}
+
 const baseUrl = ref('')
 const adminCookie = ref('')
 // 默认隐藏；设成 true 才能看见自己粘进去的值对不对。
@@ -333,6 +372,29 @@ onShow(() => {
     </view>
 
     <view class="section">
+      <text class="section-title">账户与凭据</text>
+      <text class="section-hint">
+        网关侧的账户设置。凭据是真实的上游账号，访问密钥是给客户端用的令牌。
+      </text>
+
+      <!-- Rows rather than one button per destination: they are all the same
+           kind of thing (a sub-page), and the chevron says so. -->
+      <button
+        v-for="entry in accountEntries"
+        :key="entry.path"
+        class="nav-row"
+        @tap="openAccountPage(entry.path)"
+      >
+        <view class="nav-icon" :class="entry.icon" />
+        <view class="nav-body">
+          <text class="nav-label">{{ entry.label }}</text>
+          <text class="nav-hint">{{ entry.hint }}</text>
+        </view>
+        <view class="nav-chevron i-carbon:chevron-right" />
+      </button>
+    </view>
+
+    <view class="section">
       <text class="section-title">会话记录</text>
       <text class="section-hint">
         网关保存的每次问答构成 App 里的历史列表。清空后无法恢复，
@@ -492,6 +554,63 @@ onShow(() => {
 .status-icon {
   width: 26rpx;
   height: 26rpx;
+}
+
+/* Reset the platform button chrome so a row reads as a list item, the same
+   treatment the login page's switch row needed. */
+.nav-row {
+  display: flex;
+  align-items: center;
+  gap: $gap-section;
+  width: 100%;
+  margin: 0;
+  padding: $gap-page 0;
+  border: none;
+  border-bottom: 1rpx solid $color-border-strong;
+  border-radius: 0;
+  background-color: transparent;
+  line-height: normal;
+  text-align: left;
+}
+
+.nav-row:last-child {
+  border-bottom: none;
+}
+
+.nav-row::after {
+  border: none;
+}
+
+.nav-icon {
+  flex: none;
+  width: 40rpx;
+  height: 40rpx;
+  color: $color-primary;
+}
+
+.nav-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.nav-label {
+  display: block;
+  font-size: $font-label;
+  color: $color-text;
+}
+
+.nav-hint {
+  display: block;
+  margin-top: 4rpx;
+  font-size: $font-micro;
+  color: $color-text-muted;
+}
+
+.nav-chevron {
+  flex: none;
+  width: 32rpx;
+  height: 32rpx;
+  color: $color-text-faint;
 }
 
 .about {
