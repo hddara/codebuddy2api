@@ -569,10 +569,61 @@ export interface RecordSessionTurnInput {
 }
 
 /**
+ * Serialises recording per conversation.
+ *
+ * The cycles of one task arrive concurrently, not one after another, and the
+ * fold below is a read-then-write: find the open turn, then extend it. Two
+ * cycles overlapping in that gap both find nothing to extend and each start
+ * their own record — the split this module exists to prevent. Measured against
+ * production after the fold shipped, most cycles still landed in their own
+ * record for exactly this reason; only pairs that happened to be ordered got
+ * merged.
+ *
+ * Queueing per conversation (not globally) keeps unrelated sessions from
+ * waiting on each other, and the map holds nothing once a chain drains.
+ */
+const writeChains = new Map<string, Promise<unknown>>();
+
+const inWriteChain = <T>(
+  conversationId: string,
+  work: () => Promise<T>,
+): Promise<T> => {
+  const previous = writeChains.get(conversationId) ?? Promise.resolve();
+  // Both handlers run `work`, so a rejected link cannot strand the queue.
+  const next = previous.then(work, work);
+
+  // Only the ordering matters, so settlement is swallowed. The tail is what gets
+  // stored, and comparing against it afterwards is what makes the cleanup safe:
+  // an earlier link finishing must not drop a queue that has grown behind it.
+  const tail = next.catch(() => undefined);
+  writeChains.set(conversationId, tail);
+
+  void tail.finally(() => {
+    if (writeChains.get(conversationId) === tail) {
+      writeChains.delete(conversationId);
+    }
+  });
+
+  return next;
+};
+
+/**
  * Persists one finished turn. Never throws: recording is observability and must
  * not turn a successful reply into a failed request.
  */
-export const recordSessionTurn = async ({
+export const recordSessionTurn = async (
+  input: RecordSessionTurnInput,
+): Promise<SessionTranscriptRecord | null> => {
+  const { conversationId } = input;
+
+  if (!conversationId || !canEnumerateTurns()) {
+    return null;
+  }
+
+  return inWriteChain(conversationId, () => recordSessionTurnInner(input));
+};
+
+const recordSessionTurnInner = async ({
   accessKeyId,
   answer,
   completedAt,
@@ -583,10 +634,6 @@ export const recordSessionTurn = async ({
   startedAt,
   toolTurn,
 }: RecordSessionTurnInput): Promise<SessionTranscriptRecord | null> => {
-  if (!conversationId || !canEnumerateTurns()) {
-    return null;
-  }
-
   try {
     const settings = await getSessionTranscriptSettings();
 

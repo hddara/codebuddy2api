@@ -658,6 +658,60 @@ describe('session transcripts', () => {
       expect(listed.totals.toolTurns).toBe(0);
     });
 
+    it('folds cycles that arrive at the same moment', async () => {
+      // The cycles of one task arrive concurrently, not in sequence. Recording
+      // them in parallel used to make each one look like the start of a task —
+      // they all read the store before any of them had written — so the fold
+      // missed them and production kept 90%+ of its rows as fragments.
+      const base = Date.parse('2026-10-04T01:00:00.000Z');
+
+      await Promise.all(
+        [0, 1_000, 2_000, 3_000].map((offset) =>
+          recordSessionTurn({
+            answer: `part${offset}`,
+            completedAt: new Date(base + offset).toISOString(),
+            conversationId: 'conv-race',
+            question: '同时到达',
+          }),
+        ),
+      );
+
+      const listed = await listSessionTranscripts({
+        conversationId: 'conv-race',
+      });
+
+      expect(listed.entries).toHaveLength(1);
+      // Order between overlapping writes is not guaranteed, so the assertion is
+      // on the set of parts rather than on their sequence.
+      const answer = listed.entries[0]?.answer ?? '';
+
+      for (const offset of [0, 1_000, 2_000, 3_000]) {
+        expect(answer).toContain(`part${offset}`);
+      }
+    });
+
+    it('does not serialise across conversations', async () => {
+      // Queueing is per conversation on purpose: a slow write in one session
+      // must not hold up another, or one busy conversation would stall every
+      // other recording in the process.
+      const base = Date.parse('2026-10-04T01:00:00.000Z');
+
+      await Promise.all([
+        recordSessionTurn({
+          answer: 'a',
+          completedAt: new Date(base).toISOString(),
+          conversationId: 'conv-fast',
+        }),
+        recordSessionTurn({
+          answer: 'b',
+          completedAt: new Date(base).toISOString(),
+          conversationId: 'conv-slow',
+        }),
+      ]);
+
+      expect((await listSessionTranscripts()).entries).toHaveLength(2);
+    });
+
     it('keeps the flag when every cycle was a tool step', async () => {
       const base = Date.parse('2026-10-04T01:00:00.000Z');
 
