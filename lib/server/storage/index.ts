@@ -64,20 +64,34 @@ const globalStorageState = globalThis as typeof globalThis & {
   __codebuddy2apiStorage__?: StorageRuntime;
 };
 
+/**
+ * Resolves a path against the working directory without letting the bundler
+ * follow it.
+ *
+ * `path.resolve('.', name)` looks static but is not: `.` is the *build* cwd, so
+ * Turbopack cannot decide which files it might read and conservatively traces
+ * the entire project — including `HDdaraAi/`, whose iOS shell project adds
+ * gigabytes of Xcode intermediates to `.next/standalone`. The result was a
+ * 5.2 GB server bundle that nothing imports. The ignore comment is Next's own
+ * opt-out for exactly this case.
+ */
+const resolveFromCwd = (...segments: string[]): string =>
+  path.resolve(/* turbopackIgnore: true */ '.', ...segments);
+
 const resolveFileStorageDir = (): string => {
   const explicitDir = process.env[STORAGE_FILE_DIR_ENV]?.trim();
 
   if (explicitDir) {
-    return path.resolve('.', explicitDir);
+    return resolveFromCwd(explicitDir);
   }
 
   const legacyConfigPath = process.env[LEGACY_CONFIG_PATH_ENV]?.trim();
 
   if (legacyConfigPath) {
-    return path.dirname(path.resolve('.', legacyConfigPath));
+    return path.dirname(resolveFromCwd(legacyConfigPath));
   }
 
-  return path.resolve('.', '.codebuddy_data');
+  return resolveFromCwd('.codebuddy_data');
 };
 
 const getLegacyConfigPath = (): string | null => {
@@ -87,7 +101,7 @@ const getLegacyConfigPath = (): string | null => {
     return null;
   }
 
-  return path.resolve('.', legacyConfigPath);
+  return resolveFromCwd(legacyConfigPath);
 };
 
 export const getFileStorageDir = (): string => {
@@ -108,10 +122,10 @@ export const getCredsDir = (): string => {
   const explicitDir = process.env[CREDENTIALS_DIR_ENV]?.trim();
 
   if (explicitDir) {
-    return path.resolve('.', explicitDir);
+    return resolveFromCwd(explicitDir);
   }
 
-  return path.resolve('.', '.codebuddy_creds');
+  return resolveFromCwd('.codebuddy_creds');
 };
 
 const getStorageBackendKind = (): StorageBackendKind => {
@@ -145,7 +159,7 @@ const getSqlitePath = (): string => {
   const explicitPath = process.env[STORAGE_SQLITE_PATH_ENV]?.trim();
 
   if (explicitPath) {
-    return path.resolve('.', explicitPath);
+    return resolveFromCwd(explicitPath);
   }
 
   return path.join(resolveFileStorageDir(), 'storage.sqlite');
@@ -294,8 +308,8 @@ const getLegacyDocumentPath = (
 ): string | null => {
   const legacyConfigPath = process.env[LEGACY_CONFIG_PATH_ENV]?.trim();
   const legacyConfigDir = legacyConfigPath
-    ? path.dirname(path.resolve('.', legacyConfigPath))
-    : path.resolve('.', 'config');
+    ? path.dirname(resolveFromCwd(legacyConfigPath))
+    : resolveFromCwd('config');
   const legacyFilename =
     namespace === 'config' && key === 'runtime'
       ? 'config.json'
