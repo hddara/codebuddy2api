@@ -12,6 +12,15 @@
 withDefaults(defineProps<{
   /** Optional secondary line, e.g. what to do next. */
   hint?: string
+  /**
+   * Icon class shown above the text, e.g. `i-carbon:document-blank`.
+   *
+   * Left to the caller rather than derived from `tone`: the useful distinction
+   * is *why* the panel is empty (nothing collected yet / nothing in this range /
+   * the request failed), and only the caller knows which. A default here would
+   * put the same glyph on situations that need telling apart.
+   */
+  icon?: string
   /** Shows a spinner-ish affordance while a request is in flight. */
   loading?: boolean
   /** Retry affordance. Rendered only when a handler is bound. */
@@ -22,6 +31,7 @@ withDefaults(defineProps<{
   tone?: 'neutral' | 'danger'
 }>(), {
   hint: '',
+  icon: '',
   loading: false,
   retryText: '',
   tone: 'neutral',
@@ -36,6 +46,13 @@ const emit = defineEmits<{
 <template>
   <view class="state" :class="[`state-${variant}`, `state-${tone}`]">
     <view v-if="loading" class="state-spinner" />
+    <!-- Never alongside the spinner: two competing affordances in one panel read
+         as a rendering fault rather than as progress. -->
+    <view
+      v-else-if="icon"
+      class="state-icon"
+      :class="icon"
+    />
     <text class="state-text">{{ text }}</text>
     <text v-if="hint" class="state-hint">{{ hint }}</text>
     <!-- A <button>, not a <text> with @tap: in the App runtime a tap on a text
@@ -67,6 +84,19 @@ const emit = defineEmits<{
 /* Inside an existing card, a second white block would read as a nested panel. */
 .state-plain {
   background-color: transparent;
+}
+
+/* Deliberately large and faint: at body-text size an icon reads as a label,
+   and at full contrast it competes with the sentence it is meant to introduce. */
+.state-icon {
+  width: 72rpx;
+  height: 72rpx;
+  margin-bottom: 20rpx;
+  color: $color-text-faint;
+}
+
+.state-danger .state-icon {
+  color: $color-danger;
 }
 
 .state-text {

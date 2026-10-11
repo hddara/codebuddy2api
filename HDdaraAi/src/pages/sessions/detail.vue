@@ -320,6 +320,7 @@ onShow(() => {
     <StateBlock
       v-if="errorMessage"
       tone="danger"
+      icon="i-carbon:warning-alt"
       :text="errorMessage"
       retry-text="重试"
       @retry="retry"
@@ -354,6 +355,7 @@ onShow(() => {
 
     <StateBlock
       v-else-if="!entries.length"
+      icon="i-carbon:document-blank"
       text="还没有记录"
       hint="网关会保存每次问答，可在设置里调整保留天数与条数。"
     />

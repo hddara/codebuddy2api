@@ -352,6 +352,7 @@ onPullDownRefresh(async () => {
     <StateBlock
       v-if="errorMessage"
       tone="danger"
+      icon="i-carbon:warning-alt"
       :text="errorMessage"
       retry-text="重试"
       @retry="retry"
@@ -363,6 +364,7 @@ onPullDownRefresh(async () => {
 
     <StateBlock
       v-else-if="!sessions.length"
+      icon="i-carbon:search"
       text="该时间范围内没有会话"
       hint="换个时间范围看看，或在 IDE 里发起一次请求。"
     />

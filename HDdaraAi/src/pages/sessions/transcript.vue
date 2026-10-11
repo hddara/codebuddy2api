@@ -141,6 +141,7 @@ onLoad((query) => {
     <StateBlock
       v-else-if="errorMessage"
       tone="danger"
+      icon="i-carbon:warning-alt"
       :text="errorMessage"
       hint="记录可能已被裁剪，或该会话不再保留这么久的问答。"
     />
@@ -174,7 +175,8 @@ onLoad((query) => {
         <view class="card-head">
           <text class="card-title">回答</text>
           <button v-if="entry.answer" class="card-action" @tap="copyAnswer">
-            复制
+            <view class="card-action-icon i-carbon:copy" />
+            <text>复制</text>
           </button>
         </view>
 
@@ -264,18 +266,27 @@ onLoad((query) => {
 }
 
 .card-action {
-  font-size: $font-meta;
-  color: $color-primary;
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 6rpx;
   width: auto;
   margin: 0;
   padding: 4rpx 12rpx;
+  font-size: $font-meta;
+  color: $color-primary;
   line-height: 1.5;
   background-color: transparent;
 }
 
 .card-action::after {
   border: none;
+}
+
+/* Sized to the label's cap height rather than the line box, so the icon and the
+   text share a baseline instead of the icon floating above it. */
+.card-action-icon {
+  width: 26rpx;
+  height: 26rpx;
 }
 
 /* One class for both question and answer now that both are rendered HTML. */

@@ -887,6 +887,7 @@ onUnload(() => {
 
     <StateBlock
       v-else-if="turns.length === 0"
+      icon="i-carbon:activity"
       text="该会话当前没有正在进行的输出。"
       hint="在下方提问，或在 IDE 里发起请求后会实时出现在这里。"
     />

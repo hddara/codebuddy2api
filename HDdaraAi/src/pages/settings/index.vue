@@ -318,10 +318,18 @@ onShow(() => {
 
     <view class="status">
       <text>当前状态：{{ auth.hasCredentials ? '已配置' : '未配置' }}</text>
-      <text v-if="saved" class="status-saved">{{ persistStatus || '已保存' }}</text>
+      <!-- The tick carries the "it worked" reading on its own, so the state is
+           legible without parsing the sentence beside it. -->
+      <view v-if="saved" class="status-saved">
+        <view class="status-icon i-carbon:checkmark" />
+        <text>{{ persistStatus || '已保存' }}</text>
+      </view>
     </view>
     <view v-if="storageProbe" class="status">
-      <text class="status-saved">{{ storageProbe }}</text>
+      <view class="status-saved">
+        <view class="status-icon i-carbon:checkmark" />
+        <text>{{ storageProbe }}</text>
+      </view>
     </view>
 
     <view class="section">
@@ -475,7 +483,15 @@ onShow(() => {
 }
 
 .status-saved {
+  display: flex;
+  align-items: center;
+  gap: 6rpx;
   color: $color-success;
+}
+
+.status-icon {
+  width: 26rpx;
+  height: 26rpx;
 }
 
 .about {

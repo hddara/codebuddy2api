@@ -13,6 +13,7 @@ import {
 
 } from '@/utils/biometric'
 import { isAuthError } from '@/utils/errors'
+import { consumePendingRoute } from '@/utils/launch-route'
 
 definePage({
   name: 'login',
@@ -253,9 +254,14 @@ function enterApp() {
   // Marks this launch as unlocked, which is what the page guards check.
   auth.unlock()
 
+  // A launch that named a destination is honoured here — after the unlock, not
+  // before it. Claiming clears it, so this cannot send a later unlock back to
+  // the same page.
+  const requested = consumePendingRoute()
+
   // `reLaunch` rather than `navigateTo`: the lock screen must not stay on the
   // stack, or "back" would return to it while the session is live.
-  uni.reLaunch({ url: '/pages/sessions/index' })
+  uni.reLaunch({ url: requested ? `/${requested}` : '/pages/sessions/index' })
 }
 
 function toggleCookieVisible() {

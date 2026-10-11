@@ -2,8 +2,9 @@
 import { onHide, onLaunch, onShow } from '@dcloudio/uni-app'
 
 import { useAuthStore } from '@/store/authStore'
+import { setPendingRoute, takeLaunchRoute } from '@/utils/launch-route'
 
-onLaunch(() => {
+onLaunch((options) => {
   const auth = useAuthStore()
 
   // Restore the gateway origin so requests work before any page mounts.
@@ -14,6 +15,12 @@ onLaunch(() => {
   // The persisted snapshot is assigned straight onto the store state, so the
   // derived `isLoggedIn` flag has to be recomputed here.
   auth.syncLoginState()
+
+  // Where the launch asked to go, if it asked. Recorded rather than navigated
+  // to: the lock screen is the entry point and the app must establish who the
+  // user is before it shows anything, so the destination waits for the unlock
+  // instead of routing around it. See `launch-route.ts`.
+  setPendingRoute(takeLaunchRoute(options))
 })
 
 /**
