@@ -35,6 +35,7 @@ export const GET = async (request: Request): Promise<Response> => {
       [
         'lastActiveAt',
         'conversationId',
+        'title',
         'key',
         'models',
         'calls',
@@ -44,6 +45,7 @@ export const GET = async (request: Request): Promise<Response> => {
         [
           session.lastActiveAt,
           session.conversationId,
+          session.title || '-',
           session.accessKeyName ?? session.accessKeyId ?? '-',
           session.models.join(','),
           String(session.callCount),

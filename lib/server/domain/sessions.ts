@@ -1,4 +1,5 @@
 import { getStorageBackendMeta } from '../storage';
+import { listSessionTitles, type SessionTitleSource } from './session-titles';
 import { listUsageEventsSince, type UsageEventRecord } from './usage';
 
 /**
@@ -26,6 +27,16 @@ export interface SessionSummary {
   outputTokens: number;
   /** Distinct routes the conversation used (`/v1/chat/completions`, ...). */
   routes: string[];
+  /**
+   * Readable name for the conversation, when one has been recorded.
+   *
+   * Absent for conversations the gateway saw before titles existed, and for
+   * those whose first question produced nothing usable — a client should fall
+   * back to the shortened id rather than show an empty label.
+   */
+  title?: string;
+  /** How the title was obtained, so a UI can mark user-chosen names. */
+  titleSource?: SessionTitleSource;
   totalTokens: number;
 }
 
@@ -159,6 +170,43 @@ export const normalizeSessionWindowMinutes = (value: unknown): number => {
   return Math.min(Math.floor(parsed), MAX_SESSION_WINDOW_MINUTES);
 };
 
+/**
+ * Copies stored titles onto the grouped sessions.
+ *
+ * A separate step from the grouping because the two read different stores, and
+ * a listing must still render if the title store is unreadable — an unnamed
+ * conversation is a small inconvenience, while a failed listing is a broken
+ * page.
+ */
+const attachSessionTitles = async (
+  summary: SessionListResponse,
+): Promise<SessionListResponse> => {
+  let titles: Awaited<ReturnType<typeof listSessionTitles>>;
+
+  try {
+    titles = await listSessionTitles();
+  } catch {
+    return summary;
+  }
+
+  return {
+    ...summary,
+    sessions: summary.sessions.map((session) => {
+      const record = titles[session.conversationId];
+
+      if (!record) {
+        return session;
+      }
+
+      return {
+        ...session,
+        title: record.title,
+        titleSource: record.source,
+      };
+    }),
+  };
+};
+
 export const getSessionSummaries = async ({
   windowMinutes = DEFAULT_SESSION_WINDOW_MINUTES,
 }: { windowMinutes?: number } = {}): Promise<SessionListResponse> => {
@@ -177,6 +225,11 @@ export const getSessionSummaries = async ({
 
   const since = new Date(Date.now() - normalizedWindow * 60 * 1000);
   const events = await listUsageEventsSince(since);
+  const summary = summarizeSessions(events, {
+    windowMinutes: normalizedWindow,
+  });
 
-  return summarizeSessions(events, { windowMinutes: normalizedWindow });
+  // Attached after the pure grouping rather than inside it: `summarizeSessions`
+  // stays a pure function of its events, and titles live in their own store.
+  return attachSessionTitles(summary);
 };
