@@ -32,6 +32,11 @@ const vitestConfig = defineConfig({
       '**/node_modules/**',
       'dist/**',
       'e2e/**',
+      // The App has its own runner and its own `@` alias. Discovered from here
+      // its imports do not resolve (the alias points at this package's root),
+      // so every one of its files fails to load — a wall of red that has nothing
+      // to do with the server and still fails the run.
+      'HDdaraAi/**',
       'node_modules/**',
     ],
     coverage: {
