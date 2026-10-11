@@ -1,53 +1,84 @@
 /**
- * Design tokens.
+ * Design tokens — the single source of truth for every visual decision.
  *
- * Why this exists: every page used to hard-code the same colours and radii in its
- * own `<style scoped>` block — `#f5f6f8` for the page background appeared in all
- * six, and the card radius disagreed (20rpx everywhere except the login card at
- * 24rpx). Changing the accent meant finding every literal.
+ * Structure follows the design spec (docs/design-spec.md), section 7:
+ *   tokens → primitives → composites → pages
  *
- * Variables rather than UnoCSS theme entries: the pages style themselves through
- * scoped CSS in rpx, and `var()` works in both the App webview and the H5 build.
- * The same values are mirrored into `uno.config.ts` for the places that do use
- * utility classes.
+ * Pages must not contain colour, radius, spacing or font literals. The two
+ * pages that used to (login, settings) were the reason a card corner could be
+ * 20rpx in one place and 24rpx in another: nobody notices a drift until it is
+ * looked for.
+ *
+ * Variables rather than UnoCSS theme entries alone: pages style themselves
+ * through scoped CSS in rpx, and `var()` works in both the App webview and the
+ * H5 build. `uno.config.ts` consumes this file directly, so the two can no
+ * longer disagree.
+ *
+ * Naming is by ROLE, never by appearance (`text-secondary`, not `gray-400`):
+ * renaming a variable should never be needed to change its colour.
  */
 
-/* Surfaces */
+/* --------------------------------------------------------------------------
+ * Surfaces — hierarchy comes from a light/dark value step, not from shadows.
+ * Page and card must stay visibly different; these two are the whole system.
+ * ------------------------------------------------------------------------ */
 $color-page: #f5f6f8;
 $color-surface: #ffffff;
 $color-surface-sunken: #f5f6f8;
 $color-border: #e6e8eb;
 $color-border-strong: #f0f1f3;
 
-/* Text */
+/* --------------------------------------------------------------------------
+ * Text — three semantic levels (spec 2.2). `faint` exists only for dividers
+ * and disabled glyphs; it is not a fourth body level.
+ * ------------------------------------------------------------------------ */
 $color-text: #1f2329;
 $color-text-secondary: #4a4f57;
 $color-text-muted: #8a8f99;
 $color-text-faint: #a8adb5;
 
-/* Accent and status */
+/* --------------------------------------------------------------------------
+ * Brand and interaction
+ * ------------------------------------------------------------------------ */
 $color-primary: #0a84ff;
 $color-primary-active: #0060df;
+$color-primary-surface: #eef5ff;
 $color-primary-disabled: #b9d4f5;
+
+/* --------------------------------------------------------------------------
+ * Semantic status (spec 2.3.2) — one meaning, one colour, everywhere.
+ * Each has a `-surface` companion so a pill keeps readable contrast.
+ * ------------------------------------------------------------------------ */
 $color-success: #22a06b;
+$color-success-surface: #e8f6ef;
 $color-danger: #cf1322;
 $color-danger-surface: #fff1f0;
 $color-warning: #d48806;
+$color-warning-surface: #fff7e6;
+$color-neutral: #6b7280;
+$color-neutral-surface: #f0f1f3;
 
-/* Radii */
+/* Shape scale (spec 2.4) — radii are per ROLE and must not drift. */
 $radius-card: 20rpx;
 $radius-control: 16rpx;
 $radius-pill: 999rpx;
 
-/* Spacing */
+/* Spacing scale (spec 2.5) — three roles, stable ratio between them. */
 $gap-page: 24rpx;
 $gap-section: 20rpx;
 $gap-inline: 12rpx;
 
-/* Type scale. Kept to a small set so sizes stop drifting per page. */
+/**
+ * Type scale. Six steps, each a visible step from its neighbour in size AND
+ * weight — a 1rpx difference reads as a mistake rather than a hierarchy.
+ */
 $font-title: 34rpx;
 $font-section: 28rpx;
 $font-body: 27rpx;
 $font-label: 26rpx;
 $font-meta: 24rpx;
 $font-micro: 22rpx;
+
+/* Control sizing (spec 3.5.1) — one height per control role. */
+$height-control: 88rpx;
+$height-control-compact: 64rpx;

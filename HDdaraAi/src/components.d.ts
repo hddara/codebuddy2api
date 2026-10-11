@@ -7,6 +7,11 @@ export {}
 
 declare module 'vue' {
   export interface GlobalComponents {
+    AppButton: typeof import('./components/AppButton.vue')['default']
+    AppCard: typeof import('./components/AppCard.vue')['default']
+    AppSkeleton: typeof import('./components/AppSkeleton.vue')['default']
     StateBlock: typeof import('./components/StateBlock.vue')['default']
+    StatusTag: typeof import('./components/StatusTag.vue')['default']
+    WdTextarea: typeof import('wot-design-uni/components/wd-textarea/wd-textarea.vue')['default']
   }
 }

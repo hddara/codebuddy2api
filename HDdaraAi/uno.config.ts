@@ -1,3 +1,7 @@
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import { presetUni } from '@uni-helper/unocss-preset-uni'
 import {
   defineConfig,
@@ -5,6 +9,32 @@ import {
   transformerDirectives,
   transformerVariantGroup,
 } from 'unocss'
+
+/**
+ * Pulls the palette out of `src/styles/tokens.scss` so there is exactly one
+ * place a colour is written down.
+ *
+ * The two used to be maintained by hand and drifted: an accent change meant
+ * editing both files and there was nothing to make you notice if you forgot.
+ * Reading the SCSS directly makes the mirror impossible to get wrong.
+ */
+function readTokenColors(): Record<string, string> {
+  const here = dirname(fileURLToPath(import.meta.url))
+  const scss = readFileSync(resolve(here, 'src/styles/tokens.scss'), 'utf8')
+  const palette: Record<string, string> = {}
+
+  for (const match of scss.matchAll(/^\$color-([a-z-]+):\s*(#[0-9a-fA-F]{3,8});/gm)) {
+    const [, name, value] = match
+
+    // `primary-active` becomes `primaryActive`: utility class names cannot carry
+    // a dash inside a colour key without being split as a variant.
+    const key = name.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase())
+
+    palette[key] = value
+  }
+
+  return palette
+}
 
 /**
  * UnoCSS configuration.
@@ -43,11 +73,7 @@ export default defineConfig({
   ],
   transformers: [transformerDirectives(), transformerVariantGroup()],
   theme: {
-    colors: {
-      primary: '#0A84FF',
-      success: '#22A06B',
-      danger: '#CF1322',
-    },
+    colors: readTokenColors(),
   },
   shortcuts: {
     // presetUni maps text-N to N x 8rpx, so `text-2` is ~16rpx and unreadable on

@@ -50,7 +50,7 @@ export default defineManifestConfig({
         // the unlock screen to work at all on Face ID devices.
         privacyDescription: {
           NSFaceIDUsageDescription:
-            '用于快速解锁 HDdaraAI，验证后才能查看你的会话数据。',
+            '用于快速解锁 HDdaraAi，验证后才能查看你的会话数据。',
         },
       },
       sdkConfigs: {},

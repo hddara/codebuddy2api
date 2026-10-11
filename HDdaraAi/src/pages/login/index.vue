@@ -136,7 +136,7 @@ async function unlock() {
   errorMessage.value = ''
   statusText.value = '正在验证…'
 
-  const result = await authenticateBiometric('验证身份以进入 HDdaraAI')
+  const result = await authenticateBiometric('验证身份以进入 HDdaraAi')
 
   if (!result.ok) {
     busy.value = false
@@ -391,7 +391,7 @@ function toggleBiometric() {
           <view class="brand-line brand-line-2" />
         </view>
       </view>
-      <text class="brand-name">HDdaraAI</text>
+      <text class="brand-name">HDdaraAi</text>
       <text class="brand-sub">查看 AI 会话状态</text>
     </view>
 
@@ -536,12 +536,14 @@ function toggleBiometric() {
   </view>
 </template>
 
-<style scoped>
+<style scoped lang="scss">
+@use '@/styles/tokens.scss' as *;
+
 .page {
   min-height: 100vh;
   padding: 120rpx 48rpx 60rpx;
   box-sizing: border-box;
-  background-color: #f5f6f8;
+  background-color: $color-page;
 }
 
 .brand {
@@ -560,14 +562,16 @@ function toggleBiometric() {
   align-items: center;
   justify-content: center;
   border-radius: 32rpx;
+  /* The one place a gradient is allowed: this is the brand mark itself, the
+     same artwork that ships as the app icon (design spec 2.3.4). */
   background: linear-gradient(160deg, #0a84ff, #005cd6);
 }
 
 .brand-bubble {
   width: 68rpx;
   padding: 16rpx 14rpx 22rpx;
-  border-radius: 16rpx;
-  background-color: #ffffff;
+  border-radius: $radius-control;
+  background-color: $color-surface;
   display: flex;
   flex-direction: column;
   gap: 8rpx;
@@ -576,7 +580,7 @@ function toggleBiometric() {
 .brand-line {
   height: 8rpx;
   border-radius: 4rpx;
-  background-color: #0a84ff;
+  background-color: $color-primary;
 }
 
 .brand-line-1 {
@@ -591,33 +595,33 @@ function toggleBiometric() {
   margin-top: 24rpx;
   font-size: 40rpx;
   font-weight: 600;
-  color: #1f2329;
+  color: $color-text;
 }
 
 .brand-sub {
   margin-top: 8rpx;
-  font-size: 25rpx;
-  color: #8a8f99;
+  font-size: $font-meta;
+  color: $color-text-muted;
 }
 
 .card {
   padding: 36rpx 32rpx;
-  border-radius: 24rpx;
-  background-color: #ffffff;
+  border-radius: $radius-card;
+  background-color: $color-surface;
 }
 
 .card-title {
   display: block;
-  font-size: 34rpx;
+  font-size: $font-title;
   font-weight: 600;
-  color: #1f2329;
+  color: $color-text;
 }
 
 .card-hint {
   display: block;
   margin-top: 10rpx;
-  font-size: 24rpx;
-  color: #8a8f99;
+  font-size: $font-meta;
+  color: $color-text-muted;
   line-height: 1.65;
 }
 
@@ -626,13 +630,13 @@ function toggleBiometric() {
 .switch-row {
   display: flex;
   align-items: center;
-  gap: 20rpx;
+  gap: $gap-section;
   width: 100%;
   margin: 32rpx 0 0;
-  padding: 24rpx 0;
+  padding: $gap-page 0;
   border: none;
-  border-top: 1rpx solid #f0f1f3;
-  border-bottom: 1rpx solid #f0f1f3;
+  border-top: 1rpx solid $color-border-strong;
+  border-bottom: 1rpx solid $color-border-strong;
   border-radius: 0;
   background-color: transparent;
   line-height: normal;
@@ -650,15 +654,15 @@ function toggleBiometric() {
 
 .switch-label {
   display: block;
-  font-size: 28rpx;
-  color: #1f2329;
+  font-size: $font-section;
+  color: $color-text;
 }
 
 .switch-hint {
   display: block;
   margin-top: 6rpx;
-  font-size: 22rpx;
-  color: #a8adb5;
+  font-size: $font-micro;
+  color: $color-text-faint;
   line-height: 1.55;
 }
 
@@ -671,19 +675,19 @@ function toggleBiometric() {
   padding: 4rpx;
   box-sizing: border-box;
   border-radius: 26rpx;
-  background-color: #d8dbe0;
+  background-color: $color-border;
   transition: background-color 0.18s ease;
 }
 
 .switch-on {
-  background-color: #0a84ff;
+  background-color: $color-primary;
 }
 
 .switch-knob {
   width: 44rpx;
   height: 44rpx;
   border-radius: 50%;
-  background-color: #ffffff;
+  background-color: $color-surface;
   transition: transform 0.18s ease;
 }
 
@@ -703,14 +707,14 @@ function toggleBiometric() {
 
 .field-label {
   display: block;
-  margin-bottom: 12rpx;
-  font-size: 26rpx;
-  color: #4a4f57;
+  margin-bottom: $gap-inline;
+  font-size: $font-label;
+  color: $color-text-secondary;
 }
 
 .field-toggle {
-  font-size: 24rpx;
-  color: #0a84ff;
+  font-size: $font-meta;
+  color: $color-primary;
   display: inline-block;
   width: auto;
   margin: 0;
@@ -725,60 +729,63 @@ function toggleBiometric() {
 
 .input {
   width: 100%;
-  height: 88rpx;
+  height: $height-control;
   padding: 0 22rpx;
   box-sizing: border-box;
-  border-radius: 16rpx;
-  background-color: #f5f6f8;
-  font-size: 27rpx;
-  color: #1f2329;
+  border-radius: $radius-control;
+  background-color: $color-surface-sunken;
+  font-size: $font-body;
+  color: $color-text;
 }
 
 .error {
-  margin-top: 24rpx;
-  padding: 18rpx 20rpx;
-  border-radius: 14rpx;
-  background-color: #fff1f0;
-  font-size: 25rpx;
-  color: #cf1322;
+  margin-top: $gap-page;
+  padding: 18rpx $gap-section;
+  border-radius: $radius-control;
+  background-color: $color-danger-surface;
+  font-size: $font-label;
+  color: $color-danger;
   line-height: 1.6;
 }
 
 .status {
-  margin-top: 24rpx;
-  font-size: 25rpx;
-  color: #8a8f99;
+  margin-top: $gap-page;
+  font-size: $font-label;
+  color: $color-text-muted;
 }
 
+/* The page's one primary action. Everything below is secondary by design
+   (design spec 3.1.2) — two solid buttons would make the user read the labels
+   to find out which one they came here for. */
 .primary {
   margin-top: 36rpx;
-  height: 92rpx;
-  line-height: 92rpx;
-  border-radius: 18rpx;
-  background-color: #0a84ff;
-  color: #ffffff;
-  font-size: 30rpx;
+  height: $height-control;
+  line-height: $height-control;
+  border-radius: $radius-control;
+  background-color: $color-primary;
+  color: $color-surface;
+  font-size: $font-section;
 }
 
 .primary[disabled] {
-  background-color: #b9d4f5;
-  color: #ffffff;
+  background-color: $color-primary-disabled;
+  color: $color-surface;
 }
 
 .ghost {
-  margin-top: 20rpx;
-  height: 88rpx;
-  line-height: 88rpx;
-  border-radius: 18rpx;
-  background-color: #f5f6f8;
-  color: #4a4f57;
-  font-size: 28rpx;
+  margin-top: $gap-section;
+  height: $height-control;
+  line-height: $height-control;
+  border-radius: $radius-control;
+  background-color: $color-surface-sunken;
+  color: $color-text-secondary;
+  font-size: $font-section;
 }
 
 .footnote {
   margin-top: 40rpx;
-  font-size: 22rpx;
-  color: #a8adb5;
+  font-size: $font-micro;
+  color: $color-text-faint;
   text-align: center;
   line-height: 1.7;
 }

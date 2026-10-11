@@ -148,9 +148,9 @@ onLoad((query) => {
     <template v-else-if="entry">
       <view class="meta">
         <text class="meta-time">{{ formatDateTime(entry.completedAt) }}</text>
-        <text class="meta-status" :class="[`status-${entry.status}`]">
+        <StatusTag :tone="entry.status === 'failed' ? 'danger' : 'success'">
           {{ entry.status === 'failed' ? '失败' : '完成' }}
-        </text>
+        </StatusTag>
         <text v-if="entry.model" class="meta-model">{{ entry.model }}</text>
       </view>
 
@@ -159,9 +159,15 @@ onLoad((query) => {
           <text class="card-title">提问</text>
         </view>
         <rich-text v-if="questionHtml" class="rich" :nodes="questionHtml" />
-        <text v-else class="muted">
-          （这条记录没有捕获到提问文本）
-        </text>
+        <!-- `plain` because it already sits inside a card: a second white
+             surface would read as a nested panel. Going through StateBlock
+             keeps empty text the same shape as every other empty state. -->
+        <StateBlock
+          v-else
+          variant="plain"
+          text="这条记录没有捕获到提问文本"
+          hint="早期记录只存了回答，提问是在之后的版本里才开始提取的。"
+        />
       </view>
 
       <view class="card">
@@ -183,9 +189,12 @@ onLoad((query) => {
         />
 
         <rich-text v-else-if="answerHtml" class="rich" :nodes="answerHtml" />
-        <text v-else class="muted">
-          （没有回答内容）
-        </text>
+        <StateBlock
+          v-else
+          variant="plain"
+          text="这一轮没有回答内容"
+          hint="问题已记录，但网关没有转发回文本。"
+        />
       </view>
 
       <!-- The question is counted after extraction, not from `questionChars`:
@@ -216,12 +225,6 @@ onLoad((query) => {
   background-color: $color-page;
 }
 
-.muted {
-  font-size: $font-label;
-  color: $color-text-muted;
-  line-height: 1.8;
-}
-
 .meta {
   display: flex;
   align-items: center;
@@ -232,18 +235,6 @@ onLoad((query) => {
 .meta-time {
   font-size: $font-meta;
   color: $color-text-muted;
-}
-
-.meta-status {
-  font-size: $font-meta;
-}
-
-.status-completed {
-  color: $color-success;
-}
-
-.status-failed {
-  color: $color-danger;
 }
 
 .meta-model {
@@ -308,7 +299,7 @@ onLoad((query) => {
   line-height: 88rpx;
   border-radius: $radius-control;
   background-color: $color-primary;
-  color: #ffffff;
+  color: $color-surface;
   font-size: $font-section;
 }
 </style>

@@ -345,33 +345,35 @@ onShow(() => {
   </view>
 </template>
 
-<style scoped>
+<style scoped lang="scss">
+@use '@/styles/tokens.scss' as *;
+
 .page {
   min-height: 100vh;
-  background-color: #f5f6f8;
-  padding: 24rpx;
+  background-color: $color-page;
+  padding: $gap-page;
   box-sizing: border-box;
 }
 
 .section {
-  margin-bottom: 24rpx;
-  padding: 24rpx;
-  border-radius: 20rpx;
-  background-color: #ffffff;
+  margin-bottom: $gap-page;
+  padding: $gap-page;
+  border-radius: $radius-card;
+  background-color: $color-surface;
 }
 
 .section-title {
   display: block;
-  font-size: 28rpx;
+  font-size: $font-section;
   font-weight: 600;
-  color: #1f2329;
-  margin-bottom: 12rpx;
+  color: $color-text;
+  margin-bottom: $gap-inline;
 }
 
 .section-hint {
   display: block;
-  font-size: 24rpx;
-  color: #8a8f99;
+  font-size: $font-meta;
+  color: $color-text-muted;
   line-height: 1.6;
   margin-bottom: 16rpx;
 }
@@ -383,13 +385,13 @@ onShow(() => {
 
 .input {
   width: 100%;
-  height: 80rpx;
+  height: $height-control;
   padding: 0 20rpx;
   box-sizing: border-box;
-  border-radius: 14rpx;
-  background-color: #f5f6f8;
-  font-size: 26rpx;
-  color: #1f2329;
+  border-radius: $radius-control;
+  background-color: $color-surface-sunken;
+  font-size: $font-label;
+  color: $color-text;
 }
 
 /* 标题与「显示/隐藏」同排；标题原有的下间距在这里由容器承担。 */
@@ -397,7 +399,7 @@ onShow(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12rpx;
+  margin-bottom: $gap-inline;
 }
 
 .section-head .section-title {
@@ -405,8 +407,8 @@ onShow(() => {
 }
 
 .section-toggle {
-  font-size: 24rpx;
-  color: #0a84ff;
+  font-size: $font-meta;
+  color: $color-primary;
   display: inline-block;
   width: auto;
   margin: 0;
@@ -421,76 +423,79 @@ onShow(() => {
 
 .actions {
   display: flex;
-  gap: 20rpx;
+  gap: $gap-section;
   margin-top: 8rpx;
 }
 
+/* `.ghost` sits next to it, so only one of the pair is solid (spec 3.1.2). */
 .primary {
   flex: 1;
-  background-color: #0a84ff;
-  color: #ffffff;
-  font-size: 28rpx;
-  border-radius: 14rpx;
+  background-color: $color-primary;
+  color: $color-surface;
+  font-size: $font-section;
+  border-radius: $radius-control;
 }
 
 /* Dimmed rather than merely inert, so the state is visible before the tap. */
 .primary[disabled] {
-  background-color: #b9d4f5;
-  color: #ffffff;
+  background-color: $color-primary-disabled;
+  color: $color-surface;
 }
 
 .ghost {
   flex: 1;
-  background-color: #ffffff;
-  color: #4a4f57;
-  font-size: 28rpx;
-  border-radius: 14rpx;
+  background-color: $color-surface;
+  color: $color-text-secondary;
+  font-size: $font-section;
+  border-radius: $radius-control;
+  border: 1rpx solid $color-border;
 }
 
 /* Destructive: white surface with red text, so it cannot be mistaken for the
    primary action it sits near. */
 .danger {
   width: 100%;
-  background-color: #ffffff;
-  color: #cf1322;
-  font-size: 28rpx;
-  border-radius: 14rpx;
+  background-color: $color-surface;
+  color: $color-danger;
+  font-size: $font-section;
+  border-radius: $radius-control;
+  border: 1rpx solid $color-border;
 }
 
 .danger[disabled] {
-  color: #e8a0a0;
+  color: $color-text-faint;
 }
 
 .status {
   display: flex;
   justify-content: space-between;
-  padding: 24rpx 8rpx;
-  font-size: 24rpx;
-  color: #8a8f99;
+  padding: $gap-page 8rpx;
+  font-size: $font-meta;
+  color: $color-text-muted;
 }
 
 .status-saved {
-  color: #22a06b;
+  color: $color-success;
 }
 
 .about {
   margin-top: 40rpx;
-  padding: 24rpx;
-  border-radius: 20rpx;
-  background-color: #ffffff;
+  padding: $gap-page;
+  border-radius: $radius-card;
+  background-color: $color-surface;
 }
 
 .about-title {
   display: block;
-  font-size: 26rpx;
+  font-size: $font-label;
   font-weight: 600;
-  color: #1f2329;
+  color: $color-text;
   margin-bottom: 10rpx;
 }
 
 .about-text {
-  font-size: 24rpx;
-  color: #8a8f99;
+  font-size: $font-meta;
+  color: $color-text-muted;
   line-height: 1.7;
 }
 </style>

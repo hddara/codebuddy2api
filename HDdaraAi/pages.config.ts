@@ -38,11 +38,20 @@ export default defineUniPages({
       },
     },
     {
-      // Holds the conversation overview: both the live reply and the stored
-      // turns are entries from here, not content rendered in place.
+      // Holds the live reply and the composer.
+      //
+      // `softinputMode: adjustResize` is what makes the composer usable: the
+      // input bar is `position: fixed; bottom: 0`, and the App runtime's default
+      // (`adjustPan`) leaves the webview viewport alone while the native keyboard
+      // covers the bottom of the screen — so the input the user just tapped was
+      // hidden behind the keyboard. `adjustResize` shrinks the viewport instead,
+      // which lifts a bottom-anchored element with it.
       path: 'pages/sessions/live',
       style: {
-        navigationBarTitleText: '实时回复',
+        'navigationBarTitleText': '实时回复',
+        'app-plus': {
+          softinputMode: 'adjustResize',
+        },
       },
     },
     {
