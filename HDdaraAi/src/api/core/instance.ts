@@ -4,7 +4,7 @@ import { createAlova } from 'alova'
 import vueHook from 'alova/vue'
 import { ADMIN_COOKIE_NAME, useAuthStore } from '@/store/authStore'
 import { getAppVersion, getAppVersionCode, getDeviceInfo, getPlatformType } from '@/utils/app-info'
-import { getApiBaseUrl, isNgrokBaseUrl, resolveApiBaseUrl } from './base-url'
+import { getApiBaseUrl, resolveApiBaseUrl, transportHeaders } from './base-url'
 import { handleAlovaError, handleAlovaResponse } from './handlers'
 
 /**
@@ -84,10 +84,10 @@ export const alovaInstance = createAlova({
     if (runtimeBase) {
       method.baseURL = runtimeBase
     }
-    // ngrok 免费隧道会给浏览器 UA 返回 HTML 插页，必须带此头才能拿到真实 JSON
-    if (isNgrokBaseUrl(runtimeBase)) {
-      method.config.headers['ngrok-skip-browser-warning'] = '1'
-    }
+    // Whatever the transport needs for this origin — the tunnel interstitial
+    // header, and nothing else today. Shared with the probe so the two cannot
+    // disagree about what a request to this origin carries.
+    Object.assign(method.config.headers, transportHeaders(runtimeBase))
 
     // Add content type for POST/PUT/PATCH requests
     // 上传请求（requestType=upload）走 uni.uploadFile，Content-Type 必须保持 multipart/form-data 由平台自动生成，

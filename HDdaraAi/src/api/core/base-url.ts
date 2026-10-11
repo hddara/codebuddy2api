@@ -116,6 +116,24 @@ export function isNgrokBaseUrl(url: string = getApiBaseUrl()): boolean {
 }
 
 /**
+ * Headers a request to `base` must carry, beyond whatever the caller sets.
+ *
+ * One place decides this so a probe and a business request cannot disagree about
+ * what "reachable" means. They did: the probe sent the tunnel header
+ * unconditionally while requests sent it only to a tunnel, so a gateway that
+ * rejected the unknown header would be judged dead by the probe while its
+ * actual requests went through — and the app would quietly fall back to another
+ * origin, with nothing on screen connecting the two.
+ *
+ * The header itself exists because ngrok's free tier answers a browser user
+ * agent with an HTML interstitial instead of the JSON; sending it to a gateway
+ * that is not a tunnel is at best noise and at worst a rejected preflight.
+ */
+export function transportHeaders(base: string): Record<string, string> {
+  return isNgrokBaseUrl(base) ? { 'ngrok-skip-browser-warning': '1' } : {}
+}
+
+/**
  * 冷启动选路：
  *  1. 每次冷启动都拉一次远端配置（短超时，失败退回本地副本）——这是「后台改完配置能生效」的关键；
  *  2. 本地基址仍在配置列表里 → **校验通过才复用**（避免把已失效节点反复固化到每次启动）；
@@ -657,7 +675,9 @@ function probe(base: string, probePath: string, timeout: number): Promise<string
       url: `${base}${probePath}${probePath.includes('?') ? '&' : '?'}_probe=${Date.now()}`,
       method: 'GET',
       timeout,
-      header: { 'ngrok-skip-browser-warning': '1' },
+      // The probe exists to answer "would a real request work here?", so it
+      // carries exactly what a real request would — see `transportHeaders`.
+      header: transportHeaders(base),
       success: (res: any) => {
         // `res.data` is not guaranteed to be an object: the App runtime hands
         // back the raw body as a string unless the response declares JSON in a
