@@ -69,6 +69,23 @@ case "$_XC_VER" in
 esac
 
 echo "== [1/3] 同步前端资源 =="
+
+# `control.xml` 决定壳启动时去 `Pandora/apps/<appid>/www` 加载哪个应用。
+#
+# 壳工程是从 mall 克隆的，它的 `control.xml` 里一直写着 mall 的 appid
+# (`__UNI__1CBF901`) —— 于是壳去找一个并不存在的资源目录，结果是：App 正常
+# 启动、状态栏正常，**但内容区全白且 JS 一行都不执行**（不是崩溃，所以看不到
+# 任何报错，只能靠截图发现）。这个值必须跟着 `$APPID` 走。
+CONTROL_XML="$APP_SRC/control.xml"
+if [ -f "$CONTROL_XML" ]; then
+  if ! grep -q "appid=\"$APPID\"" "$CONTROL_XML"; then
+    echo "   修正 control.xml 的 appid → $APPID（原为 $(grep -o 'appid="[^"]*"' "$CONTROL_XML" | head -1)）"
+    perl -i -pe "s/appid=\"[^\"]*\"/appid=\"$APPID\"/" "$CONTROL_XML"
+  fi
+else
+  echo "   [警告] 未找到 $CONTROL_XML，壳可能加载不到应用资源"
+fi
+
 if [ -d "$RES_SRC" ]; then
   mkdir -p "$WWW"
   rsync -a --delete "$RES_SRC/" "$WWW/"
@@ -76,6 +93,23 @@ if [ -d "$RES_SRC" ]; then
 else
   echo "   [警告] 未找到 ${RES_SRC}，沿用工程内现有资源"
   echo "   请先在 mall-app-ui 执行: env -u NODE_OPTIONS UNI_INPUT_DIR=\$PWD/src VITE_ROOT_DIR=\$PWD npx uni build -p app --mode development"
+fi
+
+# 只允许本项目的 appid 目录存在。
+#
+# DCloud 离线 SDK 自带一个脚手架的 `__UNI__33C5XXX`（HelloUniapp2 示例，约 4 MB），
+# 它随壳工程一起初始化，而上面的 rsync 只同步 `$APPID` 那一个目录 —— 于是它会一直
+# 跟着打进 IPA，白白撑大包体，且没有任何提示。换机重建壳工程后还得再清一次，
+# 所以在这里做成常规步骤。
+APPS_DIR="$(dirname "$(dirname "$WWW")")"   # …/Pandora/apps
+if [ -d "$APPS_DIR" ]; then
+  for stale in "$APPS_DIR"/*; do
+    [ -d "$stale" ] || continue
+    if [ "$(basename "$stale")" != "$APPID" ]; then
+      echo "   清理非本项目的资源目录：$(basename "$stale")（$(du -sh "$stale" 2>/dev/null | cut -f1)）"
+      rm -rf "$stale"
+    fi
+  done
 fi
 
 echo "== [1.2/3] 生成品牌资产（App 图标 + 启动图）=="
@@ -205,6 +239,26 @@ else
   echo "   ⚠️  无法读取产物 Info.plist，跳过校验"
 fi
 rm -f "$_TMP_PLIST"
+
+# ---- [3.6/3] 产物校验：control.xml 的 appid 必须是本项目 ----
+#
+# 这是「白屏」的直接成因：壳按这个 appid 去 Pandora/apps/<appid>/www 找资源，
+# 写成别的 appid 就会加载到空目录 —— App 不崩、不报错，只是什么都不显示。
+# 值得在导出后**从 IPA 里再读一次**：源文件改对了不代表进包的那份也是对的。
+echo "== [3.6/3] 校验产物 control.xml =="
+_CONTROL="$(unzip -p "$IPA" "Payload/HBuilder.app/control.xml" 2>/dev/null || true)"
+if [ -n "$_CONTROL" ]; then
+  _IPA_APPID="$(printf '%s' "$_CONTROL" | grep -o 'appid="[^"]*"' | head -1)"
+  echo "   appid         = $_IPA_APPID"
+  if printf '%s' "$_CONTROL" | grep -q "appid=\"$APPID\""; then
+    echo "   ✅ control.xml 指向本项目的资源目录"
+  else
+    echo "   ❌ 致命：control.xml 的 appid 不是 $APPID ⇒ 壳会加载空目录，App 打开后白屏"
+    exit 1
+  fi
+else
+  echo "   ⚠️  产物内没有 control.xml，壳可能加载不到应用资源"
+fi
 
 echo "== 完成 =="
 ls -la "$EXPORT_DIR"

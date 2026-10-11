@@ -3,6 +3,7 @@ import process from 'node:process'
 
 import uniPlugin from '@dcloudio/vite-plugin-uni'
 import UniComponents from '@uni-helper/vite-plugin-uni-components'
+import { WotResolver } from '@uni-helper/vite-plugin-uni-components/resolvers'
 import UniLayouts from '@uni-helper/vite-plugin-uni-layouts'
 import UniManifest from '@uni-helper/vite-plugin-uni-manifest'
 import UniPages from '@uni-helper/vite-plugin-uni-pages'
@@ -46,7 +47,19 @@ export default defineConfig(({ mode }) => {
       UniPages({ dts: 'src/uni-pages.d.ts' }),
       UniLayouts(),
       UniManifest(),
-      UniComponents({ dts: 'src/components.d.ts' }),
+      // `WotResolver` resolves `wd-*` tags to `wot-design-uni` components, so a
+      // page can use one without importing it. Added with the composer rewrite:
+      // a `wd-textarea` tag is an unknown element until something maps it, and
+      // uni-app renders unknown tags as empty boxes rather than failing loudly.
+      //
+      // `dirs` keeps the existing auto-import of this project's own components
+      // (StateBlock and friends) working; `directoryAsNamespace: false` preserves
+      // the flat tag names the pages already use.
+      UniComponents({
+        dts: 'src/components.d.ts',
+        resolvers: [WotResolver()],
+        dirs: ['src/components'],
+      }),
       AutoImport({
         dts: 'src/auto-imports.d.ts',
         imports: ['vue', 'pinia', 'uni-app'],

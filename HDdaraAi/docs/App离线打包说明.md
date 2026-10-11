@@ -293,65 +293,127 @@ unzip -l $APK | grep -oE "__UNI__[A-Z0-9]+" | sort -u      # 只应出现 __UNI_
 
 ---
 
-# 三、鸿蒙离线打包（**已确认阻塞在上游，2026-10-05**）
+# 三、鸿蒙离线打包（**2026-10-08 已打通编译**）
 
-## 3.1 已完成的准备工作（都做完了）
+> ⚠️ **本节曾于 2026-10-05 给出错误结论**（原文称「上游依赖自相矛盾，两边都出不了包」，
+> 并列出「钉回旧版 / 打 patch / 等上游」三条出路）。该结论**基于推断而非验证，已被推翻**。
+> 下面保留订正后的真实根因与结论。
 
-| 项 | 值 | 落盘位置 |
+## 3.1 真实根因：**缺两个鸿蒙平台包**（不是依赖矛盾）
+
+报错原文：
+
+```
+"isInSSRComponentSetup" is not exported by "vue/dist/vue.runtime.esm-bundler.js",
+imported by "@dcloudio/uni-app/dist/uni-app.es.js"
+```
+
+**报错出现在 `@dcloudio/uni-app`，但根因不在它。** 实测证据：
+
+| 对照项 | mall（鸿蒙跑得通） | HDdaraAi（原始） |
 |---|---|---|
-| HarmonyOS bundleName | `cn.hddara.ai` | `manifest.config.ts` → `app-harmony.distribute.bundleName` |
-| `vueVersion` | `'3'` | `manifest.config.ts`（**必须**，但**不是**「vue2 不支持」报错的真实原因，见 3.3） |
-| 工程覆盖 | `harmony-configs/`（AppScope 名称、entry 权限声明、build-profile.json5） | 项目根（`app_name` 已改 HDdaraAi；`signingConfigs` 已清空以走 unsigned） |
-| 配置文件改名 | `vite.config.mts` → **`vite.config.ts`**、`uno.config.mts` → **`uno.config.ts`** | 项目根 |
-| 包管理器 | 已切 **pnpm@9.9.0** + `.npmrc`（`shamefully-hoist=true` 等，从 mall 复刻） | 项目根 |
-| 构建工具 | DevEco Studio + HBuilderX CLI | 本机已装 |
+| `uni-app.es.js` 第 1 行 | `import { …, isInSSRComponentSetup, injectHook } from 'vue'` | **逐字节相同** |
+| `@dcloudio/uni-app-harmony` | ✅ 已装 | ❌ **缺失** |
+| `@dcloudio/uni-mp-harmony` | ✅ 已装 | ❌ **缺失** |
+| HBuilderX 编译结果 | ✅ 走到 `PackageHap` | ❌ 编译阶段即失败 |
 
-## 3.2 三次报错与处置
+两个项目的 `uni-app.es.js` **完全相同**（都引用了那两个符号），所以差别不在这个文件，
+而在**平台包是否安装**。缺平台包时，构建回退到通用 ESM 路径，从而撞上
+`vue.runtime.esm-bundler.js` 的严格导出检查（该入口不含 Vue 内部符号）。
 
-| # | 报错 | 真实原因 | 处置 |
-|---|---|---|---|
-| 1 | `目前 vue 2 项目尚不支持鸿蒙平台` | **不是** Vue 版本问题。HBuilderX 判定 CLI 项目 Vue 版本时要求项目根存在 **`vite.config.js` / `vite.config.ts`**；本项目用的是 `.mts`（mall 用 `.ts`） | ✅ 已改名 `.ts` |
-| 2 | `"isInSSRComponentSetup" is not exported by vue` | 该符号 Vue **3.5** 才引入，项目 pin 的是 `~3.4.38` | 试过升级，见下 |
-| 3 | 升 Vue 3.5 后 → `"normalizeCssVarValue" is not exported by @vue/shared` | `@dcloudio/*` 把 `@vue/shared` 钉在 `3.4.21` | 试过 `overrides` 统一，见下 |
+**关键对照实验**（同一命令、同一 HBuilderX、同一台机器）：
 
-## 3.3 关键结论：**上游依赖自相矛盾，两边都出不了包**
+```bash
+/Applications/HBuilderX.app/Contents/MacOS/cli launch app-harmony \
+  --project mall-app-ui --buildType release --compile true   # → PackageHap 通过
+/Applications/HBuilderX.app/Contents/MacOS/cli launch app-harmony \
+  --project HDdaraAi --buildType release --compile true      # → isInSSRComponentSetup 报错
+```
 
-三次尝试（Vue 3.5 单升 → `overrides` 统一 `@vue/*` → 切 **pnpm@9.9.0** 复刻 mall 的
-`shamefully-hoist=true` 链接方式）**都复现同一个错**，且最后做了逐字节对照：
+## 3.2 修复：安装两个平台包
 
-| 对照项 | mall | HDdaraAi |
+`.mts` → `.ts` 的改名（原文 3.2 第 1 条）是**有效**的，保留。在此之上补装：
+
+```bash
+cd HDdaraAi
+corepack pnpm add @dcloudio/uni-app-harmony@3.0.0-5020620260917001
+corepack pnpm add -D @dcloudio/uni-mp-harmony@3.0.0-5020620260917001
+```
+
+**版本号必须与其余 `@dcloudio/*` 一致**（`3.0.0-5020620260917001`，即 mall 在用的那版）。
+`uni-app-harmony` 装在 `dependencies`（mall 即如此），`uni-mp-harmony` 在 `devDependencies`。
+
+装完后**两条链路都通**：
+
+| 链路 | 命令 | 产物 |
 |---|---|---|
-| `@dcloudio/uni-app` 版本 | `3.0.0-5020620260917001` | 同 |
-| `uni-app.es.js` sha256 | `e074a2c1…12d0` | **完全相同** |
-| 该文件是否 import `isInSSRComponentSetup` | **是** | 是 |
-| 根 `vue` 版本 | `3.4.38` | 同 |
-| `vue.runtime.esm-bundler.js` 是否含该符号 | **否** | 否 |
-| `.pnpm` 内 `@vue/shared` 份数 | 3.4.21 + 3.4.38 | 3.4.21 + 3.4.38 + 3.5.43 |
+| `uni build` | `npx uni build -p mp-harmony` | `dist/build/mp-harmony/`（324K，含 `app.json`/`app.js`/`pages`） |
+| HBuilderX CLI（出真机包用这个） | `cli launch app-harmony --project HDdaraAi --buildType release --compile true` | `dist/dev/app-harmony/` + `entry/build/default/outputs/default/entry-default-unsigned.hap` |
 
-**即：`@dcloudio/uni-app` 的代码需要只有 Vue 3.5 才提供的 `isInSSRComponentSetup`，
-而 `@dcloudio/*` 自己又把 `@vue/shared` 钉在 3.4.21 —— 上游包自身矛盾。
-mall 用完全相同的依赖组合，因此同样无法在当前依赖下出鸿蒙包。**
+## 3.3 被推翻的三条「出路」
 
-时间线也吻合：mall 的鸿蒙链路是 **2026-09-19 跑通**的（`1fc83d89` / `0b92fe98`），
-而 `@dcloudio/*` 升到当前版本是**同一天**的 `8c956a89`；现有产物是 09-21 / 10-02 的
-`.app` —— 也就是**依赖升级与出包在同一窗口内发生，之后未再验证过鸿蒙链路**。
+| 原方案 | 为何不需要 |
+|---|---|
+| A. 钉回 09-19 之前的 `@dcloudio` 版本 | **不需要动依赖**。实测 09-17 / 09-21 / 09-30 各版 `uni-app.es.js` **都**引用该符号，降级解决不了 |
+| B. 打 patch 去掉 `isInSSRComponentSetup` 依赖 | **不需要**。且实测该 patch 不彻底：改掉它后紧接着报 `injectHook` 也不导出 —— 因为问题根源是**解析到了错误的 Vue 入口**，不是某个符号。补上平台包后，这条路径根本不经过 |
+| D. 等 uni-app 修上游 | **上游没有这个问题**，mall 一直在正常出鸿蒙包 |
 
-## 3.4 保持一致性
+## 3.4 现状与剩余步骤（2026-10-08）
 
-为了不让「源码依赖」与「已验证的 iOS / Android 产物」分叉，Vue 3.5 与 `overrides` 已**回退**，
-iOS 与 Android 包已用最终源码**重出并重装验证**。**pnpm 切换保留**（与 mall 一致，构建正常）。
+| 步骤 | 状态 |
+|---|---|
+| 编译（生成鸿蒙工程 + unsigned hap） | ✅ **已打通**，hap 8.7 MB |
+| 真机连接 | ✅ 已识别（VYG-AL00 / HarmonyOS 7.0.0.109 / API 26） |
+| **签名 → 装机** | ⬜ **未完成**，见下 |
 
-## 3.5 可选出路
+### 3.4.1 签名是唯一剩余环节，且**只能由 DevEco GUI 完成**
 
-| 方案 | 说明 | 评价 |
+已穷举并实测排除的命令行路径：
+
+| 尝试 | 结果 |
+|---|---|
+| `hvigor` 任务列表 | ❌ 只有构建任务，**无自动签名** |
+| DevEco CLI（`devecostudio` 二进制） | ❌ 仅是 IDE 启动器，无签名子命令 |
+| 复用 mall 的 debug 签名材料 | ❌ 其 profile `bundle-name` = `com.mall.cloud` ≠ `cn.hddara.ai` |
+| 找已登录凭据自动申请 | ❌ DevEco 配置目录无账号痕迹 |
+
+**鸿蒙的 profile 必须由华为服务签发**（不像 Android 可完全自签），申请通道只有
+DevEco IDE 的自动签名或 AGC 网站，两者都在 GUI 里 —— 这是华为的防滥用设计，非工具缺陷。
+
+### 3.4.2 已探明的关键情报（可省掉排查）
+
+| 项 | 值 | 意义 |
 |---|---|---|
-| A. 把 `@dcloudio/uni-app` 钉回 09-19 之前的版本 | 需先确认哪个版本不引用 3.5-only API | **最可能可行**；但会影响已答通的 iOS/Android 包，需重出复验 |
-| B. 打 patch 去掉对 `isInSSRComponentSetup` 的依赖 | mall 已有 `patches/` 先例（wot-design-uni）；但这是运行时 API，改动风险高于纯编译期 patch | 有风险，需实测三个平台 |
-| C. 查 `@vue/shared` 为何未带该符号 | 3.4.21 与 3.4.38 都不带 ⇒ 上游把 API 与 peer 版本配错了 | 仅供说明，不构成解法 |
-| D. 等 uni-app 修复上游矛盾 | 被动等待 | 兜底 |
+| **设备 UDID** | `C99F6EBE756187FF2741A9E7E9B1968EC11FF47D79B0A10DE2A25FED5323442B` | **已在华为调试白名单**（与 mall 的 profile 完全一致） |
+| developer-id | `70086000318336305` | 该华为账号 |
+| 设备 | VYG-AL00 / HarmonyOS 7.0.0.109 | — |
 
-> 建议：先查 **A**（找 09-19 之前可用的 `@dcloudio/*` 版本），不行再评估 B。
-> 若不接受动依赖组合，鸿蒙这条线需等 DCloud 修上游 —— iOS / Android 两个平台不受影响。
+**设备 UDID 已在白名单** = 自动签名时无需再注册设备，只差为 `cn.hddara.ai` 申请一份 profile。
+
+### 3.4.3 操作步骤（DevEco GUI，约 2~4 分钟）
+
+1. DevEco Studio 打开 **`HDdaraAi/dist/dev/app-harmony`**
+2. **File → Project Structure → Signing Configs**
+3. 勾选 **Automatically generate signature** → **Apply**（若要求登录则登录华为账号）
+4. 它会为 `cn.hddara.ai` 生成证书 + profile，落在 `~/.ohos/config/`
+
+完成后即可命令行装机（无需再开 GUI）：
+
+```bash
+export HDC=/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony/toolchains/hdc
+# 1) 把 DevEco 生成的 signingConfigs 保留在 build-profile.json5 内，直接构建签名包
+cd HDdaraAi/dist/dev/app-harmony
+/Applications/DevEco-Studio.app/Contents/tools/node/bin/node \
+  /Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/bin/hvigor.js \
+  assembleHap -p product=default -p buildMode=debug --no-daemon
+# 2) 装机并启动
+"$HDC" install entry/build/default/outputs/default/entry-default-signed.hap
+"$HDC" shell aa start -a EntryAbility -b cn.hddara.ai
+```
+
+> ⚠️ **不需要先去 AGC「创建应用」**。调试签名走的是华为的调试证书服务
+> （profile 里 `issuer: app_gallery`、`type: debug`），与上架用的发布证书是两条线。
+> mall 的调试 profile 就是这么来的，且它当时也没有为「调试」单独建过应用。
 
 ---
 

@@ -589,6 +589,21 @@ function commitTurn(stopped: boolean) {
   resetIncrementalRender()
 }
 
+/**
+ * The keyboard's send key.
+ *
+ * Routed through `ask()` so the return key and the button cannot drift apart:
+ * `ask()` is where the conversation id is validated and the previous turn is
+ * folded in, and a second entry point that skipped those would post into the
+ * wrong conversation the first time they disagreed.
+ */
+function onComposerConfirm() {
+  if (sending.value || !draft.value.trim())
+    return
+
+  void ask()
+}
+
 async function ask() {
   const text = draft.value.trim()
 
@@ -877,15 +892,30 @@ onUnload(() => {
     />
 
     <view class="composer">
-      <textarea
+      <!-- `wd-textarea` rather than a bare <textarea>: the composer is a
+           `position: fixed` bar at the bottom of the screen, and Wot's textarea
+           knows how to keep itself above the native keyboard in that layout
+           (`fixed` + `adjust-position`). A raw textarea left the input sitting
+           under the keyboard the moment it was tapped — the bar never moved,
+           because the keyboard is a native layer the webview does not see.
+
+           `confirm-type="send"` turns the keyboard's return key into the send
+           action, which is what the page is for. -->
+      <wd-textarea
         v-model="draft"
-        class="composer-input"
+        custom-class="composer-input"
+        custom-textarea-container-class="composer-input-box"
         :disabled="sending"
+        :fixed="true"
+        :maxlength="-1"
+        :show-confirm-bar="false"
         placeholder="向这个会话提问…"
         auto-height
         :focus="draftFocused"
+        confirm-type="send"
         @focus="draftFocused = true"
         @blur="draftFocused = false"
+        @confirm="onComposerConfirm"
       />
       <button
         v-if="!isStreaming"
@@ -893,12 +923,14 @@ onUnload(() => {
         :disabled="!draft.trim()"
         @tap="ask"
       >
-        发送
+        <view class="composer-icon i-carbon:send-alt" />
+        <text>发送</text>
       </button>
       <!-- Replaces 发送 while a turn is open: one primary action at a time, and
            stopping is the only thing the user can usefully do. -->
       <button v-else class="composer-stop" @tap="stopTurn">
-        终止
+        <view class="composer-icon i-carbon:stop-filled" />
+        <text>终止</text>
       </button>
     </view>
   </view>
@@ -927,7 +959,7 @@ onUnload(() => {
   width: 16rpx;
   height: 16rpx;
   border-radius: 50%;
-  background-color: #c8ccd2;
+  background-color: $color-border;
 }
 
 .dot-live {
@@ -1049,7 +1081,7 @@ onUnload(() => {
   font-size: $font-micro;
   line-height: 40rpx;
   text-align: center;
-  color: #ffffff;
+  color: $color-surface;
 }
 
 .turn-role-answer {
@@ -1115,8 +1147,17 @@ onUnload(() => {
   border-top: 1rpx solid $color-border;
 }
 
+/* The textarea is a Wot component now, so the composer's look is applied
+   through `custom-class` / `custom-textarea-container-class` rather than by
+   restyling a bare tag: the wrapper carries the padding, the inner element only
+   carries the type. Styling `.wd-textarea` internals directly would break on
+   the next Wot upgrade. */
 .composer-input {
   flex: 1;
+  min-width: 0;
+}
+
+.composer-input :deep(.wd-textarea__value) {
   min-height: 76rpx;
   max-height: 240rpx;
   padding: 18rpx 20rpx;
@@ -1127,17 +1168,33 @@ onUnload(() => {
   color: $color-text;
 }
 
+.composer-input :deep(.wd-textarea__inner) {
+  padding: 0;
+  font-size: $font-body;
+  color: $color-text;
+  line-height: 1.6;
+}
+
 .composer-send,
 .composer-stop {
+  display: flex;
   flex: none;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
   min-width: 150rpx;
   height: 76rpx;
-  line-height: 76rpx;
   margin: 0;
   padding: 0 24rpx;
   border-radius: $radius-control;
   font-size: $font-body;
-  color: #ffffff;
+  color: $color-surface;
+}
+
+.composer-icon {
+  width: 30rpx;
+  height: 30rpx;
+  margin-right: 8rpx;
 }
 
 .composer-send {
@@ -1146,7 +1203,7 @@ onUnload(() => {
 
 .composer-send[disabled] {
   background-color: $color-primary-disabled;
-  color: #ffffff;
+  color: $color-surface;
 }
 
 /* Danger-tinted so it does not read as "send again". */
