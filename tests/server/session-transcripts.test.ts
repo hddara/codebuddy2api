@@ -65,6 +65,24 @@ const {
 
 const flushRecorder = () => new Promise((resolve) => setTimeout(resolve, 5));
 
+/**
+ * A completion time that is `index` separate tasks away from the base instant.
+ *
+ * Turns recorded close together on one conversation **merge** into a single
+ * record — that is the point of the idle window, since one task arrives as a
+ * burst of cycles. Tests that mean "these are unrelated turns" therefore have
+ * to space them out; minute-level steps sat inside the window and collapsed
+ * into one entry, which is what these tests were unwittingly measuring.
+ *
+ * The step is deliberately larger than the window rather than exactly at its
+ * edge, so the helper keeps working if the window is tuned.
+ */
+const SEPARATED_TURN_MS = 10 * 60 * 1000;
+const spacedCompletion = (index: number): string =>
+  new Date(
+    Date.parse('2026-10-04T01:00:00.000Z') + index * SEPARATED_TURN_MS,
+  ).toISOString();
+
 describe('extractQuestionText', () => {
   it('returns the last user message with string content', () => {
     expect(
@@ -311,7 +329,7 @@ describe('session transcripts', () => {
     for (let index = 0; index < 5; index += 1) {
       await recordSessionTurn({
         answer: `a${index}`,
-        completedAt: `2026-10-04T01:0${index}:00.000Z`,
+        completedAt: spacedCompletion(index),
         conversationId: index < 3 ? 'conv-a' : 'conv-b',
       });
     }
@@ -402,7 +420,7 @@ describe('session transcripts', () => {
     for (let index = 0; index < 12; index += 1) {
       await recordSessionTurn({
         answer: `a${index}`,
-        completedAt: new Date(Date.now() - (12 - index) * 1_000).toISOString(),
+        completedAt: spacedCompletion(index),
         conversationId: 'conv-a',
       });
     }
@@ -434,16 +452,18 @@ describe('session transcripts', () => {
   });
 
   it('marks intermediate tool steps and counts them separately', async () => {
+    // Two separate tasks, each a step of its own: spaced past the idle window so
+    // they stay distinct records, which is what makes them countable at all.
     await recordSessionTurn({
       answer: 'Now re-run the RV to confirm…',
-      completedAt: '2026-10-04T01:00:00.000Z',
+      completedAt: spacedCompletion(0),
       conversationId: 'conv-a',
       question: '继续4',
       toolTurn: true,
     });
     await recordSessionTurn({
       answer: 'the final answer',
-      completedAt: '2026-10-04T01:01:00.000Z',
+      completedAt: spacedCompletion(1),
       conversationId: 'conv-a',
       question: '继续4',
     });
@@ -509,6 +529,184 @@ describe('session transcripts', () => {
     expect(listed.totals.toolTurns).toBe(1);
   });
 
+  describe('folding the cycles of one task into one turn', () => {
+    it('merges cycles that arrive back to back', async () => {
+      // One prompt, three cycles: this is the shape a single IDE task takes on
+      // the wire, and it used to be filed as three separate Q&A rows.
+      const base = Date.parse('2026-10-04T01:00:00.000Z');
+      const cycle = (offsetMs: number, answer: string) =>
+        recordSessionTurn({
+          answer,
+          completedAt: new Date(base + offsetMs).toISOString(),
+          conversationId: 'conv-merge',
+          question: '根据建议执行',
+        });
+
+      await cycle(0, '第一步');
+      await cycle(5_000, '第二步');
+      await cycle(9_000, '第三步');
+
+      const listed = await listSessionTranscripts({
+        conversationId: 'conv-merge',
+      });
+
+      expect(listed.entries).toHaveLength(1);
+      expect(listed.entries[0]?.answer).toBe('第一步第二步第三步');
+      expect(listed.totals.stored).toBe(1);
+    });
+
+    it('keeps the first question and start, and the last completion', async () => {
+      const base = Date.parse('2026-10-04T01:00:00.000Z');
+      await recordSessionTurn({
+        answer: 'a',
+        completedAt: new Date(base).toISOString(),
+        conversationId: 'conv-ident',
+        question: '原始问题',
+        startedAt: new Date(base - 3_000).toISOString(),
+      });
+      await recordSessionTurn({
+        answer: 'b',
+        // A later cycle replays the same prompt; the record must not be renamed
+        // by it, and the identity must survive so the answer body stays keyed.
+        completedAt: new Date(base + 4_000).toISOString(),
+        conversationId: 'conv-ident',
+        question: '不同的复述',
+        startedAt: new Date(base - 3_000).toISOString(),
+      });
+
+      const [entry] = (
+        await listSessionTranscripts({ conversationId: 'conv-ident' })
+      ).entries;
+
+      expect(entry?.question).toBe('原始问题');
+      expect(entry?.startedAt).toBe(new Date(base - 3_000).toISOString());
+      expect(entry?.completedAt).toBe(new Date(base + 4_000).toISOString());
+      expect(entry?.answer).toBe('ab');
+    });
+
+    it('starts a new record once the conversation has gone quiet', async () => {
+      const base = Date.parse('2026-10-04T01:00:00.000Z');
+      const at = (offsetMs: number) => new Date(base + offsetMs).toISOString();
+
+      await recordSessionTurn({
+        answer: 'first task',
+        completedAt: at(0),
+        conversationId: 'conv-idle',
+        question: '第一个问题',
+      });
+      // Well past the idle window: a new prompt, not a continuation.
+      await recordSessionTurn({
+        answer: 'second task',
+        completedAt: at(SEPARATED_TURN_MS),
+        conversationId: 'conv-idle',
+        question: '第二个问题',
+      });
+
+      const listed = await listSessionTranscripts({
+        conversationId: 'conv-idle',
+      });
+
+      expect(listed.entries).toHaveLength(2);
+      expect(listed.entries.map((entry) => entry.question).sort()).toEqual([
+        '第一个问题',
+        '第二个问题',
+      ]);
+    });
+
+    it('never merges across conversations', async () => {
+      const base = Date.parse('2026-10-04T01:00:00.000Z');
+
+      await recordSessionTurn({
+        answer: 'x',
+        completedAt: new Date(base).toISOString(),
+        conversationId: 'conv-one',
+      });
+      await recordSessionTurn({
+        answer: 'y',
+        completedAt: new Date(base + 1_000).toISOString(),
+        conversationId: 'conv-two',
+      });
+
+      expect((await listSessionTranscripts()).entries).toHaveLength(2);
+    });
+
+    it('drops the tool-step flag once any cycle answered', async () => {
+      const base = Date.parse('2026-10-04T01:00:00.000Z');
+
+      await recordSessionTurn({
+        answer: 'Now re-run the RV…',
+        completedAt: new Date(base).toISOString(),
+        conversationId: 'conv-flag',
+        question: '继续4',
+        toolTurn: true,
+      });
+      await recordSessionTurn({
+        answer: 'the answer',
+        completedAt: new Date(base + 2_000).toISOString(),
+        conversationId: 'conv-flag',
+        question: '继续4',
+      });
+
+      const listed = await listSessionTranscripts({
+        conversationId: 'conv-flag',
+      });
+
+      // The turn ended in a real answer, so it is the exchange to read — filing
+      // it under the tool-step flag would hide exactly what the viewer wants.
+      expect(listed.entries).toHaveLength(1);
+      expect(listed.entries[0]?.toolTurn).toBeUndefined();
+      expect(listed.totals.toolTurns).toBe(0);
+    });
+
+    it('keeps the flag when every cycle was a tool step', async () => {
+      const base = Date.parse('2026-10-04T01:00:00.000Z');
+
+      for (const offset of [0, 2_000, 4_000]) {
+        await recordSessionTurn({
+          answer: `step ${offset}`,
+          completedAt: new Date(base + offset).toISOString(),
+          conversationId: 'conv-alltools',
+          question: '继续4',
+          toolTurn: true,
+        });
+      }
+
+      const listed = await listSessionTranscripts({
+        conversationId: 'conv-alltools',
+      });
+
+      expect(listed.entries).toHaveLength(1);
+      expect(listed.entries[0]?.toolTurn).toBe(true);
+      expect(listed.totals.toolTurns).toBe(1);
+    });
+  });
+
+  it('keeps the store within its count limit between sweeps', async () => {
+    // The sweep is throttled, and the throttle must not exempt the limit:
+    // production read back 2002 stored turns against maxEntries 2000.
+    await updateSessionTranscriptSettings({
+      maxEntries: 10,
+      retentionDays: 365,
+    });
+
+    for (let index = 0; index < 14; index += 1) {
+      await recordSessionTurn({
+        answer: `a${index}`,
+        completedAt: spacedCompletion(index),
+        conversationId: 'conv-limit',
+      });
+    }
+
+    const listed = await listSessionTranscripts({
+      conversationId: 'conv-limit',
+    });
+
+    expect(listed.totals.stored).toBe(10);
+    // The newest survived and the oldest were dropped.
+    expect(listed.entries[0]?.answer).toBe('a13');
+    expect(listed.entries.map((entry) => entry.answer)).not.toContain('a0');
+  });
+
   it('clamps a sub-minimum entry count up to the supported floor', async () => {
     const settings = await updateSessionTranscriptSettings({ maxEntries: 1 });
 
@@ -546,7 +744,7 @@ describe('session transcripts', () => {
     for (let index = 0; index < 3; index += 1) {
       await recordSessionTurn({
         answer: `a${index}`,
-        completedAt: `2026-10-04T01:0${index}:00.000Z`,
+        completedAt: spacedCompletion(index),
         conversationId: 'conv-a',
       });
     }

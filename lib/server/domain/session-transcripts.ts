@@ -43,6 +43,23 @@ const MAX_ANSWER_CHARS = 100_000;
 const DELETE_BATCH_SIZE = 50;
 const ANSWER_READ_CONCURRENCY = 8;
 
+/**
+ * How long a conversation may stay quiet before its next turn starts a new
+ * record instead of extending the current one.
+ *
+ * The IDE issues one *task* as a burst of HTTP requests: a prompt, then a
+ * chain of tool calls, then the answer. Each request is a complete
+ * `session.started` → `session.completed` cycle on the wire, and recording one
+ * row per cycle filed a single question as dozens of rows — measured against
+ * production, one prompt produced 63 rows of which 59 were fragments.
+ *
+ * A gap this long inside one task is not a user thinking; it is the model
+ * generating. The same window is used to tell one task from the next, so two
+ * prompts typed within it merge into one record — which matches how the client
+ * behaves, since it keeps one conversation id per chat rather than per prompt.
+ */
+const TURN_IDLE_WINDOW_MS = 120_000;
+
 export const SESSION_TRANSCRIPT_LIMITS = {
   maxEntries: { hard: 20_000, min: 10 },
   retentionDays: { hard: 365, min: 1 },
@@ -495,25 +512,44 @@ export const pruneSessionTranscripts = async (
   return removable.length;
 };
 
-/** Prune at most once per interval so a burst of turns cannot thrash storage. */
+/**
+ * Prunes housekeeping on a throttle, but never lets the store grow past its
+ * count limit.
+ *
+ * The throttle exists so a burst of turns does not re-sort the whole store on
+ * every write. Applied to the limit itself it was wrong: a task that wrote
+ * faster than the window simply kept growing, and production read back
+ * `stored: 2002` against a configured `maxEntries: 2000` with no sweep pending.
+ *
+ * So the count is checked every write — it is a length on documents already
+ * loaded — and the throttle only governs the expensive age sweep. Over the
+ * limit, the count prune runs regardless of when the last one did; under it,
+ * the sweep waits its turn.
+ */
 const PRUNE_INTERVAL_MS = 60_000;
 
 const pruneIfDue = async (
   settings: SessionTranscriptSettings,
 ): Promise<void> => {
   const now = Date.now();
-
-  if (
-    globalState.__codebuddy2apiTranscriptPrunedAt__ !== undefined &&
-    now - globalState.__codebuddy2apiTranscriptPrunedAt__ < PRUNE_INTERVAL_MS
-  ) {
-    return;
-  }
-
-  globalState.__codebuddy2apiTranscriptPrunedAt__ = now;
+  const due =
+    globalState.__codebuddy2apiTranscriptPrunedAt__ === undefined ||
+    now - globalState.__codebuddy2apiTranscriptPrunedAt__ >= PRUNE_INTERVAL_MS;
 
   try {
-    await pruneSessionTranscripts(settings);
+    if (due) {
+      globalState.__codebuddy2apiTranscriptPrunedAt__ = now;
+      await pruneSessionTranscripts(settings);
+
+      return;
+    }
+
+    // Between sweeps: cheap count check only.
+    const turns = await listStoredTurns();
+
+    if (turns.length > settings.maxEntries) {
+      await pruneSessionTranscripts(settings);
+    }
   } catch {
     // Pruning is housekeeping: a failure must not surface to the caller.
   }
@@ -560,6 +596,25 @@ export const recordSessionTurn = async ({
 
     const storedAnswer = truncate(answer ?? '', MAX_ANSWER_CHARS);
     const storedQuestion = truncate(question ?? '', MAX_QUESTION_CHARS);
+
+    // Fold this cycle into the record it continues, if there is one. See
+    // TURN_IDLE_WINDOW_MS for why one task arrives as several cycles.
+    const open = await findOpenTurn(conversationId, completedAt);
+
+    if (open) {
+      return await extendTurn(open, {
+        accessKeyId,
+        answer: storedAnswer,
+        completedAt,
+        conversationId,
+        error,
+        model,
+        question: storedQuestion,
+        startedAt,
+        toolTurn,
+      });
+    }
+
     const id = buildRecordId(completedAt, conversationId);
     const meta: SessionTranscriptMeta = {
       accessKeyId: accessKeyId ?? null,
@@ -595,6 +650,111 @@ export const recordSessionTurn = async ({
   } catch {
     return null;
   }
+};
+
+/**
+ * The recent turn in `conversationId` that this cycle belongs to, if any.
+ *
+ * "Recent" means it finished within the idle window: a task that has been quiet
+ * for longer than that is over, and the next cycle is a new question. The
+ * comparison is made against the *incoming* completion time rather than the
+ * wall clock so that a replay or a backfilled batch groups the same way it
+ * originally would have.
+ */
+const findOpenTurn = async (
+  conversationId: string,
+  completedAt: string,
+): Promise<SessionTranscriptRecord | null> => {
+  const completedMs = Date.parse(completedAt);
+
+  // An unparseable timestamp cannot be ordered against anything, so treat the
+  // cycle as the start of a record instead of guessing which one it extends.
+  if (!Number.isFinite(completedMs)) {
+    return null;
+  }
+
+  const candidates = (await listStoredTurns()).filter(
+    (turn) => turn.conversationId === conversationId,
+  );
+
+  let latest: SessionTranscriptMeta | null = null;
+  let latestMs = Number.NEGATIVE_INFINITY;
+
+  for (const turn of candidates) {
+    const turnMs = Date.parse(turn.completedAt);
+
+    // A turn that finished after this cycle cannot be the one it extends, and
+    // neither can an unorderable one.
+    if (!Number.isFinite(turnMs) || turnMs > completedMs) {
+      continue;
+    }
+
+    // Older than the idle window means that task already ended; anything newer
+    // than the best candidate so far is the closer one.
+    if (completedMs - turnMs > TURN_IDLE_WINDOW_MS || turnMs <= latestMs) {
+      continue;
+    }
+
+    latest = turn;
+    latestMs = turnMs;
+  }
+
+  if (!latest) {
+    return null;
+  }
+
+  return { ...latest, answer: await readAnswer(latest) };
+};
+
+/**
+ * Writes the growth of a turn that is still going, keeping its identity.
+ *
+ * The id is deliberately kept: it names both stored documents, and the answer
+ * body is keyed by it. Rebuilding the id from the newer completion time would
+ * leave the previous answer body orphaned under an id nothing points at.
+ *
+ * The question also stays put. Later cycles of one task replay the same prompt,
+ * so overwriting would be a no-op in the common case and a regression when the
+ * client sends a different preamble — the first cycle is the one that carried
+ * the question the user actually typed.
+ */
+const extendTurn = async (
+  open: SessionTranscriptRecord,
+  next: RecordSessionTurnInput & { answer: string },
+): Promise<SessionTranscriptRecord> => {
+  const mergedAnswer = truncate(
+    `${open.answer}${next.answer}`,
+    MAX_ANSWER_CHARS,
+  );
+  const meta: SessionTranscriptMeta = {
+    accessKeyId: open.accessKeyId ?? next.accessKeyId ?? null,
+    answerChars: mergedAnswer.length,
+    completedAt: next.completedAt,
+    conversationId: open.conversationId,
+    id: open.id,
+    model: open.model ?? next.model ?? null,
+    question: open.question,
+    questionChars: open.questionChars,
+    startedAt: open.startedAt,
+    status: next.error ? 'failed' : 'completed',
+  };
+
+  if (next.error) {
+    meta.error = next.error;
+  }
+
+  // A turn counts as an intermediate step only while *every* cycle in it was
+  // one. Once any cycle produced a real answer the turn is the answer, and
+  // filing it under the tool-step flag would hide exactly the exchange the
+  // viewer came to read.
+  if (open.toolTurn && next.toolTurn) {
+    meta.toolTurn = true;
+  }
+
+  await writeStorageJson(NAMESPACE, meta.id, meta);
+  await writeStorageJson(ANSWER_NAMESPACE, meta.id, { answer: mergedAnswer });
+
+  return { ...meta, answer: mergedAnswer };
 };
 
 export const listSessionTranscripts = async ({
