@@ -14,8 +14,11 @@
     "build:app": "uni build -p app",
     "build:mp-weixin": "uni build -p mp-weixin",
     "type-check": "vue-tsc --noEmit",
-    "lint": "eslint --config eslint.uni.config.mjs src --max-warnings=0",
-    "lint:fix": "eslint --config eslint.uni.config.mjs src --fix"
+    "lint": "eslint --config eslint.uni.config.mjs src tests --max-warnings=0",
+    "lint:fix": "eslint --config eslint.uni.config.mjs src tests --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify": "pnpm run type-check && pnpm run lint && pnpm run test"
   },
   "dependencies": {
     "@alova/adapter-uniapp": "^2.0.18",
@@ -57,6 +60,7 @@
     "unocss-applet": "^0.15.1",
     "unplugin-auto-import": "^0.18.2",
     "vite": "^5.2.8",
+    "vitest": "^2.1.9",
     "vue-tsc": "^2.0.28"
   },
   "engines": {

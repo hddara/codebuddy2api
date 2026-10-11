@@ -162,7 +162,19 @@ export function handleAlovaError(error: unknown, method?: Method): never {
   }
 
   const candidate = error as { message?: string, name?: string, errMsg?: string }
-  const message = candidate?.message ?? candidate?.errMsg ?? ''
+
+  /**
+   * Reads the message off anything the platform throws.
+   *
+   * Not every rejection is an Error: the App runtime rejects with a bare string
+   * on some paths, and reading `.message` off one yields `undefined` — which
+   * then fails every wording test below and falls through to the generic branch,
+   * passing the raw text to the screen. That is exactly the `request:fail`
+   * leak this function exists to prevent, so the string itself is the message.
+   */
+  const message = typeof error === 'string'
+    ? error
+    : candidate?.message ?? candidate?.errMsg ?? ''
   const name = candidate?.name ?? ''
 
   if (name === 'NetworkError' || message.includes('request:fail')) {
@@ -170,12 +182,24 @@ export function handleAlovaError(error: unknown, method?: Method): never {
     // A reachable network that still cannot reach this base URL means the node
     // itself is bad, so the next request re-resolves it.
     reportApiFailure('network', message || 'NetworkError')
+
+    // The toast is not the only place this message surfaces: callers catch the
+    // error and put its `message` on screen (the login form does exactly that),
+    // which showed the raw `request:fail` under a Chinese heading. Rethrowing a
+    // value that carries the same readable text keeps one wording for one
+    // situation without changing what the error *is* — the name is preserved so
+    // a caller distinguishing a network drop still can.
+    throw describeTransportFailure(error, '网络连接失败，请稍后重试')
   }
-  else if (name === 'TimeoutError' || message.toLowerCase().includes('timeout')) {
+
+  if (name === 'TimeoutError' || message.toLowerCase().includes('timeout')) {
     toastErrorOnce('请求超时，请重试')
     reportApiFailure('timeout', message || 'TimeoutError')
+
+    throw describeTransportFailure(error, '请求超时，请重试')
   }
-  else if (error instanceof ApiError) {
+
+  if (error instanceof ApiError) {
     // Already reported by the response handler; avoid duplicating the toast.
   }
   else {
@@ -183,4 +207,25 @@ export function handleAlovaError(error: unknown, method?: Method): never {
   }
 
   throw error
+}
+
+/**
+ * Rebuilds a transport-level failure so its `message` is the wording a user
+ * should see.
+ *
+ * Only `message` is replaced. `name` and any other fields ride along, because a
+ * caller may be branching on them (`isAuthError` reads `code`/`status`, the
+ * stream reader reads `name`), and an error that has been made readable for
+ * display must still be recognisable to the code that handles it.
+ */
+function describeTransportFailure(error: unknown, message: string): unknown {
+  if (error instanceof Error) {
+    // Assigning to `message` keeps the original stack and identity, which is
+    // more useful in a crash report than a freshly constructed Error.
+    error.message = message
+
+    return error
+  }
+
+  return new Error(message)
 }

@@ -3,3 +3,7 @@ dist
 unpackage
 .DS_Store
 *.log
+
+# Scratch space for driving a device or simulator (extracted app containers,
+# plists staged for copy-in). Regenerated on demand; never a source of truth.
+.tmp-ios/
