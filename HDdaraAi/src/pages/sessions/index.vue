@@ -3,7 +3,11 @@ import type { SessionRow } from '@/api/sessions'
 import { onPullDownRefresh, onShow } from '@dcloudio/uni-app'
 
 import { computed, ref } from 'vue'
-import { fetchSessions } from '@/api/sessions'
+import {
+  backfillSessionTitles,
+  fetchSessions,
+  renameSession,
+} from '@/api/sessions'
 import StateBlock from '@/components/StateBlock.vue'
 import { useAuthStore } from '@/store/authStore'
 import { parseStored } from '@/store/persist'
@@ -130,6 +134,11 @@ async function load() {
       totalTokens: 0,
     }
     ungroupedEvents.value = payload.ungroupedEvents ?? 0
+
+    // Deliberately not awaited: naming the older rows can take a few seconds,
+    // and the list is already usable with the id fallback. The result is matched
+    // back by conversation id, so a refresh landing mid-flight is harmless.
+    void backfillTitles(payload.sessions ?? [])
   }
   catch (error) {
     if (token !== loadToken)
@@ -165,6 +174,106 @@ function describeSession(item: SessionRow): string {
   return parts.join(' · ')
 }
 
+/**
+ * What the row's heading should read.
+ *
+ * Falls back to the shortened id so a conversation without a title still shows
+ * something stable — the gateway only starts naming conversations from the first
+ * question it sees, so older ones legitimately have none.
+ */
+function rowTitle(item: SessionRow): string {
+  if (item.title)
+    return item.title
+
+  return `${item.conversationId.slice(0, 12)}…`
+}
+
+/** Marks a renamed row, so it is clear the model did not choose that name. */
+function isRenamed(item: SessionRow): boolean {
+  return item.titleSource === 'manual'
+}
+
+/**
+ * Asks the gateway to name conversations that predate titles.
+ *
+ * Only conversations actually on screen are sent, and the gateway caps the batch
+ * itself. Runs in the background and folds the result into the visible rows so
+ * names appear without a reload — a failure here is invisible, because the rows
+ * already render fine with the id fallback.
+ */
+async function backfillTitles(rows: SessionRow[]) {
+  const untitled = rows
+    .filter(item => !item.title)
+    .map(item => item.conversationId)
+
+  if (!untitled.length)
+    return
+
+  try {
+    const result = await backfillSessionTitles(untitled)
+
+    if (!result?.titles)
+      return
+
+    // `sessions` is replaced wholesale by a reload, so match by id rather than
+    // by index: a refresh that lands between the request and its reply would
+    // otherwise write names onto the wrong rows.
+    sessions.value = sessions.value.map((item) => {
+      const title = result.titles[item.conversationId]
+
+      return title ? { ...item, title, titleSource: 'ai' as const } : item
+    })
+  }
+  catch {
+    // Best-effort: an unnamed row is a cosmetic shortcoming, not an error worth
+    // interrupting the list for.
+  }
+}
+
+/**
+ * Renames a conversation through a modal prompt.
+ *
+ * `uni.showModal` with `editable` is the only text input available without
+ * building a page for it, and the app already uses it for confirmations. The
+ * result is applied optimistically from the server's response rather than from
+ * the typed value, so any trimming the gateway did is what the row shows.
+ */
+function promptRename(item: SessionRow) {
+  uni.showModal({
+    content: rowTitle(item),
+    editable: true,
+    placeholderText: '给这个会话起个名字',
+    success: async (result: { confirm?: boolean, content?: string }) => {
+      if (!result.confirm)
+        return
+
+      const title = (result.content ?? '').trim()
+
+      if (!title)
+        return
+
+      try {
+        const response = await renameSession(item.conversationId, title)
+        const saved = response?.session?.title ?? title
+
+        sessions.value = sessions.value.map(row =>
+          row.conversationId === item.conversationId
+            ? { ...row, title: saved, titleSource: 'manual' as const }
+            : row,
+        )
+        uni.showToast({ icon: 'none', title: '已重命名' })
+      }
+      catch (error) {
+        uni.showToast({
+          icon: 'none',
+          title: describeError(error, '重命名失败'),
+        })
+      }
+    },
+    title: '重命名会话',
+  } as never)
+}
+
 async function changeWindow(value: number) {
   windowMinutes.value = value
   await load()
@@ -183,8 +292,18 @@ function retry() {
 }
 
 function openDetail(item: SessionRow) {
+  // The title rides along so the detail header is correct on its first paint;
+  // refetching it would show the id for a moment and then swap.
+  const params = [`conversationId=${encodeURIComponent(item.conversationId)}`]
+
+  if (item.title)
+    params.push(`title=${encodeURIComponent(item.title)}`)
+
+  if (item.titleSource)
+    params.push(`titleSource=${encodeURIComponent(item.titleSource)}`)
+
   uni.navigateTo({
-    url: `/pages/sessions/detail?conversationId=${encodeURIComponent(item.conversationId)}`,
+    url: `/pages/sessions/detail?${params.join('&')}`,
   })
 }
 
@@ -238,7 +357,9 @@ onPullDownRefresh(async () => {
       @retry="retry"
     />
 
-    <StateBlock v-if="loading" :loading="true" text="加载中…" />
+    <!-- A skeleton rather than a centred spinner: the list keeps its shape while
+         loading, so the content does not appear by shoving the page around. -->
+    <AppSkeleton v-else-if="loading" :rows="4" />
 
     <StateBlock
       v-else-if="!sessions.length"
@@ -253,19 +374,22 @@ onPullDownRefresh(async () => {
       <button
         v-for="item in sessions"
         :key="item.conversationId"
-        class="card"
+        class="row"
         @tap="openDetail(item)"
+        @longpress="promptRename(item)"
       >
-        <view class="card-head">
-          <text class="card-id">{{ item.conversationId.slice(0, 12) }}…</text>
-          <text class="card-time">{{ formatRelative(item.lastActiveAt) }}</text>
+        <view class="row-head">
+          <text class="row-title" :class="{ 'row-title-renamed': isRenamed(item) }">
+            {{ rowTitle(item) }}
+          </text>
+          <text class="row-time">{{ formatRelative(item.lastActiveAt) }}</text>
         </view>
-        <view class="card-meta">
+        <view class="row-meta">
           <!-- Clamped to one line: a session can carry several models and the
                joined list used to push the card taller than its neighbours. -->
-          <text class="card-model">{{ describeSession(item) }}</text>
+          <text class="row-model">{{ describeSession(item) }}</text>
         </view>
-        <view class="card-stats">
+        <view class="row-stats">
           <text>{{ item.callCount }} 次请求</text>
           <!-- Shortened: a real session reports 517158574 tokens, which wrapped
                onto a second line and pushed the row out of the card. -->
@@ -318,7 +442,7 @@ onPullDownRefresh(async () => {
 
 .chip-active {
   background-color: $color-primary;
-  color: #ffffff;
+  color: $color-surface;
 }
 
 .summary {
@@ -338,12 +462,12 @@ onPullDownRefresh(async () => {
   color: $color-text-muted;
 }
 
-/* Reset the platform button chrome so a card still reads as a card. */
-.card {
+/* Reset the platform button chrome so a row still reads as a card. */
+.row {
   display: block;
   width: 100%;
   margin: 0 0 $gap-section;
-  padding: 24rpx;
+  padding: $gap-section;
   border: none;
   border-radius: $radius-card;
   background-color: $color-surface;
@@ -352,33 +476,41 @@ onPullDownRefresh(async () => {
   text-align: left;
 }
 
-.card::after {
+.row::after {
   border: none;
 }
 
-.card-head {
+.row-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: $gap-inline;
 }
 
-.card-id {
+.row-title {
   flex: 1;
   min-width: 0;
   font-size: $font-section;
   font-weight: 600;
   color: $color-text;
-  word-break: break-all;
+  /* A title is a phrase, so it wraps at spaces; the id fallback has no spaces
+     and needs breaking anywhere or it pushes the timestamp off the row. */
+  word-break: break-word;
 }
 
-.card-time {
+/* A user-chosen name is marked, so it is distinguishable from a generated one
+   without having to remember which rows were renamed by hand. */
+.row-title-renamed {
+  color: $color-primary;
+}
+
+.row-time {
   flex: none;
   font-size: $font-meta;
   color: $color-text-muted;
 }
 
-.card-meta {
+.row-meta {
   margin-top: 10rpx;
   font-size: $font-meta;
   color: $color-text-secondary;
@@ -386,25 +518,25 @@ onPullDownRefresh(async () => {
 
 /* One line, ellipsised. A session can list several models and the unclamped
    value made one card taller than the rest of the list. */
-.card-model {
+.row-model {
   display: block;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
-.card-stats {
+.row-stats {
   margin-top: 14rpx;
   display: flex;
   gap: 32rpx;
   font-size: $font-meta;
-  color: #8a8f99;
+  color: $color-text-muted;
 }
 
 .footer-hint {
-  padding: 20rpx 0 40rpx;
+  padding: $gap-section 0 40rpx;
   text-align: center;
-  font-size: 22rpx;
-  color: #a8adb5;
+  font-size: $font-micro;
+  color: $color-text-faint;
 }
 </style>

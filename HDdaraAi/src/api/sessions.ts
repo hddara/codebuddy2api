@@ -13,8 +13,21 @@ export interface SessionRow {
   firstSeenAt?: string
   lastActiveAt: string
   models: string[]
+  /**
+   * Readable name for the conversation.
+   *
+   * Absent until the gateway has one — conversations seen before titles existed,
+   * and ones whose first question produced nothing usable, have none. Callers
+   * must fall back to the shortened id rather than render an empty label.
+   */
+  title?: string
+  /** `manual` means the user chose it and the model will not override it. */
+  titleSource?: SessionTitleSource
   totalTokens: number
 }
+
+/** Where a conversation's name came from. */
+export type SessionTitleSource = 'ai' | 'manual' | 'truncate'
 
 export interface SessionListPayload {
   sessions: SessionRow[]
@@ -98,6 +111,49 @@ export async function fetchSessions(windowMinutes: number): Promise<SessionListP
   return alovaInstance
     .Get<SessionListPayload>(
       `/admin-api/sessions?windowMinutes=${encodeURIComponent(String(windowMinutes))}`,
+      {
+        headers: { ...consoleHeaders(), skipToken: true },
+      } as never,
+    )
+    .send()
+}
+
+/**
+ * Renames one conversation.
+ *
+ * The gateway marks the result as user-chosen, which it will not let the model
+ * overwrite later — so a rename made here sticks.
+ */
+export async function renameSession(
+  conversationId: string,
+  title: string,
+): Promise<{ session: { title: string } }> {
+  return alovaInstance
+    .Patch<{ session: { title: string } }>(
+      `/admin-api/sessions/titles/${encodeURIComponent(conversationId)}`,
+      { title },
+      {
+        headers: { ...consoleHeaders(), skipToken: true },
+      } as never,
+    )
+    .send()
+}
+
+/**
+ * Asks the gateway to name conversations that predate titles.
+ *
+ * Bounded server-side (20 per call, with a deadline), so this is safe to call
+ * with whatever the last list returned; running it again picks up the rest.
+ * `remaining` is how many were left over, which lets the caller decide whether
+ * another round is worthwhile instead of guessing.
+ */
+export async function backfillSessionTitles(
+  conversationIds: string[],
+): Promise<{ generated: number, remaining: number, titles: Record<string, string> }> {
+  return alovaInstance
+    .Post<{ generated: number, remaining: number, titles: Record<string, string> }>(
+      '/admin-api/sessions/titles/backfill',
+      { conversationIds },
       {
         headers: { ...consoleHeaders(), skipToken: true },
       } as never,

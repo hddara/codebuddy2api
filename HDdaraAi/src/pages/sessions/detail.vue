@@ -1,9 +1,13 @@
 <script setup lang="ts">
-import type { TranscriptEntry } from '@/api/sessions'
+import type { SessionTitleSource, TranscriptEntry } from '@/api/sessions'
 import { onLoad, onShow } from '@dcloudio/uni-app'
 
 import { computed, ref } from 'vue'
-import { fetchTranscripts, MAX_TRANSCRIPT_PAGE } from '@/api/sessions'
+import {
+  fetchTranscripts,
+  MAX_TRANSCRIPT_PAGE,
+  renameSession,
+} from '@/api/sessions'
 import StateBlock from '@/components/StateBlock.vue'
 import { describeError } from '@/utils/errors'
 import { formatRelative } from '@/utils/format'
@@ -82,6 +86,66 @@ const toolTurnTotal = ref(0)
 const shortId = computed(() =>
   conversationId.value ? `${conversationId.value.slice(0, 20)}…` : '',
 )
+
+/**
+ * Name of the conversation, seeded from the list page.
+ *
+ * Passed through the navigation URL rather than refetched: the list already has
+ * it, and a second request would make the header flash the id before settling.
+ * A page opened directly (a cold deep link) has no title and falls back.
+ */
+const sessionTitle = ref('')
+const titleSource = ref<SessionTitleSource | undefined>()
+
+const displayTitle = computed(() => {
+  if (sessionTitle.value)
+    return sessionTitle.value
+
+  return conversationId.value ? `${conversationId.value.slice(0, 12)}…` : '会话详情'
+})
+
+/**
+ * Renames the conversation from the detail page.
+ *
+ * Mirrors the list page's prompt. Both exist because the two are reached in
+ * different moods: from the list you already know which row you want, while from
+ * the detail page you are reading the conversation and only then decide the name
+ * is wrong.
+ */
+function promptRename() {
+  if (!conversationId.value)
+    return
+
+  uni.showModal({
+    content: displayTitle.value,
+    editable: true,
+    placeholderText: '给这个会话起个名字',
+    success: async (result: { confirm?: boolean, content?: string }) => {
+      if (!result.confirm)
+        return
+
+      const next = (result.content ?? '').trim()
+
+      if (!next)
+        return
+
+      try {
+        const response = await renameSession(conversationId.value, next)
+
+        sessionTitle.value = response?.session?.title ?? next
+        titleSource.value = 'manual'
+        uni.showToast({ icon: 'none', title: '已重命名' })
+      }
+      catch (error) {
+        uni.showToast({
+          icon: 'none',
+          title: describeError(error, '重命名失败'),
+        })
+      }
+    },
+    title: '重命名会话',
+  } as never)
+}
 
 function copyConversationId() {
   if (!conversationId.value)
@@ -196,7 +260,8 @@ function openTranscript(entry: TranscriptEntry) {
 }
 
 onLoad((query) => {
-  const raw = String((query as Record<string, string>)?.conversationId ?? '')
+  const params = (query ?? {}) as Record<string, string>
+  const raw = String(params.conversationId ?? '')
 
   // A malformed escape (`%`, or `%ZZ`) throws `URIError` and the value arrives
   // straight from the route, so an edited URL or a bad deep link is enough to
@@ -207,6 +272,22 @@ onLoad((query) => {
   }
   catch {
     conversationId.value = raw
+  }
+
+  // The list passes the name it already has, so the header reads correctly on
+  // the first paint instead of showing the id and then swapping.
+  if (params.title) {
+    try {
+      sessionTitle.value = decodeURIComponent(String(params.title))
+    }
+    catch {
+      sessionTitle.value = String(params.title)
+    }
+  }
+
+  if (params.titleSource === 'manual' || params.titleSource === 'ai'
+    || params.titleSource === 'truncate') {
+    titleSource.value = params.titleSource
   }
 })
 
@@ -220,12 +301,20 @@ onShow(() => {
   <view class="page">
     <view class="head">
       <view class="head-row">
+        <text class="head-title">{{ displayTitle }}</text>
+        <button class="head-edit i-carbon:edit" @tap="promptRename" />
+      </view>
+      <!-- The id stays visible: it is what the gateway's logs and the console
+           are keyed by, so it is still needed when cross-checking a session. -->
+      <view class="head-row head-row-id">
         <text class="head-id">{{ shortId }}</text>
         <button class="head-copy" @tap="copyConversationId">
           复制
         </button>
       </view>
-      <text class="head-caption">会话标识</text>
+      <text class="head-caption">
+        {{ titleSource === 'manual' ? '自定义名称 · 会话标识' : '会话标识' }}
+      </text>
     </view>
 
     <StateBlock
@@ -250,7 +339,7 @@ onShow(() => {
           查看正在输出的内容，或直接向这个会话提问
         </text>
       </view>
-      <text class="entry-arrow">›</text>
+      <view class="entry-arrow i-carbon:chevron-right" />
     </button>
 
     <!-- Entry 2: stored turns, one row each, preview only. -->
@@ -282,15 +371,15 @@ onShow(() => {
           </text>
           <view class="entry-meta">
             <text class="entry-time">{{ formatRelative(entry.completedAt) }}</text>
-            <text
-              class="entry-status"
-              :class="[`status-${entry.status}`]"
-            >
+            <!-- The tag owns the state colours: this page used to define its
+                 own `.status-completed` / `.status-failed`, which is how the
+                 same state ended up a different green per page. -->
+            <StatusTag :tone="entry.status === 'failed' ? 'danger' : 'success'">
               {{ entry.status === 'failed' ? '失败' : '完成' }}
-            </text>
+            </StatusTag>
           </view>
         </view>
-        <text class="entry-arrow">›</text>
+        <view class="entry-arrow i-carbon:chevron-right" />
       </button>
     </view>
 
@@ -342,6 +431,37 @@ onShow(() => {
   display: flex;
   align-items: center;
   gap: $gap-inline;
+}
+
+/* The id row sits under the title, quieter than it: once a conversation has a
+   name, the id is reference material rather than the heading. */
+.head-row-id {
+  margin-top: 6rpx;
+}
+
+.head-title {
+  flex: 1;
+  min-width: 0;
+  font-size: $font-title;
+  font-weight: 600;
+  color: $color-text;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.head-edit {
+  flex: none;
+  width: 40rpx;
+  height: 40rpx;
+  margin: 0;
+  padding: 0;
+  color: $color-text-muted;
+  background-color: transparent;
+  line-height: 1;
+}
+
+.head-edit::after {
+  border: none;
 }
 
 .head-id {
@@ -400,7 +520,7 @@ onShow(() => {
 }
 
 .entry-primary {
-  background-color: #eef5ff;
+  background-color: $color-primary-surface;
 }
 
 .entry-body {
@@ -419,7 +539,7 @@ onShow(() => {
   display: block;
   margin-top: 6rpx;
   font-size: $font-meta;
-  color: #6b7280;
+  color: $color-text-secondary;
   line-height: 1.6;
 }
 
@@ -446,23 +566,13 @@ onShow(() => {
   color: $color-text-faint;
 }
 
-.entry-status {
-  font-size: $font-micro;
-}
-
-.status-completed {
-  color: $color-success;
-}
-
-.status-failed {
-  color: $color-danger;
-}
-
+/* An icon rather than the `›` glyph: a text character inherits the body font's
+   stroke weight and baseline, so it never lined up with the row it sat in. */
 .entry-arrow {
   flex: none;
-  font-size: 40rpx;
-  color: #c8ccd2;
-  line-height: 1;
+  width: 32rpx;
+  height: 32rpx;
+  color: $color-text-faint;
 }
 
 .section-head {
@@ -480,22 +590,22 @@ onShow(() => {
 
 .section-count {
   font-size: 23rpx;
-  color: #8a8f99;
+  color: $color-text-muted;
 }
 
 .hint {
   padding: 36rpx 24rpx;
   border-radius: 20rpx;
-  background-color: #ffffff;
+  background-color: $color-surface;
   font-size: 26rpx;
-  color: #8a8f99;
+  color: $color-text-muted;
   line-height: 1.8;
 }
 
 .footnote {
   padding-top: 16rpx;
   font-size: 22rpx;
-  color: #a8adb5;
+  color: $color-text-faint;
   text-align: center;
 }
 
