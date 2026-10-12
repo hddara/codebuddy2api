@@ -1,7 +1,7 @@
 import type { CredentialListItem } from '@/api/credentials'
 
 import { describe, expect, it } from 'vitest'
-import { describeCredential } from '@/api/credentials'
+import { describeCredential, draftFromCredential } from '@/api/credentials'
 
 /** A credential with every field at a benign default; each test varies one. */
 function credential(overrides: Partial<CredentialListItem> = {}): CredentialListItem {
@@ -63,5 +63,59 @@ describe('describeCredential', () => {
 
   it('falls back to a readable word when the server sent nothing', () => {
     expect(describeCredential(credential({ time_remaining_str: '' }))).toBe('有效')
+  })
+})
+
+describe('draftFromCredential', () => {
+  it('carries the identifiers an edit must not silently blank', () => {
+    // The server keeps whatever it already has when a field is absent, so a
+    // draft that failed to carry one would not clear it — it would look like a
+    // save that did nothing, with no error to explain why.
+    expect(
+      draftFromCredential(
+        credential({
+          domain: 'copilot.tencent.com',
+          enterprise_id: 'ent-1',
+          filename: 'a.json',
+          tenant_id: 't-1',
+          token_type: 'Bearer',
+          upstream_protocol: 'responses',
+          user_id: 'u1',
+        }),
+      ),
+    ).toEqual({
+      domain: 'copilot.tencent.com',
+      enterprise_id: 'ent-1',
+      filename: 'a.json',
+      tenant_id: 't-1',
+      token_type: 'Bearer',
+      upstream_protocol: 'responses',
+      user_id: 'u1',
+    })
+  })
+
+  it('never carries the token', () => {
+    // The list endpoint does not send token material and the form asks for a
+    // replacement rather than showing the stored one — so the draft has no field
+    // for it, and this pins that.
+    const draft = draftFromCredential(credential())
+
+    expect(draft).not.toHaveProperty('bearer_token')
+    expect(draft).not.toHaveProperty('access_token')
+    expect(draft).not.toHaveProperty('refresh_token')
+  })
+
+  it('turns a null identifier into an empty field rather than the string "null"', () => {
+    // Binding `null` into an input renders "null", which a user would then save.
+    const draft = draftFromCredential(
+      credential({ enterprise_id: null, tenant_id: null }),
+    )
+
+    expect(draft.enterprise_id).toBe('')
+    expect(draft.tenant_id).toBe('')
+  })
+
+  it('supplies a token type when the server reported none', () => {
+    expect(draftFromCredential(credential({ token_type: '' })).token_type).toBe('Bearer')
   })
 })

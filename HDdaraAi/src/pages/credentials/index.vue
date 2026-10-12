@@ -1,5 +1,11 @@
 <script setup lang="ts">
-import type { CredentialLimit, CredentialListItem, CurrentCredential } from '@/api/credentials'
+import type {
+  CredentialDraft,
+  CredentialLimit,
+  CredentialListItem,
+  CredentialModels,
+  CurrentCredential,
+} from '@/api/credentials'
 import { onShow } from '@dcloudio/uni-app'
 
 import { computed, ref } from 'vue'
@@ -8,9 +14,14 @@ import {
   clearCredentialLimits,
   deleteCredential,
   describeCredential,
+  draftFromCredential,
   fetchCredentialLimits,
+  fetchCredentialModels,
   fetchCredentials,
   fetchCurrentCredential,
+  refreshCredentialModels,
+  saveCredential,
+  saveCredentialModels,
   selectCredential,
 } from '@/api/credentials'
 import { ensureUnlocked } from '@/utils/app-guard'
@@ -24,6 +35,7 @@ definePage({
 const credentials = ref<CredentialListItem[]>([])
 const current = ref<CurrentCredential | null>(null)
 const limits = ref<CredentialLimit[]>([])
+const models = ref<CredentialModels>({})
 const loading = ref(true)
 const errorMessage = ref('')
 const notice = ref('')
@@ -31,6 +43,27 @@ const notice = ref('')
 const pending = ref('')
 /** Index awaiting a delete confirmation. */
 const confirmIndex = ref<number | null>(null)
+/** Filename whose model list is expanded. */
+const modelsOpenFor = ref('')
+/**
+ * Edited-but-unsaved model lists, keyed by filename.
+ *
+ * A missing entry means "not touched", which is what lets the textarea fall back
+ * to what the server has — and what lets the save button know there is nothing
+ * to send.
+ */
+const modelDrafts = ref<Record<string, string | undefined>>({})
+
+/**
+ * The credential being created or edited.
+ *
+ * `null` when the form is closed. `editingIndex` distinguishes the two modes,
+ * because the server decides between create and update from the presence of an
+ * integer `index` — and that branch has to be explicit rather than inferred
+ * from whether a filename happens to be filled in.
+ */
+const draft = ref<(CredentialDraft & { index?: number }) | null>(null)
+const draftAdvanced = ref(false)
 
 const limitByFilename = computed(() => {
   const map = new Map<string, CredentialLimit>()
@@ -42,7 +75,6 @@ const limitByFilename = computed(() => {
   return map
 })
 
-/** Which credential the next request will use, when the gateway is round-robining. */
 const nextFilename = computed(() => {
   const value = current.value
 
@@ -55,28 +87,106 @@ const nextFilename = computed(() => {
 
 const limitedCount = computed(() => limits.value.length)
 
+/**
+ * Whether the draft has enough to be worth sending.
+ *
+ * A new credential without a token authenticates nothing, and the server would
+ * store a file that only ever fails. An edit is allowed through with just the
+ * descriptive fields, because that is how a user fixes a wrong domain.
+ */
+const canSaveDraft = computed(() => {
+  const value = draft.value
+
+  if (!value) {
+    return false
+  }
+
+  const hasToken = Boolean(value.bearer_token?.trim() || value.access_token?.trim())
+
+  return value.index === undefined ? hasToken : true
+})
+
+const editing = computed(() => draft.value?.index !== undefined)
+
 async function load() {
   loading.value = true
   errorMessage.value = ''
 
   try {
-    // The three reads are independent; a failure in one must not blank the
-    // others, because each still tells the user something useful on its own.
-    const [list, cursor, limitList] = await Promise.all([
+    const [list, cursor, limitList, modelMap] = await Promise.all([
       fetchCredentials(),
       fetchCurrentCredential().catch(() => null),
       fetchCredentialLimits().catch(() => [] as CredentialLimit[]),
+      fetchCredentialModels().catch(() => ({}) as CredentialModels),
     ])
 
     credentials.value = list
     current.value = cursor
     limits.value = limitList
+    models.value = modelMap
   }
   catch (error) {
     errorMessage.value = consoleErrorMessage(error, '读取凭据失败')
   }
   finally {
     loading.value = false
+  }
+}
+
+function beginCreate() {
+  notice.value = ''
+  errorMessage.value = ''
+  draftAdvanced.value = false
+  modelsOpenFor.value = ''
+  draft.value = {
+    domain: 'copilot.tencent.com',
+    token_type: 'Bearer',
+    upstream_protocol: 'chat',
+  }
+}
+
+function beginEdit(item: CredentialListItem) {
+  notice.value = ''
+  errorMessage.value = ''
+  draftAdvanced.value = true
+  modelsOpenFor.value = ''
+  // Seeded from the list so a user editing the domain does not have to retype
+  // the identifiers — and so nothing the server would otherwise keep is blanked
+  // by an empty field.
+  draft.value = { ...draftFromCredential(item), index: item.index }
+}
+
+function cancelDraft() {
+  draft.value = null
+  draftAdvanced.value = false
+}
+
+async function submitDraft() {
+  const value = draft.value
+
+  if (!value || !canSaveDraft.value || pending.value) {
+    return
+  }
+
+  pending.value = '*'
+  errorMessage.value = ''
+  notice.value = ''
+
+  try {
+    // Which one happened is known from the request, not the reply: the server
+    // answers `{ filename, success }` either way.
+    const wasEditing = value.index !== undefined
+    const result = await saveCredential(value)
+
+    notice.value = wasEditing ? '已保存' : `已添加 ${result.filename}`
+    cancelDraft()
+    await load()
+  }
+  catch (error) {
+    errorMessage.value = consoleErrorMessage(error, '保存失败')
+  }
+  finally {
+    pending.value = ''
   }
 }
 
@@ -92,11 +202,9 @@ async function useNext(item: CredentialListItem) {
   try {
     const result = await selectCredential(item.index)
 
-    // The endpoint answers 200 with `success: false` for an out-of-range index,
-    // so the flag has to be read — trusting the status would report a change
-    // that never happened.
     if (!result.success) {
       errorMessage.value = result.message || '切换失败'
+
       return
     }
 
@@ -132,6 +240,7 @@ async function remove(item: CredentialListItem) {
 
     if (!result.success) {
       errorMessage.value = result.message || '删除失败'
+
       return
     }
 
@@ -172,11 +281,77 @@ async function clearLimits(item?: CredentialListItem) {
 }
 
 /**
- * The line under the email.
+ * Pulls the model list from upstream.
  *
- * State first, because that is what explains a failure; the domain and user id
- * come after for telling two accounts on the same provider apart.
+ * Slow — a real round trip to the provider — so it is a separate press rather
+ * than something that runs on every visit.
  */
+async function refreshModels(item: CredentialListItem) {
+  if (pending.value) {
+    return
+  }
+
+  pending.value = item.filename
+  notice.value = ''
+  errorMessage.value = ''
+
+  try {
+    const next = await refreshCredentialModels(item.filename)
+
+    models.value = { ...models.value, ...next }
+    // Any unsaved edit is dropped: the user just asked for upstream's list, and
+    // keeping the old text would silently discard what they fetched.
+    delete modelDrafts.value[item.filename]
+    notice.value = `已刷新 ${item.email || item.filename} 的模型列表`
+  }
+  catch (error) {
+    errorMessage.value = consoleErrorMessage(error, '刷新模型失败')
+  }
+  finally {
+    pending.value = ''
+  }
+}
+
+/**
+ * Saves a hand-edited model list.
+ *
+ * The override exists because upstream sometimes advertises models it will not
+ * serve; a user who knows which two work can say so.
+ */
+async function saveModels(item: CredentialListItem, text: string) {
+  if (pending.value) {
+    return
+  }
+
+  pending.value = item.filename
+  notice.value = ''
+  errorMessage.value = ''
+
+  try {
+    const next = await saveCredentialModels(item.filename, text)
+
+    models.value = { ...models.value, ...next }
+    // Cleared so the textarea falls back to what the server now holds, rather
+    // than reporting unsaved changes that are already saved.
+    delete modelDrafts.value[item.filename]
+    notice.value = '模型列表已保存'
+  }
+  catch (error) {
+    errorMessage.value = consoleErrorMessage(error, '保存模型失败')
+  }
+  finally {
+    pending.value = ''
+  }
+}
+
+function modelText(item: CredentialListItem): string {
+  return (models.value[item.filename]?.models ?? []).map(entry => entry.id).join('\n')
+}
+
+function toggleModels(item: CredentialListItem) {
+  modelsOpenFor.value = modelsOpenFor.value === item.filename ? '' : item.filename
+}
+
 function subtitle(item: CredentialListItem): string {
   const parts = [describeCredential(item)]
 
@@ -198,13 +373,6 @@ function limitText(limit: CredentialLimit): string {
   return `${kind}${until}`
 }
 
-/**
- * Navigation out of the page.
- *
- * A method rather than `uni.navigateTo` in the template: `uni` is a runtime
- * global, not something the template has in scope, so the call there fails to
- * resolve and nothing happens when the row is pressed.
- */
 function openAccessKeys() {
   uni.navigateTo({ url: '/pages/credentials/keys' })
 }
@@ -268,11 +436,124 @@ onShow(() => {
         <text>{{ notice }}</text>
       </view>
 
+      <!-- The add/edit form. One form for both because the fields are the same
+           and the server branches on `index`; two screens would drift. -->
+      <view v-if="draft" class="section">
+        <view class="section-head">
+          <text class="section-title">{{ editing ? '编辑账号' : '添加上游账号' }}</text>
+          <button class="section-toggle" @tap="cancelDraft">
+            取消
+          </button>
+        </view>
+
+        <template v-if="editing">
+          <text class="section-hint">
+            {{ draft.filename }}
+          </text>
+        </template>
+        <text v-else class="section-hint">
+          令牌来自上游的登录凭据。填好后网关会把它纳入轮询。
+        </text>
+
+        <view class="field">
+          <text class="field-label">
+            {{ editing ? '新的令牌（留空则不修改）' : '访问令牌' }}
+          </text>
+          <textarea
+            v-model="draft.bearer_token"
+            class="textarea"
+            placeholder="eyJhbGciOi..."
+          />
+        </view>
+
+        <template v-if="draftAdvanced">
+          <view class="field">
+            <text class="field-label">用户标识</text>
+            <input
+              v-model="draft.user_id"
+              class="input"
+              placeholder="用于生成文件名，可留空"
+              type="text"
+            >
+          </view>
+
+          <view class="field">
+            <text class="field-label">域名</text>
+            <input
+              v-model="draft.domain"
+              class="input"
+              placeholder="copilot.tencent.com"
+              type="text"
+            >
+          </view>
+
+          <view class="field">
+            <text class="field-label">上游协议</text>
+            <view class="segmented">
+              <button
+                class="segment"
+                :class="draft.upstream_protocol === 'chat' ? 'segment-on' : ''"
+                @tap="draft.upstream_protocol = 'chat'"
+              >
+                chat
+              </button>
+              <button
+                class="segment"
+                :class="draft.upstream_protocol === 'responses' ? 'segment-on' : ''"
+                @tap="draft.upstream_protocol = 'responses'"
+              >
+                responses
+              </button>
+            </view>
+            <text class="field-hint">
+              由上游决定。选错会得到解析失败，而不是 404。
+            </text>
+          </view>
+
+          <view class="field">
+            <text class="field-label">企业 / 租户标识</text>
+            <input
+              v-model="draft.enterprise_id"
+              class="input"
+              placeholder="可留空"
+              type="text"
+            >
+          </view>
+        </template>
+
+        <button
+          v-else
+          class="link-row"
+          @tap="draftAdvanced = true"
+        >
+          展开更多字段
+        </button>
+
+        <AppButton
+          variant="solid"
+          block
+          :disabled="!canSaveDraft || Boolean(pending)"
+          @tap="submitDraft"
+        >
+          {{ pending === '*' ? '保存中…' : '保存' }}
+        </AppButton>
+      </view>
+
+      <AppButton
+        v-else-if="!draft"
+        variant="solid"
+        block
+        class="create-button"
+        @tap="beginCreate"
+      >
+        添加上游账号
+      </AppButton>
+
       <StateBlock
-        v-if="!credentials.length"
+        v-if="!credentials.length && !draft"
         icon="i-carbon:user-multiple"
         text="还没有上游账号"
-        hint="在桌面控制台的「凭证」页添加，添加后会出现在这里。"
+        hint="添加后网关才能在多个账号间轮询。"
       />
 
       <view
@@ -301,26 +582,87 @@ onShow(() => {
         <view class="card-actions">
           <AppButton
             variant="tonal"
+            size="sm"
             :disabled="Boolean(pending) || item.filename === nextFilename"
             @tap="useNext(item)"
           >
             {{ item.filename === nextFilename ? '当前下次' : '设为下次' }}
           </AppButton>
           <AppButton
+            variant="tonal"
+            size="sm"
+            :disabled="Boolean(pending)"
+            @tap="beginEdit(item)"
+          >
+            编辑
+          </AppButton>
+          <AppButton
+            variant="tonal"
+            size="sm"
+            :disabled="Boolean(pending)"
+            @tap="toggleModels(item)"
+          >
+            {{ modelsOpenFor === item.filename ? '收起模型' : `模型（${(models[item.filename]?.models ?? []).length}）` }}
+          </AppButton>
+          <AppButton
             v-if="limitByFilename.get(item.filename)"
             variant="tonal"
+            size="sm"
             :disabled="Boolean(pending)"
             @tap="clearLimits(item)"
           >
             解除限流
           </AppButton>
           <AppButton
-            :variant="confirmIndex === item.index ? 'solid' : 'tonal'" tone="danger"
+            :variant="confirmIndex === item.index ? 'solid' : 'tonal'"
+            :tone="confirmIndex === item.index ? 'danger' : 'neutral'"
+            size="sm"
             :disabled="Boolean(pending)"
             @tap="remove(item)"
           >
             {{ confirmIndex === item.index ? '确认删除' : '删除' }}
           </AppButton>
+        </view>
+
+        <!-- Model editing lives inline rather than on its own page: the list is
+             what tells a user a credential is misconfigured, and sending them
+             elsewhere to fix it loses that context. -->
+        <view v-if="modelsOpenFor === item.filename" class="models">
+          <text class="models-hint">
+            每行一个模型 id。上游有时会声明它并不提供的模型，这里的手动列表会覆盖它。
+          </text>
+          <!-- Edited locally and saved on a press. Binding straight to a save on
+               every keystroke fired one request per character, which the gateway
+               reads as a burst and which made a typo expensive. -->
+          <textarea
+            class="textarea models-text"
+            :value="modelDrafts[item.filename] ?? modelText(item)"
+            @input="(event: any) => (modelDrafts[item.filename] = event.detail.value)"
+          />
+          <view class="models-actions">
+            <AppButton
+              variant="tonal"
+              size="sm"
+              :disabled="Boolean(pending) || modelDrafts[item.filename] === undefined"
+              @tap="saveModels(item, modelDrafts[item.filename]!)"
+            >
+              保存列表
+            </AppButton>
+            <AppButton
+              variant="tonal"
+              size="sm"
+              :disabled="Boolean(pending)"
+              @tap="refreshModels(item)"
+            >
+              {{ pending === item.filename ? '刷新中…' : '从上游刷新' }}
+            </AppButton>
+          </view>
+          <text
+            v-if="models[item.filename]?.error"
+            class="models-error"
+          >
+            {{ models[item.filename]?.error }}
+          </text>
         </view>
       </view>
 
@@ -355,12 +697,34 @@ onShow(() => {
   background-color: $color-surface;
 }
 
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $gap-inline;
+}
+
 .section-title {
-  display: block;
-  margin-bottom: $gap-inline;
+  flex: 1;
+  min-width: 0;
   font-size: $font-section;
   font-weight: 600;
   color: $color-text;
+}
+
+.section-toggle {
+  flex: none;
+  width: auto;
+  margin: 0;
+  padding: 4rpx 12rpx;
+  font-size: $font-meta;
+  line-height: 1.5;
+  color: $color-primary;
+  background-color: transparent;
+}
+
+.section-toggle::after {
+  border: none;
 }
 
 .section-hint {
@@ -369,6 +733,7 @@ onShow(() => {
   font-size: $font-meta;
   line-height: 1.6;
   color: $color-text-muted;
+  word-break: break-all;
 }
 
 .hint-block {
@@ -402,6 +767,97 @@ onShow(() => {
   color: $color-text;
   text-align: right;
   word-break: break-all;
+}
+
+.field {
+  margin-top: 20rpx;
+}
+
+.field-label {
+  display: block;
+  margin-bottom: $gap-inline;
+  font-size: $font-label;
+  color: $color-text-secondary;
+}
+
+.field-hint {
+  display: block;
+  margin-top: 10rpx;
+  font-size: $font-meta;
+  line-height: 1.6;
+  color: $color-text-muted;
+}
+
+.input {
+  width: 100%;
+  height: $height-control;
+  padding: 0 22rpx;
+  box-sizing: border-box;
+  border-radius: $radius-control;
+  background-color: $color-surface-sunken;
+  font-size: $font-body;
+  color: $color-text;
+}
+
+.textarea {
+  width: 100%;
+  height: 180rpx;
+  padding: 18rpx 22rpx;
+  box-sizing: border-box;
+  border-radius: $radius-control;
+  background-color: $color-surface-sunken;
+  font-size: $font-label;
+  line-height: 1.6;
+  color: $color-text;
+}
+
+.link-row {
+  width: 100%;
+  margin: $gap-section 0 0;
+  padding: 12rpx 0;
+  border: none;
+  background-color: transparent;
+  font-size: $font-meta;
+  line-height: 1.5;
+  color: $color-primary;
+  text-align: left;
+}
+
+.link-row::after {
+  border: none;
+}
+
+.segmented {
+  display: flex;
+  gap: 8rpx;
+  padding: 6rpx;
+  border-radius: $radius-control;
+  background-color: $color-surface-sunken;
+}
+
+.segment {
+  flex: 1;
+  margin: 0;
+  padding: 14rpx 0;
+  border: none;
+  border-radius: 12rpx;
+  background-color: transparent;
+  font-size: $font-label;
+  line-height: 1.4;
+  color: $color-text-secondary;
+}
+
+.segment::after {
+  border: none;
+}
+
+.segment-on {
+  color: $color-text;
+  background-color: $color-surface;
+}
+
+.create-button {
+  margin-bottom: $gap-page;
 }
 
 .card {
@@ -467,6 +923,38 @@ onShow(() => {
   flex-wrap: wrap;
   gap: $gap-inline;
   margin-top: $gap-section;
+}
+
+.models {
+  margin-top: $gap-section;
+  padding-top: $gap-section;
+  border-top: 1rpx solid $color-border-strong;
+}
+
+.models-hint {
+  display: block;
+  margin-bottom: 12rpx;
+  font-size: $font-meta;
+  line-height: 1.6;
+  color: $color-text-muted;
+}
+
+.models-text {
+  height: 260rpx;
+  margin-bottom: $gap-inline;
+}
+
+.models-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: $gap-inline;
+}
+
+.models-error {
+  display: block;
+  margin-top: 10rpx;
+  font-size: $font-meta;
+  color: $color-danger;
 }
 
 .notice {

@@ -48,8 +48,12 @@ export interface StoredPasskey {
  * `publicKey` and `counter` are deliberately dropped rather than left for each
  * caller to omit: they are credential material, they have no meaning to a user,
  * and a screen that renders whatever it was handed would print them.
+ *
+ * Exported for its own test. It is a security boundary — the only thing standing
+ * between the server's record and a template — and a projection that silently
+ * started passing fields through would look like a successful fetch.
  */
-function toVisiblePasskey(record: Record<string, unknown>): StoredPasskey {
+export function toVisiblePasskey(record: Record<string, unknown>): StoredPasskey {
   return {
     backedUp: (record.backedUp ?? null) as boolean | null,
     createdAt: String(record.createdAt ?? ''),

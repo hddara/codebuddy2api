@@ -60,6 +60,75 @@ export async function fetchCredentials(): Promise<CredentialListItem[]> {
   return payload.credentials ?? []
 }
 
+/**
+ * The editable half of a credential.
+ *
+ * The fields a user types when adding an account up front, plus the ones that
+ * only make sense when editing an existing file. Everything here maps to a key
+ * the server reads in `addCredential` — an unknown key would be stored and
+ * silently ignored, which is why the shape is declared rather than left as
+ * `Record<string, unknown>`.
+ */
+export interface CredentialDraft {
+  /** One of the two token fields is what actually authenticates. */
+  access_token?: string
+  bearer_token?: string
+  domain?: string
+  enterprise_id?: string
+  filename?: string
+  /** Forces the upstream response shape this account is spoken to with. */
+  upstream_protocol?: 'chat' | 'responses'
+  refresh_token?: string
+  /**
+   * Comma- or newline-separated. Sent as one string because the server splits it
+   * itself, and sending an array would be stored verbatim as a stringified one.
+   */
+  supported_models?: string
+  tenant_id?: string
+  token_type?: string
+  /** Also the prefix of the auto-generated filename. */
+  user_id?: string
+}
+
+/**
+ * Creates a credential, or updates one when `index` is supplied.
+ *
+ * One endpoint serves both because the server decides from the presence of an
+ * integer `index`; splitting it here would only move that branch up a layer.
+ *
+ * Creating also refreshes the model list inline, so a new account reports what
+ * it can serve without a second press — and that makes this call slow enough
+ * that the caller should show progress.
+ *
+ * The response is `{ filename, success }` for **both** modes: the server does not
+ * echo the index back, so a caller wanting to know which of the two happened has
+ * to remember what it asked for rather than read it off the reply.
+ */
+export async function saveCredential(
+  draft: CredentialDraft & { index?: number },
+): Promise<{ filename: string, success: boolean }> {
+  return consolePost<{ filename: string, success: boolean }>(
+    '/admin-api/credentials',
+    draft,
+  )
+}
+
+/**
+ * Adds a toggle to an existing credential's draft, preserving what the server
+ *  would otherwise reset.
+ */
+export function draftFromCredential(item: CredentialListItem): CredentialDraft {
+  return {
+    domain: item.domain ?? '',
+    enterprise_id: item.enterprise_id === null ? '' : String(item.enterprise_id),
+    filename: item.filename,
+    tenant_id: item.tenant_id === null ? '' : String(item.tenant_id),
+    token_type: item.token_type || 'Bearer',
+    upstream_protocol: item.upstream_protocol,
+    user_id: item.user_id ?? '',
+  }
+}
+
 /** Which credential the next request will use. */
 export type CurrentCredential
   = | { status: 'no_credentials' }
