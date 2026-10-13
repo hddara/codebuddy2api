@@ -42,6 +42,7 @@
 
 ## 进行中 / 待办
 
+- **Peekaboo 兼容（分支 `fix/sse-strict-compat`，已部署验证）**：`--type openai` 走 `/v1/chat/completions` 报 `finish reason 'other'`，**字段清洗（`cb11cfd`，`sanitizeStreamDelta` + `CODEBUDDY_SSE_STRICT_COMPAT` 开关）部署后实测仍未解决**，且用本地代理试 5 种改写变体全部失败 → 疑为 Tachikoma SDK 的 OpenAI 流式 `finish_reason` 映射缺陷，与网关输出无关。**可用方案：改用 Anthropic 协议**——`peekaboo config provider add <id> --type anthropic --base-url https://code.apimesh.cn`，实测 `success: True`、任务完整执行。详见 [2026-10-13](2026-10-13.md) 与项目根目录 `HANDOFF-sse-strict-compat.md`。
 - **凭证限流识别与自动换号（未实施）**：方案见 brv `projects/codebuddy2api/plans/2026-09-29-rate-limit-detection.md`。现状是「候选只过滤 token 过期、上游 429 只透传、亲和把会话钉死」；4 项待拍板 + 3 项待取证（真实限流报文、限流窗口粒度、是否全体同时受限）。
 
 ## 本机开发注意
