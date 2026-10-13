@@ -15,7 +15,9 @@
       "autoclose": true,
       "delay": 0
     },
-    "modules": {},
+    "modules": {
+      "Fingerprint": {}
+    },
     "distribute": {
       "android": {
         "permissions": [],

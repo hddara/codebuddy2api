@@ -32,18 +32,16 @@
         "navigationBarTitleText": "会话"
       }
     },
-    // #ifdef APP-HARMONY
     {
-      "path": "pages/sessions/live",
-      "type": "page",
-      "name": "session-live",
-      "style": {
-        "navigationBarTitleText": "实时回复"
-      }
-    },
-    // #endif
-    // #ifdef APP || H5 || MP-HARMONY || MP-WEIXIN
-    {
+      // Registered exactly once, for every platform. `#ifdef APP-HARMONY` is not
+      // a real platform token (the build uses `app-harmony`, lowercase, and the
+      // preprocessor matches on the uppercase form of that), so a second block
+      // guarded by it was never excluded on harmony — it stayed alongside the
+      // `APP` block and registered the page twice, which fails the harmony build
+      // with `pages.json->pages/sessions/live duplication`.
+      //
+      // `softinputMode: adjustResize` is only meaningful for the App runtimes;
+      // harmony ignores it, which is why one entry is enough here.
       "path": "pages/sessions/live",
       "type": "page",
       "name": "session-live",
@@ -54,7 +52,6 @@
         }
       }
     },
-    // #endif
     {
       "path": "pages/sessions/transcript",
       "type": "page",
@@ -71,7 +68,6 @@
         "navigationBarTitleText": "设置"
       }
     },
-    // #ifdef APP || H5 || MP-HARMONY
     {
       "path": "pages/account/index",
       "type": "page",
@@ -80,8 +76,6 @@
         "navigationBarTitleText": "账户管理"
       }
     },
-    // #endif
-    // #ifdef APP || H5 || MP-HARMONY
     {
       "path": "pages/account/usage",
       "type": "page",
@@ -90,8 +84,6 @@
         "navigationBarTitleText": "账户数据"
       }
     },
-    // #endif
-    // #ifdef APP || H5 || MP-HARMONY
     {
       "path": "pages/credentials/index",
       "type": "page",
@@ -100,8 +92,6 @@
         "navigationBarTitleText": "凭证管理"
       }
     },
-    // #endif
-    // #ifdef APP || H5 || MP-HARMONY
     {
       "path": "pages/credentials/keys",
       "type": "page",
@@ -110,7 +100,6 @@
         "navigationBarTitleText": "访问密钥"
       }
     }
-    // #endif
   ],
   "subPackages": [],
   "tabBar": {

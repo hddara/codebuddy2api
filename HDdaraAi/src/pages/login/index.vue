@@ -10,7 +10,7 @@ import { parseStored } from '@/store/persist'
 import {
   authenticateBiometric,
   biometricSupport,
-
+  describeBiometricFailure,
 } from '@/utils/biometric'
 import { isAuthError } from '@/utils/errors'
 import { consumePendingRoute } from '@/utils/launch-route'
@@ -373,10 +373,13 @@ function toggleBiometric() {
     // Storage being unavailable only costs the preference, not the app.
   }
 
-  if (biometricEnabled.value && probeBiometric() !== 'available') {
-    errorMessage.value = biometric.value === 'unavailable'
-      ? '设备未设置指纹或面容，请先在系统设置中添加'
-      : '当前安装包未包含指纹模块，无法启用'
+  // Probed once and reused: `biometric.value` is only settled by the probe, so
+  // reading it on the next line would still be `'unknown'` and the message
+  // would describe a state that was never observed.
+  const capability = probeBiometric()
+
+  if (biometricEnabled.value && capability !== 'available') {
+    errorMessage.value = describeBiometricFailure(capability)
     biometricEnabled.value = false
     try {
       uni.setStorageSync('biometric-enabled', false)

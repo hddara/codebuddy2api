@@ -25,19 +25,29 @@ export default defineManifestConfig({
       autoclose: true,
       delay: 0,
     },
-    // `Fingerprint` is deliberately NOT declared.
+    // `Fingerprint` is declared because **iOS ships the module and Android does
+    // not** — and the difference is in the shell, not in this flag.
     //
-    // Declaring the module does not add it — the offline shell only ships the
-    // aars that are copied into `simpleDemo/libs/`, and this SDK drops no
-    // fingerprint aar — but the declaration still makes `plus.fingerprint`
-    // advertise itself, so the first call raises a blocking "打包时未添加
-    // fingerprint 模块" dialog. That dialog cannot be dismissed from code and
-    // took the whole cold start down.
+    // Measured: `dcloud-ios/SDK/SDK/Libs` contains the whole Face ID stack
+    // (`DTFIdentityManager`, `DTFSensorServices`, `DTFUIModule`, `DTFUtility`,
+    // `libDCUniFaceID.a`, `liblibFingerprint.a`), while `dcloud-android/shell/
+    // simpleDemo/libs` holds only its five base aars and no fingerprint library
+    // at all.
     //
-    // The lock screen instead treats biometrics as an opt-in enhancement and
-    // never probes unless the user turns it on (see pages/login/index.vue).
-    // Copying the aar in is what would make it actually work.
-    modules: {},
+    // The flag does not add a module that is missing; it lets a *present* one
+    // advertise itself. So on iOS this is what makes Face ID reachable, and on
+    // Android it stays absent — which is the state the previous comment was
+    // describing when it concluded the module could not be used anywhere. That
+    // conclusion held for Android and was wrong for iOS, and an iPhone was
+    // telling users "this build has no fingerprint module" while shipping one.
+    //
+    // The lock screen still treats biometrics as an opt-in enhancement and never
+    // probes unless the user turns it on (see pages/login/index.vue), so a build
+    // without a working module degrades to the credential form rather than
+    // raising the undismissable "模块未添加" dialog.
+    modules: {
+      Fingerprint: {},
+    },
     distribute: {
       android: {
         package: 'cn.hddara.ai',

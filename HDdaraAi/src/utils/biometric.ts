@@ -7,9 +7,21 @@
  *
  * The browser build has no equivalent, so it reports `unsupported` and the lock
  * screen simply does not offer it.
+ *
+ * The three failure states are kept apart because they need different wording.
+ * Collapsing them was what produced "当前安装包未包含指纹模块" on an iPhone whose
+ * shell ships the whole Face ID stack: the sentence blamed the build for
+ * something that was either the platform or the user's own settings, and there
+ * was nothing the reader could do with it.
  */
 
-export type BiometricSupport = 'available' | 'unsupported' | 'unavailable'
+export type BiometricSupport
+  /** The bridge is present and the device is ready to authenticate. */
+  = | 'available'
+    /** No bridge at all — a browser build, or a shell without the module. */
+    | 'unsupported'
+    /** Hardware and module are fine; nothing is enrolled, or no passcode is set. */
+    | 'unavailable'
 
 export interface BiometricResult {
   /** True only when the OS reported a successful match. */
@@ -48,20 +60,59 @@ export function biometricSupport(): BiometricSupport {
   if (!api?.isSupport || !api.authenticate)
     return 'unsupported'
 
+  let hardwareReady: boolean
+
   try {
-    if (!api.isSupport())
-      return 'unsupported'
-    // A device can have the hardware but no enrolled credential; the API
-    // reports that separately and the lock screen should then say so rather
-    // than offering something that always fails.
-    if (api.isKeyguardSecure && !api.isKeyguardSecure())
-      return 'unavailable'
+    hardwareReady = api.isSupport()
   }
   catch {
     return 'unsupported'
   }
 
+  // `isSupport()` is documented as "the device has usable biometric hardware",
+  // but on iOS it also goes false when nothing is enrolled — and `authenticate`
+  // would then always fail. Both readings mean the same thing to the caller:
+  // there is nothing on this device to match against, which is a settings
+  // problem the user can fix, not a missing module.
+  //
+  // Which of the two it is cannot be told apart from here, so the state is
+  // reported as `unavailable` — the wording that points at the device — rather
+  // than as a build that lacks something.
+  if (!hardwareReady)
+    return 'unavailable'
+
+  try {
+    if (api.isKeyguardSecure && !api.isKeyguardSecure())
+      return 'unavailable'
+  }
+  catch {
+    // The check itself failing says nothing about the hardware; the module is
+    // present and `isSupport()` already said yes, so proceed rather than
+    // downgrading a working device to unsupported.
+  }
+
   return 'available'
+}
+
+/**
+ * What to tell a user who turned biometric unlock on but cannot use it.
+ *
+ * Written per state rather than from one sentence with a clause swapped: the
+ * three causes lead to three different actions, and a message that names the
+ * wrong one sends the reader somewhere useless. The previous wording blamed the
+ * installation ("当前安装包未包含指纹模块") for every case, including one on an
+ * iPhone whose shell ships the whole Face ID stack — leaving the user with
+ * nothing to do, since they cannot rebuild the app.
+ */
+export function describeBiometricFailure(state: BiometricSupport): string {
+  if (state === 'unavailable') {
+    return '设备未设置指纹或面容，请先在系统设置中录入'
+  }
+
+  // `unsupported`: no bridge, so nothing the user can change from here. Said
+  // plainly and without blaming their device, because the app genuinely cannot
+  // tell whether it is the platform or the build.
+  return '当前设备不支持指纹或面容解锁，请改用密码登录'
 }
 
 /**
