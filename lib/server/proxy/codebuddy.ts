@@ -124,6 +124,14 @@ interface ToolCallMapping {
 interface ToolCallNormalizationState {
   mappings: Map<string, ToolCallMapping>;
   nextIndex: number;
+  /**
+   * Ids of tool calls whose opening chunk already carried `function.name`.
+   *
+   * The schema only allows the name on the chunk that opens a call; echoing it
+   * (or echoing `''`) on later chunks makes a strict reader either re-declare
+   * the call or clear the name it already collected.
+   */
+  namedToolCalls: Set<string>;
 }
 
 interface ResolvedAuth {
@@ -2689,6 +2697,94 @@ const resolveToolCallMapping = (
   };
 };
 
+/**
+ * Upstream-only delta fields that the OpenAI streaming schema has no place for.
+ *
+ * CodeBuddy emits these on every frame; strict clients (the Swift AI SDK behind
+ * Peekaboo, for one) reject the frame outright rather than ignoring an unknown
+ * key, so they must not survive the passthrough.
+ */
+const NON_STANDARD_DELTA_FIELDS = ['extra_fields', 'refusal'] as const;
+
+/**
+ * Whether the passthrough narrows each delta to the fields the OpenAI schema
+ * defines.
+ *
+ * On by default: the upstream fills every frame with `extra_fields`,
+ * `refusal`, an empty `tool_calls` array and a deprecated `function_call`, and
+ * strict clients reject such a frame instead of ignoring what they do not know.
+ * Set `CODEBUDDY_SSE_STRICT_COMPAT=0` to forward the upstream frames untouched —
+ * the escape hatch if some client turns out to depend on a placeholder we drop.
+ */
+const isStrictSseCompatEnabled = (): boolean => {
+  const raw = process.env.CODEBUDDY_SSE_STRICT_COMPAT?.trim().toLowerCase();
+
+  return raw !== '0' && raw !== 'false' && raw !== 'off' && raw !== 'no';
+};
+
+/**
+ * Drop non-standard keys and collapse the empty placeholders the upstream fills
+ * in, so a strict client sees only the fields the schema actually allows.
+ *
+ * Two shapes matter here:
+ *
+ * - `tool_calls: []` — codebuddy sends an empty array on every content frame.
+ *   An empty array means "the tool call list is reset" to a strict reader, so
+ *   the key is removed rather than forwarded empty.
+ * - `function_call: { name: '', arguments: '' }` — the deprecated field arrives
+ *   as null on content frames and as an empty object on the terminal frame.
+ *   Both are stripped; the deprecated field is never useful downstream.
+ */
+const sanitizeStreamDelta = (
+  delta: Record<string, unknown>,
+): Record<string, unknown> => {
+  if (!isStrictSseCompatEnabled()) {
+    return delta;
+  }
+
+  const cleaned: Record<string, unknown> = { ...delta };
+
+  for (const field of NON_STANDARD_DELTA_FIELDS) {
+    delete cleaned[field];
+  }
+
+  if (Array.isArray(cleaned.tool_calls) && cleaned.tool_calls.length === 0) {
+    delete cleaned.tool_calls;
+  }
+
+  const legacyCall = cleaned.function_call;
+  if (
+    legacyCall === null ||
+    legacyCall === undefined ||
+    (typeof legacyCall === 'object' &&
+      !Array.isArray(legacyCall) &&
+      !String((legacyCall as { name?: unknown }).name ?? '').trim() &&
+      !String((legacyCall as { arguments?: unknown }).arguments ?? '').trim())
+  ) {
+    delete cleaned.function_call;
+  }
+
+  return cleaned;
+};
+
+/**
+ * Blank string fields are omitted rather than forwarded as `''`.
+ *
+ * A strict reader treats `name: ''` as an instruction to clear the name it
+ * accumulated from the opening chunk, so only the first tool-call chunk may
+ * carry `function.name`; later chunks must leave the key out entirely.
+ */
+const stripBlankStringFields = (
+  value: Record<string, unknown>,
+  fields: string[],
+): void => {
+  for (const field of fields) {
+    if (value[field] === '') {
+      delete value[field];
+    }
+  }
+};
+
 const normalizeStreamToolCalls = (
   chunk: ChatStreamChunk,
   state: ToolCallNormalizationState,
@@ -2700,15 +2796,25 @@ const normalizeStreamToolCalls = (
   return {
     ...chunk,
     choices: chunk.choices.map((choice) => {
-      if (!choice.delta?.tool_calls?.length) {
-        return choice;
+      const delta = choice.delta as Record<string, unknown> | undefined;
+      const toolCalls = Array.isArray(delta?.tool_calls)
+        ? (delta.tool_calls as ToolCallChunk[])
+        : null;
+
+      if (!delta || !toolCalls?.length) {
+        return {
+          ...choice,
+          delta: delta
+            ? (sanitizeStreamDelta(delta) as ChatStreamDelta)
+            : delta,
+        };
       }
 
       return {
         ...choice,
         delta: {
-          ...choice.delta,
-          tool_calls: choice.delta.tool_calls.map((toolCall, position) => {
+          ...sanitizeStreamDelta(delta),
+          tool_calls: toolCalls.map((toolCall, position) => {
             const mapping = resolveToolCallMapping(state, toolCall, position);
             const sourceKey = getToolCallStateKey(toolCall, position);
 
@@ -2722,13 +2828,41 @@ const normalizeStreamToolCalls = (
               state.mappings.set(`index:${toolCall.index}`, mapping);
             }
 
-            return {
+            const normalized = {
               ...toolCall,
               id: mapping.id,
               index: mapping.index,
-            };
+            } as Record<string, unknown>;
+
+            if (!isStrictSseCompatEnabled()) {
+              return normalized as ToolCallChunk;
+            }
+
+            const fn = normalized.function as
+              Record<string, unknown> | undefined;
+            const carriesName =
+              typeof fn?.name === 'string' && fn.name.trim().length > 0;
+
+            if (carriesName) {
+              // Opening chunk for this call: keep the declared name and record
+              // that it has been sent, so later chunks stay silent about it.
+              state.namedToolCalls.add(mapping.id);
+              const normalizedFn = { ...fn };
+              stripBlankStringFields(normalizedFn, ['arguments']);
+              normalized.function = normalizedFn;
+            } else if (fn) {
+              // Continuation chunk: `name: ''` would read as a reset, and a
+              // repeated name would read as a second declaration. Either way
+              // the key is dropped, which is what the schema expects.
+              const normalizedFn = { ...fn };
+              delete normalizedFn.name;
+              stripBlankStringFields(normalizedFn, ['arguments']);
+              normalized.function = normalizedFn;
+            }
+
+            return normalized as ToolCallChunk;
           }),
-        },
+        } as ChatStreamDelta,
       };
     }),
   };
@@ -2762,6 +2896,7 @@ const normalizeStreamingResponse = ({
   const state: ToolCallNormalizationState = {
     mappings: new Map<string, ToolCallMapping>(),
     nextIndex: 0,
+    namedToolCalls: new Set<string>(),
   };
   let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   let cancelled = false;
