@@ -1,9 +1,14 @@
 {
   "globalStyle": {
-    "backgroundColor": "#f5f6f8",
-    "navigationBarBackgroundColor": "#ffffff",
-    "navigationBarTextStyle": "black",
-    "navigationBarTitleText": "HDdaraAi"
+    "backgroundColor": "@bgColor",
+    "backgroundColorTop": "@bgColorTop",
+    "backgroundColorBottom": "@bgColorBottom",
+    "navigationBarBackgroundColor": "@navBgColor",
+    "navigationBarTextStyle": "@navTxtStyle",
+    "navigationBarTitleText": "HDdaraAi",
+    "app-plus": {
+      "bounce": "none"
+    }
   },
   "pages": [
     // #ifdef APP || H5 || MP-WEIXIN

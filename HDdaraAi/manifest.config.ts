@@ -20,6 +20,29 @@ export default defineManifestConfig({
     nvueStyleCompiler: 'uni-app',
     compilerVersion: 3,
     /**
+     * Turns on the platform's own light/dark resolution for `pages.json`.
+     *
+     * Required for the `@name` references in `pages.config.ts` to resolve at
+     * all — without it the platform has no second set of values to switch to,
+     * and the strip a bounce reveals stays on whichever colour was baked in.
+     * That strip is a native layer below the document: no CSS variable and no
+     * runtime call reaches it (`uni.setBackgroundColor` does not exist on App,
+     * measured), so build-time resolution is the only mechanism there is.
+     */
+    darkmode: true,
+    /**
+     * `static/theme.json`, not `theme.json`.
+     *
+     * The compiler resolves this against `UNI_INPUT_DIR` (= `src/`), but the
+     * App also needs to *find the file at runtime* — and `themeLocation` is
+     * read from the packaged app, not from the source tree. Only `src/static/`
+     * is copied through to `dist/build/app/`, which is what `build-ipa.sh`
+     * then rsyncs into the shell's `www/`. A copy at the project root is found
+     * by neither: not by the compiler (wrong directory) and not by the runtime
+     * (never packaged).
+     */
+    themeLocation: 'static/theme.json',
+    /**
      * Keeps the launch webview full-screen, under the home indicator.
      *
      * The compiler sets this itself — but **only when no `tabBar` is

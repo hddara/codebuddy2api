@@ -32,6 +32,8 @@
       },
       "sdkConfigs": {}
     },
+    "darkmode": true,
+    "themeLocation": "static/theme.json",
     "launchwebview": {
       "render": "always"
     },

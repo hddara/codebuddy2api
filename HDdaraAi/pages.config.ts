@@ -8,10 +8,61 @@ import { defineUniPages } from '@uni-helper/vite-plugin-uni-pages'
  */
 export default defineUniPages({
   globalStyle: {
-    backgroundColor: '#f5f6f8',
-    navigationBarBackgroundColor: '#ffffff',
-    navigationBarTextStyle: 'black',
-    navigationBarTitleText: 'HDdaraAi',
+    /**
+     * The strip a bounce reveals, resolved per theme at build time.
+     *
+     * These are the only colours in the app that no stylesheet and no runtime
+     * call can reach, so `theme.json` is the one mechanism left. Every other
+     * surface is painted by CSS variables from `themeStore`, which follow the
+     * user's `light`/`dark`/`system` choice — but this strip is a native layer
+     * below the document, and its value is baked in when the app is built.
+     *
+     * Two routes were tried and are worth not repeating:
+     *
+     * 1. `webview.setStyle({ bounceBackground })` — no effect on this runtime.
+     * 2. `uni.setBackgroundColor` — **the API does not exist on App**. It is
+     *    read as `undefined`, so the optional call short-circuits and the
+     *    existing invocation had never run once. Measured on device, not
+     *    inferred.
+     *
+     * `@name` references `theme.json`, which the platform reads when the
+     * system theme changes. That makes the strip follow the *system* setting
+     * rather than the in-app one, and the two can disagree: a user who picks
+     * "浅色" on a dark phone gets a dark strip. That is the one place the app
+     * cannot honour the in-app choice, and it is the trade for the strip not
+     * being white on every dark screen.
+     */
+    'backgroundColor': '@bgColor',
+    'backgroundColorTop': '@bgColorTop',
+    'backgroundColorBottom': '@bgColorBottom',
+    'navigationBarBackgroundColor': '@navBgColor',
+    'navigationBarTextStyle': '@navTxtStyle',
+    'navigationBarTitleText': 'HDdaraAi',
+    /**
+     * Turns off the rubber-band bounce on every page.
+     *
+     * This is what actually removes the white band, and it removes it by
+     * removing the thing that revealed it. A bounce drags the whole webview off
+     * its position; the strip left behind is a native layer below the document,
+     * painted from `globalStyle`, which is a build-time value that can hold one
+     * theme. Colouring that strip was the goal of the `theme.json` block above
+     * — this makes the effort unnecessary for the pull case, because there is
+     * no longer a pull.
+     *
+     * Nothing is lost by turning it off. The App had no pull-to-refresh to
+     * begin with: `enablePullDownRefresh` is not set on any page, so the
+     * gesture produced only the overscroll, never a refresh. The docs warn that
+     * `bounce: 'none'` breaks `default`-style pull-to-refresh on iOS — which
+     * only matters if one is configured, and none is.
+     *
+     * `theme.json` stays as well, because the strip can still be reached: the
+     * pages are `App`-runtime Vue pages, where a bounce on an inner
+     * `scroll-view` is a separate mechanism from the page-level one this turns
+     * off. The two are complementary rather than redundant.
+     */
+    'app-plus': {
+      bounce: 'none',
+    },
   },
   pages: [
     {

@@ -201,9 +201,21 @@ export const useThemeStore = defineStore('theme', {
       }
       // #endif
 
-      // App-only, and asynchronous for the same reason as the call above — the
-      // optional-call guard only covers "absent", not "rejected".
-      swallow(() => uni.setBackgroundColor?.({ backgroundColor: background }))
+      /**
+       * There is deliberately no `uni.setBackgroundColor` call here.
+       *
+       * The strip a pull reveals is a native layer below the document. It was
+       * assumed to be reachable from here — the API is documented, and it takes
+       * `backgroundColorTop` / `backgroundColorBottom`, which is exactly the
+       * shape this problem has. It was measured on device instead: the member
+       * is `undefined` on the App runtime, so the optional call short-circuited
+       * and the invocation had never run once.
+       *
+       * `theme.json` handles the strip instead, resolved at build time per
+       * system theme. `webview.setStyle({ bounceBackground })` was also tried
+       * and has no effect on this runtime — the two dead ends are recorded so
+       * the next person does not spend the same rounds on them.
+       */
 
       // No tab-bar work here any more, and that is the point of the change.
       //
@@ -237,16 +249,12 @@ export const useThemeStore = defineStore('theme', {
       // than just skip the background.
       try {
         // #ifdef APP-PLUS
-        // Both surfaces, because they are separate: `background` is the window's
-        // back plate and `bounceBackground` is the strip a pull leaves behind.
-        // Setting only the first left a dark screen bouncing against white — the
-        // strip comes from `pages.json`'s `globalStyle.backgroundColor`, a
-        // build-time value that holds the light page colour and that no
-        // stylesheet can reach.
-        plus.webview?.currentWebview?.()?.setStyle?.({
-          background,
-          bounceBackground: background,
-        })
+        // `background` only. The strip a pull would reveal is not reachable
+        // from here — `bounceBackground` has no effect on this runtime,
+        // `uni.setBackgroundColor` does not exist on App, and the value is
+        // baked in at build time. `pages.config.ts` turns the bounce off
+        // instead, so there is no strip to paint.
+        plus.webview?.currentWebview?.()?.setStyle?.({ background })
         // #endif
       }
       catch {

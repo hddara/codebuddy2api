@@ -69,30 +69,19 @@ export function useNativeChrome() {
          * The webview's own backdrop.
          *
          * This is the window's back plate — what shows where the page does not
-         * paint. It is *not* what a pull reveals; see `bounceBackground` below.
+         * paint, and behind a short page. Set per webview rather than once from
+         * the store for the same reason as the title bar: `setStyle` applies to
+         * the one webview it is called on, and a launch-time call would paint
+         * whichever page happened to be current and leave every later page on
+         * the default.
+         *
+         * It is *not* the surface a pull reveals, and no property here is: that
+         * strip is below the document, `bounceBackground` has no effect on this
+         * runtime, and `uni.setBackgroundColor` does not exist on App. The pull
+         * case is handled by turning the bounce off in `pages.config.ts`, with
+         * `theme.json` covering the surfaces that remain.
          */
         background,
-        /**
-         * What a pull actually reveals — the band this page was showing in white.
-         *
-         * Dragging past the top or bottom drags the whole webview off its
-         * position, and the strip left behind is painted by the native layer
-         * underneath. `background` does not reach it: the two are separate
-         * surfaces, which is why a dark page could bounce against a white band
-         * with `background` already set correctly.
-         *
-         * The strip starts from `pages.json`'s `globalStyle.backgroundColor` —
-         * a build-time value that can hold one theme only, and holds the light
-         * page colour — so it was white on every dark screen regardless of what
-         * the page painted. No stylesheet can reach it; it sits below the
-         * document, not inside it.
-         *
-         * Set per webview rather than once from the store for the same reason as
-         * the title bar: `setStyle` applies to the one webview it is called on,
-         * and a launch-time call would paint whichever page happened to be
-         * current and leave every later page on the default.
-         */
-        bounceBackground: background,
       })
     }
     catch {
