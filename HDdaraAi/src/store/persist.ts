@@ -243,6 +243,9 @@ export function persistPlugin(context: PiniaPluginContext) {
   // 调用persist函数，并传入排除列表
   // 'temp' - 临时数据不持久化
   // 'network-status' - 网络状态是运行时瞬时值，持久化会让下次冷启动读到过期的 isOffline
+  // 'biometric' - 自带存储（沿用旧的 biometric-enabled 键），且 support 是设备能力探测
+  //   结果、enabled 是用户偏好，两者生命周期不同：交给本插件会把探测结果一起冻结，
+  //   下次冷启动读到过期的『不支持』。见 store/biometricStore.ts。
   // 说明：mall 的 'shoppingCart' / 'app-update-popup' 已随业务剥离，本项目无这些 store
-  persist(context, ['temp', 'network-status'])
+  persist(context, ['temp', 'network-status', 'biometric'])
 }
