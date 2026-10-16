@@ -237,7 +237,16 @@ export const useThemeStore = defineStore('theme', {
       // than just skip the background.
       try {
         // #ifdef APP-PLUS
-        plus.webview?.currentWebview?.()?.setStyle?.({ background })
+        // Both surfaces, because they are separate: `background` is the window's
+        // back plate and `bounceBackground` is the strip a pull leaves behind.
+        // Setting only the first left a dark screen bouncing against white — the
+        // strip comes from `pages.json`'s `globalStyle.backgroundColor`, a
+        // build-time value that holds the light page colour and that no
+        // stylesheet can reach.
+        plus.webview?.currentWebview?.()?.setStyle?.({
+          background,
+          bounceBackground: background,
+        })
         // #endif
       }
       catch {

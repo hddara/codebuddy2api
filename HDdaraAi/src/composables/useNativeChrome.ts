@@ -66,20 +66,33 @@ export function useNativeChrome() {
           titleColor: textStyle === 'white' ? '#ffffff' : '#000000',
         },
         /**
-         * The webview's own backdrop — what shows through an overscroll bounce.
+         * The webview's own backdrop.
          *
-         * Dragging a page past its top or bottom reveals this layer rather than
-         * the page, because the page has scrolled out of view. The runtime
-         * initialises it from `pages.json`'s `globalStyle.backgroundColor`,
-         * which can hold exactly one theme — it is the light page colour — so a
-         * dark screen bounced against a white band. The stylesheet cannot reach
-         * it: it is below the document, not part of it.
-         *
-         * Set from the page rather than the store for the same reason the title
-         * bar is: this is per-webview, and the store only ever holds the one
-         * that happened to be current at launch.
+         * This is the window's back plate — what shows where the page does not
+         * paint. It is *not* what a pull reveals; see `bounceBackground` below.
          */
         background,
+        /**
+         * What a pull actually reveals — the band this page was showing in white.
+         *
+         * Dragging past the top or bottom drags the whole webview off its
+         * position, and the strip left behind is painted by the native layer
+         * underneath. `background` does not reach it: the two are separate
+         * surfaces, which is why a dark page could bounce against a white band
+         * with `background` already set correctly.
+         *
+         * The strip starts from `pages.json`'s `globalStyle.backgroundColor` —
+         * a build-time value that can hold one theme only, and holds the light
+         * page colour — so it was white on every dark screen regardless of what
+         * the page painted. No stylesheet can reach it; it sits below the
+         * document, not inside it.
+         *
+         * Set per webview rather than once from the store for the same reason as
+         * the title bar: `setStyle` applies to the one webview it is called on,
+         * and a launch-time call would paint whichever page happened to be
+         * current and leave every later page on the default.
+         */
+        bounceBackground: background,
       })
     }
     catch {
