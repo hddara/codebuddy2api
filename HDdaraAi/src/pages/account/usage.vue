@@ -5,6 +5,7 @@ import { onShow } from '@dcloudio/uni-app'
 import { computed, ref } from 'vue'
 import { claimCheckin, creditPercentage, fetchAccountStatus, formatCredits } from '@/api/account-status'
 import { consoleErrorMessage } from '@/api/core/console'
+import { useNativeChrome } from '@/composables/useNativeChrome'
 import { ensureUnlocked } from '@/utils/app-guard'
 import { formatDateTime } from '@/utils/format'
 
@@ -13,6 +14,9 @@ definePage({
   style: { navigationBarTitleText: '账户数据' },
 })
 
+// Repaints this page's native title bar; it is per-webview and would
+// otherwise revert to the light default on each navigation.
+useNativeChrome()
 const statuses = ref<AccountStatusSnapshot[]>([])
 const loading = ref(true)
 const refreshing = ref(false)
@@ -152,7 +156,7 @@ onShow(() => {
 </script>
 
 <template>
-  <view class="page">
+  <view class="page" :class="themeClass">
     <StateBlock
       v-if="errorMessage"
       tone="danger"
@@ -302,6 +306,9 @@ onShow(() => {
 .page {
   min-height: 100vh;
   padding: $gap-page;
+  /* Sub-page: nothing is drawn over the webview, but the home indicator still
+     sits on top of the final card on notched devices. */
+  padding-bottom: $gap-page-bottom;
   box-sizing: border-box;
   background-color: $color-page;
 }

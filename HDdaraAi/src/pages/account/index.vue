@@ -3,24 +3,39 @@ import type { AdminSessionSummary, StoredPasskey } from '@/api/account'
 import { onShow } from '@dcloudio/uni-app'
 
 import { computed, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import {
+  beginPasskeyRegistration,
   changeAdminPassword,
   deletePasskey,
   fetchAdminSession,
   fetchPasskeys,
+  finishPasskeyRegistration,
   logoutAdminSession,
 } from '@/api/account'
 import { consoleErrorMessage } from '@/api/core/console'
+import { useNativeChrome } from '@/composables/useNativeChrome'
 import { useAuthStore } from '@/store/authStore'
 import { ensureUnlocked } from '@/utils/app-guard'
 import { formatRelative } from '@/utils/format'
+import {
+  createPasskeyCredential,
+  isUserCancellation,
+  webAuthnUnsupportedReason,
+} from '@/utils/webauthn'
 
 definePage({
   name: 'account',
   style: { navigationBarTitleText: '账户管理' },
 })
 
+// Repaints this page's native title bar; it is per-webview and would
+// otherwise revert to the light default on each navigation.
+useNativeChrome()
 const auth = useAuthStore()
+
+/** See the note in `settings/index.vue`: component-scoped so it stays reactive. */
+const { t } = useI18n()
 
 const session = ref<AdminSessionSummary | null>(null)
 const passkeys = ref<StoredPasskey[]>([])
@@ -36,6 +51,23 @@ const nextPassword = ref('')
 const nextUsername = ref('')
 const passwordVisible = ref(false)
 const confirmLogout = ref(false)
+
+/**
+ * Why passkey registration cannot be offered here, or `null` when it can.
+ *
+ * Resolved once rather than per render: it reads `navigator` and
+ * `window.isSecureContext`, neither of which changes while the page is open, and
+ * a computed would re-evaluate on unrelated state changes.
+ */
+const passkeyBlockedKey = webAuthnUnsupportedReason()
+
+/** The same reason, translated — and reactive, unlike the probe above. */
+const passkeyBlockedReason = computed(() =>
+  passkeyBlockedKey ? t(passkeyBlockedKey) : '',
+)
+
+const registering = ref(false)
+const draftPasskeyName = ref('')
 
 /**
  * The username field is prefilled from the session, and a blank one is sent as
@@ -147,6 +179,59 @@ async function removePasskey(passkey: StoredPasskey) {
   }
 }
 
+function beginRegisterPasskey() {
+  notice.value = ''
+  errorMessage.value = ''
+  draftPasskeyName.value = ''
+  registering.value = true
+}
+
+/**
+ * Registers a passkey.
+ *
+ * Three steps that must not be reordered or merged: ask for a challenge, run the
+ * browser ceremony, hand the attestation back. The middle one is the only part
+ * the user sees, and it is also the one that fails in the ordinary course of
+ * things — a dismissed sheet is a cancellation, not an error, and reporting it as
+ * one would put a red banner on a successful no-op.
+ */
+async function submitRegisterPasskey() {
+  if (busy.value) {
+    return
+  }
+
+  busy.value = true
+  errorMessage.value = ''
+  notice.value = ''
+
+  try {
+    const begun = await beginPasskeyRegistration(draftPasskeyName.value.trim())
+    const response = await createPasskeyCredential(begun.options)
+
+    // The server's echoed name, not the input: it applied the `Passkey N`
+    // fallback for a blank field, and the record is stored under that.
+    await finishPasskeyRegistration(begun.name, response)
+
+    registering.value = false
+    notice.value = `${t('account.passkeyRegisteredPrefix')}${begun.name}${t('account.passkeyRegisteredSuffix')}`
+    await load()
+  }
+  catch (error) {
+    if (isUserCancellation(error)) {
+      // Kept open with the typed name intact: cancelling usually means the user
+      // meant to pick a different authenticator, and retyping the name is friction
+      // for no reason.
+      errorMessage.value = t('account.passkeyCancelled')
+    }
+    else {
+      errorMessage.value = consoleErrorMessage(error, t('account.passkeyFailed'))
+    }
+  }
+  finally {
+    busy.value = false
+  }
+}
+
 async function signOut() {
   if (busy.value) {
     return
@@ -177,7 +262,7 @@ onShow(() => {
 </script>
 
 <template>
-  <view class="page">
+  <view class="page" :class="themeClass">
     <StateBlock
       v-if="errorMessage"
       tone="danger"
@@ -284,20 +369,20 @@ onShow(() => {
       </view>
 
       <view class="section">
-        <text class="section-title">通行密钥</text>
+        <text class="section-title">{{ t('account.passkeys') }}</text>
         <text class="section-hint">
           通行密钥在注册它的设备上使用。删除后该设备无法再凭它登录。
         </text>
 
         <StateBlock
-          v-if="!passkeys.length"
+          v-if="!passkeys.length && !registering"
           variant="plain"
           icon="i-carbon:password"
-          text="还没有通行密钥"
-          hint="可以在桌面控制台注册，注册后这里会列出。"
+          :text="t('account.passkeyEmpty')"
+          :hint="passkeyBlockedReason || t('account.passkeyEmptyHint')"
         />
 
-        <view v-else class="key-list">
+        <view v-else-if="passkeys.length" class="key-list">
           <view v-for="item in passkeys" :key="item.id" class="key-row">
             <view class="key-body">
               <text class="key-name">{{ item.name }}</text>
@@ -314,6 +399,43 @@ onShow(() => {
             </button>
           </view>
         </view>
+
+        <!-- The name is optional server-side, but asking turns a row of
+             indistinguishable `Passkey 3` entries into a list a user can act on. -->
+        <view v-if="registering" class="field">
+          <text class="field-label">{{ t('account.passkeyName') }}</text>
+          <input
+            v-model="draftPasskeyName"
+            class="input"
+            :placeholder="t('account.passkeyNamePlaceholder')"
+            type="text"
+          >
+          <text class="field-hint">
+            {{ t('account.passkeyNameHint') }}
+          </text>
+          <view class="register-actions">
+            <AppButton variant="tonal" @tap="registering = false">
+              {{ t('common.cancel') }}
+            </AppButton>
+            <AppButton variant="solid" :disabled="busy" @tap="submitRegisterPasskey">
+              {{ busy ? t('account.passkeyRegistering') : t('account.passkeyStart') }}
+            </AppButton>
+          </view>
+        </view>
+
+        <template v-else-if="passkeyBlockedReason">
+          <text class="section-hint blocked-hint">{{ passkeyBlockedReason }}</text>
+        </template>
+
+        <AppButton
+          v-else
+          variant="solid"
+          block
+          :disabled="busy"
+          @tap="beginRegisterPasskey"
+        >
+          {{ t('account.addPasskey') }}
+        </AppButton>
       </view>
 
       <view class="section">
@@ -355,6 +477,9 @@ onShow(() => {
 .page {
   min-height: 100vh;
   padding: $gap-page;
+  /* Sub-page: nothing is drawn over the webview, but the home indicator still
+     sits on top of the final card on notched devices. */
+  padding-bottom: $gap-page-bottom;
   box-sizing: border-box;
   background-color: $color-page;
 }
@@ -526,6 +651,19 @@ onShow(() => {
 
 .key-remove::after {
   border: none;
+}
+
+/* Dimmed rather than hidden: an unavailable feature with no explanation reads as
+   a bug, and this one has a specific cause worth naming. */
+.blocked-hint {
+  margin-top: 8rpx;
+  margin-bottom: 0;
+}
+
+.register-actions {
+  display: flex;
+  gap: $gap-section;
+  margin-top: $gap-section;
 }
 
 .confirm {
