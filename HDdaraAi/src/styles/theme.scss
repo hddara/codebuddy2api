@@ -1,0 +1,182 @@
+/**
+ * Theme definitions — the values behind every `--c-*` custom property.
+ *
+ * Emitted once, globally, rather than per page: `tokens.scss` is imported into
+ * each page's scope so its *aliases* resolve there, but the properties they
+ * point at must be declared exactly once or every page would carry a duplicate
+ * copy of the palette (and the dark override would have to be repeated too).
+ *
+ * Three selectors carry the theme, because no single one works on all three
+ * builds:
+ *
+ *   `page`        — the root element on every target, and the only element the
+ *                   miniprogram runtime has that is guaranteed to wrap a page.
+ *   `.theme-light`
+ *   `.theme-dark` — what the store toggles. On H5 it lands on `<html>`; on the
+ *                   miniprogram there is no document to reach, so these are also
+ *                   what the layer below mirrors onto the page root.
+ *   `.page`       — every page in this project roots its template in
+ *                   `<view class="page">`, and that **is** reachable from the
+ *                   miniprogram. Declaring the variables here as well is what
+ *                   lets a theme apply without any DOM access at all: the
+ *                   miniprogram has no `document.documentElement`, so the
+ *                   `.theme-*` classes can never be added there.
+ *
+ * The miniprogram-specific rule at the bottom supplies the theme by class on the
+ * page root, which is the mechanism the store actually drives.
+ *
+ * Values are duplicated between the light and dark blocks on purpose. There is
+ * no way to "inherit and adjust" a custom property that would survive the
+ * miniprogram compiler, and a computed tint would drift from the hand-picked one
+ * it started as.
+ */
+
+/* --------------------------------------------------------------------------
+ * Light — the default, and what every build has always rendered.
+ * ------------------------------------------------------------------------ */
+page,
+.page,
+.theme-light {
+  --c-page: #f5f6f8;
+  --c-surface: #ffffff;
+  --c-surface-sunken: #f5f6f8;
+  --c-border: #e6e8eb;
+  --c-border-strong: #f0f1f3;
+
+  --c-text: #1f2329;
+  --c-text-secondary: #4a4f57;
+  --c-text-muted: #8a8f99;
+  --c-text-faint: #a8adb5;
+
+  --c-primary: #0a84ff;
+  --c-primary-active: #0060df;
+  --c-primary-surface: #eef5ff;
+  --c-primary-disabled: #b9d4f5;
+
+  --c-success: #22a06b;
+  --c-success-surface: #e8f6ef;
+  --c-danger: #cf1322;
+  --c-danger-surface: #fff1f0;
+  --c-warning: #d48806;
+  --c-warning-surface: #fff7e6;
+  --c-neutral: #6b7280;
+  --c-neutral-surface: #f0f1f3;
+
+  /* Floating tab bar. Values are opaque on purpose: the bar overlaps scrolling
+     content, and a translucent surface would let a card's text show through it
+     while the user scrolls, which reads as a rendering fault rather than depth. */
+  --c-tabbar-from: #ffffff;
+  --c-tabbar-to: #eef1f6;
+  --c-tabbar-border: #dfe3ea;
+  --c-tabbar-icon: #8a8f99;
+  --c-tabbar-icon-active: #0a84ff;
+  --c-tabbar-active-from: #e6f1ff;
+  --c-tabbar-active-to: #d6e8ff;
+  --c-tabbar-shadow: 0 12rpx 32rpx rgba(31, 35, 41, 0.14);
+}
+
+/* --------------------------------------------------------------------------
+ * Dark.
+ *
+ * Not an inversion. The surfaces step *up* in lightness rather than down —
+ * a page darker than its cards reads as a hole rather than a container — and
+ * the text stops short of white because #fff on a dark surface glares on an
+ * OLED phone at night.
+ *
+ * The `-surface` companions are the light colour at low opacity over the dark
+ * background, mixed by hand: a red that is legible as text is too dark to read
+ * as a background, and the pairing has to keep its contrast in both roles.
+ *
+ * `primary` is lightened because the light-mode blue is too dark to read
+ * against a dark surface; `primary-active` goes *lighter* than `primary` where
+ * the light theme goes darker, since the active state has to move away from the
+ * background rather than into it.
+ * ------------------------------------------------------------------------ */
+.theme-dark {
+  --c-page: #16181c;
+  --c-surface: #1f2228;
+  --c-surface-sunken: #16181c;
+  --c-border: #33373f;
+  --c-border-strong: #2a2e35;
+
+  --c-text: #e8eaed;
+  --c-text-secondary: #b6bcc6;
+  --c-text-muted: #868d99;
+  --c-text-faint: #6b727d;
+
+  --c-primary: #4c9aff;
+  --c-primary-active: #7ab4ff;
+  --c-primary-surface: #16293f;
+  --c-primary-disabled: #2f4a6b;
+
+  --c-success: #4ecb8d;
+  --c-success-surface: #142b21;
+  --c-danger: #ff6b6b;
+  --c-danger-surface: #33201f;
+  --c-warning: #f0b429;
+  --c-warning-surface: #332a16;
+  --c-neutral: #9aa1ac;
+  --c-neutral-surface: #2a2e35;
+
+  /* The bar is lifted above the page rather than matching it, so the gradient
+     runs lighter than `--c-page`; a bar at the page colour would disappear into
+     the background and the floating edge would be invisible. */
+  --c-tabbar-from: #262a32;
+  --c-tabbar-to: #1c1f26;
+  --c-tabbar-border: #383d47;
+  --c-tabbar-icon: #868d99;
+  --c-tabbar-icon-active: #4c9aff;
+  --c-tabbar-active-from: #1b334d;
+  --c-tabbar-active-to: #16293f;
+  /* Darker and wider than the light theme: a shadow under a dark surface is only
+     visible where it darkens an already dark page, so it has to work harder. */
+  --c-tabbar-shadow: 0 12rpx 36rpx rgba(0, 0, 0, 0.5);
+}
+
+/**
+ * The page root, themed by a class the store binds.
+ *
+ * Listed after the default blocks so it wins on specificity ties, and spelled
+ * as a descendant of nothing rather than `page .page` so it also applies when
+ * the page root is the only themed element on the screen.
+ *
+ * The miniprogram compiler keeps class selectors on custom elements, which is
+ * why this works there and a `:root`-style rule does not.
+ */
+.page.theme-dark {
+  --c-page: #16181c;
+  --c-surface: #1f2228;
+  --c-surface-sunken: #16181c;
+  --c-border: #33373f;
+  --c-border-strong: #2a2e35;
+
+  --c-text: #e8eaed;
+  --c-text-secondary: #b6bcc6;
+  --c-text-muted: #868d99;
+  --c-text-faint: #6b727d;
+
+  --c-primary: #4c9aff;
+  --c-primary-active: #7ab4ff;
+  --c-primary-surface: #16293f;
+  --c-primary-disabled: #2f4a6b;
+
+  --c-success: #4ecb8d;
+  --c-success-surface: #142b21;
+  --c-danger: #ff6b6b;
+  --c-danger-surface: #33201f;
+  --c-warning: #f0b429;
+  --c-warning-surface: #332a16;
+  --c-neutral: #9aa1ac;
+  --c-neutral-surface: #2a2e35;
+
+  /* Kept in step with `.theme-dark` above by the theme test, which reads both
+     blocks and fails if any token appears in only one of them. */
+  --c-tabbar-from: #262a32;
+  --c-tabbar-to: #1c1f26;
+  --c-tabbar-border: #383d47;
+  --c-tabbar-icon: #868d99;
+  --c-tabbar-icon-active: #4c9aff;
+  --c-tabbar-active-from: #1b334d;
+  --c-tabbar-active-to: #16293f;
+  --c-tabbar-shadow: 0 12rpx 36rpx rgba(0, 0, 0, 0.5);
+}

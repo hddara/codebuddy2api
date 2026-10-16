@@ -18,49 +18,73 @@
  * renaming a variable should never be needed to change its colour.
  */
 
-/* --------------------------------------------------------------------------
- * Surfaces — hierarchy comes from a light/dark value step, not from shadows.
- * Page and card must stay visibly different; these two are the whole system.
- * ------------------------------------------------------------------------ */
-$color-page: #f5f6f8;
-$color-surface: #ffffff;
-$color-surface-sunken: #f5f6f8;
-$color-border: #e6e8eb;
-$color-border-strong: #f0f1f3;
+/**
+ * Colours are defined once, as CSS custom properties, and the SCSS names are
+ * aliases onto them.
+ *
+ * Why indirection instead of plain hexes: a theme has to change at runtime, and
+ * an SCSS variable is gone by then — it is substituted at build time, so
+ * "switching" would mean two compiled artefacts. `var()` survives into the
+ * output and can be re-pointed by a selector, which is the only mechanism that
+ * works on all three builds without shipping the app twice.
+ *
+ * The aliases keep every existing `$color-*` reference working unchanged, so the
+ * 300-odd call sites did not have to be rewritten to gain this.
+ *
+ * `tokens.scss` is imported per page rather than globally, so the variable
+ * *definitions* live in the `theme` block below and are emitted once through
+ * `global.scss`; the aliases here only name them.
+ */
+$color-page: var(--c-page);
+$color-surface: var(--c-surface);
+$color-surface-sunken: var(--c-surface-sunken);
+$color-border: var(--c-border);
+$color-border-strong: var(--c-border-strong);
 
 /* --------------------------------------------------------------------------
  * Text — three semantic levels (spec 2.2). `faint` exists only for dividers
  * and disabled glyphs; it is not a fourth body level.
  * ------------------------------------------------------------------------ */
-$color-text: #1f2329;
-$color-text-secondary: #4a4f57;
-$color-text-muted: #8a8f99;
-$color-text-faint: #a8adb5;
+$color-text: var(--c-text);
+$color-text-secondary: var(--c-text-secondary);
+$color-text-muted: var(--c-text-muted);
+$color-text-faint: var(--c-text-faint);
 
 /* --------------------------------------------------------------------------
  * Brand and interaction
  * ------------------------------------------------------------------------ */
-$color-primary: #0a84ff;
-$color-primary-active: #0060df;
-$color-primary-surface: #eef5ff;
-$color-primary-disabled: #b9d4f5;
+$color-primary: var(--c-primary);
+$color-primary-active: var(--c-primary-active);
+$color-primary-surface: var(--c-primary-surface);
+$color-primary-disabled: var(--c-primary-disabled);
 
 /* --------------------------------------------------------------------------
  * Semantic status (spec 2.3.2) — one meaning, one colour, everywhere.
  * Each has a `-surface` companion so a pill keeps readable contrast.
  * ------------------------------------------------------------------------ */
-$color-success: #22a06b;
-$color-success-surface: #e8f6ef;
-$color-danger: #cf1322;
-$color-danger-surface: #fff1f0;
-$color-warning: #d48806;
-$color-warning-surface: #fff7e6;
-$color-neutral: #6b7280;
-$color-neutral-surface: #f0f1f3;
+$color-success: var(--c-success);
+$color-success-surface: var(--c-success-surface);
+$color-danger: var(--c-danger);
+$color-danger-surface: var(--c-danger-surface);
+$color-warning: var(--c-warning);
+$color-warning-surface: var(--c-warning-surface);
+$color-neutral: var(--c-neutral);
+$color-neutral-surface: var(--c-neutral-surface);
 
-/* Shape scale (spec 2.4) — radii are per ROLE and must not drift. */
+/* Shape scale (spec 2.4) — radii are per ROLE and must not drift.
+ *
+ * `chip` covers the small squares and bars that are not controls and not pills:
+ * a checkbox box, a skeleton line, the mark inside a brand glyph. They shared a
+ * hard-coded 8rpx across three files before this existed, which is the drift the
+ * spec is about — not the value being wrong, but there being three of them.
+ *
+ * `segment` is the inner corner of a segmented control: smaller than the
+ * control's own radius so the segments nest inside it rather than pushing
+ * against it. */
 $radius-card: 20rpx;
 $radius-control: 16rpx;
+$radius-chip: 8rpx;
+$radius-segment: 12rpx;
 $radius-pill: 999rpx;
 
 /* Spacing scale (spec 2.5) — three roles, stable ratio between them. */
@@ -82,3 +106,54 @@ $font-micro: 22rpx;
 /* Control sizing (spec 3.5.1) — one height per control role. */
 $height-control: 88rpx;
 $height-control-compact: 64rpx;
+
+/* --------------------------------------------------------------------------
+ * Floating tab bar.
+ *
+ * A gradient rather than a flat fill, and two stops rather than one, because
+ * the bar floats over scrolling content: a single colour at this size reads as
+ * a solid cut-out, while a subtle top-to-bottom ramp gives it enough of an edge
+ * to look like a surface rather than a hole.
+ *
+ * The "active" pair is a second, brighter gradient used by the sliding
+ * highlight — a tint of the same blue as `primary`, not a different hue, so the
+ * selected entry belongs to the same system as every other accent.
+ * ------------------------------------------------------------------------ */
+$gradient-tabbar: linear-gradient(180deg, var(--c-tabbar-from), var(--c-tabbar-to));
+$gradient-tabbar-active: linear-gradient(180deg, var(--c-tabbar-active-from), var(--c-tabbar-active-to));
+$color-tabbar-border: var(--c-tabbar-border);
+$color-tabbar-icon: var(--c-tabbar-icon);
+$color-tabbar-icon-active: var(--c-tabbar-icon-active);
+$shadow-tabbar: var(--c-tabbar-shadow);
+
+/**
+ * Bottom clearance for pages that sit under the native tab bar.
+ *
+ * The native tab bar is drawn ABOVE the webview, so the last card of a page is
+ * not merely hidden — taps land on the tab bar instead, which reads as "this
+ * row is not clickable" rather than "this row is behind something". Every page
+ * behind the tab bar needs to reserve this much room at the end of its scroll
+ * area, and the value has to be one number: three pages had 40rpx, one had
+ * 260rpx, and four had none at all.
+ *
+ * Composed of three parts, none of which is knowable at build time:
+ *   - the bar itself (~50pt, but the platform does not promise a number)
+ *   - the home indicator inset on notched devices (`env()`, 0 elsewhere)
+ *   - a small gap so the final card does not touch the bar
+ *
+ * `calc()` with `env()` is evaluated by the webview, so this is a live value.
+ * On the App runtime `env(safe-area-inset-bottom)` reports the real inset; on
+ * H5 the tab bar is part of the page flow instead, and the fallback keeps the
+ * spacing sane.
+ */
+$gap-tabbar-clearance: calc(140rpx + env(safe-area-inset-bottom, 0px));
+
+/**
+ * Bottom clearance for pages with nothing drawn over the webview.
+ *
+ * Smaller than the tab-bar case because only the home indicator overlaps, but
+ * still not zero: without it the final card sits under the indicator and reads
+ * as clipped. `env()` is 0 on devices without an indicator, which leaves the
+ * padding as a plain breathing gap.
+ */
+$gap-page-bottom: calc(#{$gap-page} + env(safe-area-inset-bottom, 0px));

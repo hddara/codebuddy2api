@@ -11,19 +11,28 @@ import {
 } from 'unocss'
 
 /**
- * Pulls the palette out of `src/styles/tokens.scss` so there is exactly one
+ * Pulls the palette out of `src/styles/theme.scss` so there is exactly one
  * place a colour is written down.
  *
- * The two used to be maintained by hand and drifted: an accent change meant
- * editing both files and there was nothing to make you notice if you forgot.
- * Reading the SCSS directly makes the mirror impossible to get wrong.
+ * Read from the theme file rather than `tokens.scss` because that is where the
+ * values now live: the SCSS names there are `var()` aliases, which UnoCSS cannot
+ * turn into a utility class — a `bg-surface` that resolved to `var(--c-surface)`
+ * would look right in the editor and produce nothing in the build.
+ *
+ * Only the light block is read. UnoCSS generates static class rules, so it
+ * cannot express "varies by theme"; the dark values reach the page through the
+ * custom properties themselves, which the utilities reference.
  */
 function readTokenColors(): Record<string, string> {
   const here = dirname(fileURLToPath(import.meta.url))
-  const scss = readFileSync(resolve(here, 'src/styles/tokens.scss'), 'utf8')
+  const scss = readFileSync(resolve(here, 'src/styles/theme.scss'), 'utf8')
+
+  // The light block is the first one; stop at the dark selector so a name that
+  // only exists in dark cannot leak a wrong value into the light palette.
+  const lightBlock = scss.split('.theme-dark')[0]
   const palette: Record<string, string> = {}
 
-  for (const match of scss.matchAll(/^\$color-([a-z-]+):\s*(#[0-9a-fA-F]{3,8});/gm)) {
+  for (const match of lightBlock.matchAll(/--c-([a-z-]+):\s*(#[0-9a-fA-F]{3,8});/g)) {
     const [, name, value] = match
 
     // `primary-active` becomes `primaryActive`: utility class names cannot carry
