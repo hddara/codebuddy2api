@@ -1,19 +1,22 @@
 <script setup lang="ts">
 import type { BiometricSupport } from '@/utils/biometric'
-import { onLoad } from '@dcloudio/uni-app'
+import type { StoredVerdict } from '@/utils/unlock-verdict'
 
+import { onLoad, onShow } from '@dcloudio/uni-app'
 import { computed, ref } from 'vue'
 import { clearManualBaseUrlVerdict } from '@/api/core/base-url'
-import { fetchSessions, loginWithPassword } from '@/api/sessions'
+import { fetchSessions, loginWithPassword, renewSession } from '@/api/sessions'
 import { useAuthStore } from '@/store/authStore'
+import { useBiometricStore } from '@/store/biometricStore'
 import { parseStored } from '@/store/persist'
 import {
   authenticateBiometric,
-  biometricSupport,
+  biometricLabel,
   describeBiometricFailure,
 } from '@/utils/biometric'
 import { isAuthError } from '@/utils/errors'
 import { consumePendingRoute } from '@/utils/launch-route'
+import { classifyStoredCredential, describeUnlockFailure } from '@/utils/unlock-verdict'
 
 definePage({
   name: 'login',
@@ -26,6 +29,15 @@ definePage({
 })
 
 const auth = useAuthStore()
+
+/**
+ * The biometric opt-in, shared with the settings page.
+ *
+ * Held in a store rather than a private ref because two screens offer the same
+ * switch, and reading one preference from two places is how a toggle ends up
+ * disagreeing with itself.
+ */
+const biometric = useBiometricStore()
 
 const baseUrl = ref('')
 /** Account credentials — the login a user can actually complete. */
@@ -44,21 +56,27 @@ const statusText = ref('')
 const hasStored = ref(false)
 
 /**
- * Biometric capability, probed lazily.
+ * Device capability, read through the store so both screens share one answer.
  *
- * Probing means calling into `plus.fingerprint`, and on a build that did not
- * bundle the module that call raises a dialog the user cannot dismiss. So the
- * value stays `unknown` until something actually needs it — which, with the
- * opt-in below, is only ever a user who turned the feature on.
+ * Probing means calling into the SOTER bridge, and on a build that did not
+ * bundle the module that call raises a dialog the user cannot dismiss. The
+ * store therefore only probes once the user opted in — a build without the
+ * module is never probed automatically and degrades to the form silently.
+ *
+ * Asynchronous because the bridge is; a synchronous reader would always see the
+ * state from before the callback and report a Face-ID phone as unsupported.
+ *
+ * `probeSupport()` is re-run on every `onShow`: a user who leaves to enrol a
+ * face and comes straight back must not be told the device still cannot do it.
  */
-const biometric = ref<BiometricSupport | 'unknown'>('unknown')
-
-function probeBiometric(): BiometricSupport {
-  if (biometric.value === 'unknown') {
-    biometric.value = biometricSupport()
+async function probeSupport(): Promise<BiometricSupport> {
+  // Only probe when the feature is in play. An opted-out user never touches the
+  // bridge, which is what keeps a module-less build from raising a dialog.
+  if (!biometric.enabled && biometric.support === 'unknown') {
+    return 'unsupported'
   }
 
-  return biometric.value
+  return biometric.refreshSupport()
 }
 
 const canSubmit = computed(() => {
@@ -106,26 +124,50 @@ async function loadStored(timeoutMs = 5_000): Promise<boolean> {
   }
 }
 
-/** Confirms the stored credential still works before letting the user in. */
-async function verifyStored(): Promise<boolean> {
+/**
+ * Confirms the stored credential still works before letting the user in.
+ *
+ * The classification itself lives in `utils/unlock-verdict.ts`: it is a decision
+ * about an error, and keeping it as a pure function is what makes it testable
+ * without a network. This wrapper only supplies the request.
+ */
+async function verifyStored(): Promise<StoredVerdict> {
   try {
     await fetchSessions(1_440)
-    return true
+    return classifyStoredCredential(null)
   }
   catch (error) {
-    // Only an auth rejection should force a re-login. A network problem is not
-    // a reason to ask for the password again.
-    //
-    // `isAuthError`, not a hand-written pattern: the check must look at the
-    // status code, because the wording does not give it away — a rejected
-    // password comes back as `401 Invalid password`, which no pattern mentioning
-    // "session required" matches.
-    if (isAuthError(error)) {
-      errorMessage.value = '登录已过期，请重新填写凭据'
-      return false
+    return classifyStoredCredential(error)
+  }
+}
+
+/**
+ * Extends the stored session, and stores the replacement.
+ *
+ * Returns the new token, or an empty string when the gateway would not renew —
+ * which includes the case that matters most: the session has already lapsed, so
+ * there is nothing left to extend and the user genuinely must sign in again.
+ *
+ * The write is deliberately synchronous-through-`setAdminCookie` rather than a
+ * direct assignment: that setter is what normalises the value and recomputes
+ * `isLoggedIn`, and the persisted snapshot is taken from the store by the Pinia
+ * plugin, so the new token is on disk by the time the next launch reads it.
+ */
+async function renewStoredSession(): Promise<string> {
+  try {
+    const token = await renewSession()
+
+    if (token) {
+      auth.setAdminCookie(token)
     }
 
-    return true
+    return token
+  }
+  catch {
+    // A failed renewal is not fatal on its own — the session may well still be
+    // valid and simply could not be extended this time. The caller decides,
+    // based on whether the credential itself still works.
+    return ''
   }
 }
 
@@ -156,14 +198,34 @@ async function unlock() {
 
   statusText.value = '正在确认登录状态…'
 
-  if (await verifyStored()) {
+  // Renewed *before* the read rather than after it, so a session that is about
+  // to lapse is extended while it is still valid. The other order would work
+  // only while the token has life left in it; once it has lapsed the renewal is
+  // exactly the call that would be rejected.
+  await renewStoredSession()
+
+  const verdict = await verifyStored()
+
+  if (verdict === 'valid') {
     enterApp()
     return
   }
 
   busy.value = false
   statusText.value = ''
-  hasStored.value = false
+
+  // The biometric did its job; what failed is the credential. Dropped back to
+  // the form, because that is the only route left — but with wording that says
+  // the identity check succeeded, since the old sentence arrived seconds after a
+  // successful face scan and read as though the scan had failed.
+  if (verdict === 'rejected') {
+    hasStored.value = false
+  }
+
+  // `unreachable` deliberately does *not* clear `hasStored`: the credential is
+  // not known to be bad, only unverifiable, so the lock screen stays put with
+  // the retry button the user already knows how to press.
+  errorMessage.value = describeUnlockFailure(verdict)
 }
 
 async function signIn() {
@@ -276,8 +338,18 @@ function toggleCookieVisible() {
  * raises a blocking "模块未添加" dialog that no code can dismiss — it took the
  * whole app down on a cold start. Opting in means a build without the module is
  * never probed automatically, so it degrades to the credential form silently.
+ *
+ * `enabled` is read through the store so the template stays declarative.
  */
-const biometricEnabled = ref(false)
+const biometricEnabled = computed(() => biometric.enabled)
+
+/**
+ * The switch's label, named for this device's actual sensor.
+ *
+ * "指纹 / 面容解锁" named both at once, which on an iPhone points at a settings
+ * page that does not exist. A computed so the bridge probe runs once.
+ */
+const biometricTitle = computed(() => biometricLabel(true))
 
 onLoad(async () => {
   // The origin is safe to prefill — it is not a secret and typing a URL on a
@@ -303,19 +375,19 @@ onLoad(async () => {
   password.value = ''
 
   try {
-    biometricEnabled.value = Boolean(uni.getStorageSync('biometric-enabled'))
+    biometric.loadEnabled()
   }
   catch {
-    biometricEnabled.value = false
+    biometric.setEnabled(false)
   }
 
   if (!(await loadStored()))
     return
 
-  if (!biometricEnabled.value)
+  if (!biometric.enabled)
     return
 
-  const capability = probeBiometric()
+  const capability = await probeSupport()
 
   if (capability === 'available') {
     // Present the prompt straight away; a stored credential is the common case
@@ -323,7 +395,7 @@ onLoad(async () => {
     void unlock()
   }
   else if (capability === 'unavailable') {
-    statusText.value = '设备未设置指纹或面容，请在下方确认凭据'
+    statusText.value = `未设置${biometricLabel()}，请在下方确认凭据`
   }
 })
 
@@ -333,6 +405,10 @@ onLoad(async () => {
  * Reached only by an explicit press. This is the path for a build without the
  * fingerprint module: the user still has to act on the lock screen, they just
  * are not asked to retype a 43-character token to get back into their own app.
+ *
+ * Renewed here too. This path exists precisely for the devices that cannot do
+ * biometrics, and leaving it unrenewed would make it the one way to use the app
+ * that still hits the 8-hour cliff.
  */
 async function enterWithStored() {
   if (busy.value)
@@ -342,14 +418,23 @@ async function enterWithStored() {
   errorMessage.value = ''
   statusText.value = '正在确认登录状态…'
 
-  if (await verifyStored()) {
+  await renewStoredSession()
+
+  const verdict = await verifyStored()
+
+  if (verdict === 'valid') {
     enterApp()
     return
   }
 
   busy.value = false
   statusText.value = ''
-  hasStored.value = false
+
+  if (verdict === 'rejected') {
+    hasStored.value = false
+  }
+
+  errorMessage.value = describeUnlockFailure(verdict)
 }
 
 /** Switches to the form, with an empty credential field. */
@@ -363,36 +448,90 @@ function useCredentialForm() {
   useCookieMode.value = false
 }
 
-function toggleBiometric() {
-  biometricEnabled.value = !biometricEnabled.value
+/**
+ * Flips the opt-in, proving the device can actually do it before turning on.
+ *
+ * Turning it on is a promise that every future launch will ask for a face or
+ * finger. `biometricSupport()` only says a bridge exists, so the switch used to
+ * be settable on a device whose prompt would then always fail — discovered on
+ * the *next* cold start, long after the press that caused it. A real
+ * authentication here makes the promise honest.
+ *
+ * Turning it off never prompts: leaving must not be gated behind the thing you
+ * are trying to stop using.
+ */
+async function toggleBiometric() {
+  errorMessage.value = ''
 
-  try {
-    uni.setStorageSync('biometric-enabled', biometricEnabled.value)
+  if (biometricEnabled.value) {
+    biometric.disable()
+    uni.showToast({ icon: 'none', title: '已关闭快速解锁' })
+    return
   }
-  catch {
-    // Storage being unavailable only costs the preference, not the app.
-  }
 
-  // Probed once and reused: `biometric.value` is only settled by the probe, so
-  // reading it on the next line would still be `'unknown'` and the message
-  // would describe a state that was never observed.
-  const capability = probeBiometric()
+  if (busy.value)
+    return
 
-  if (biometricEnabled.value && capability !== 'available') {
+  busy.value = true
+
+  // Probed (and re-probed) right before the attempt: the store may hold a stale
+  // 'unavailable' from before the user enrolled a face in system settings.
+  const capability = await probeSupport()
+
+  if (capability !== 'available') {
+    busy.value = false
     errorMessage.value = describeBiometricFailure(capability)
-    biometricEnabled.value = false
-    try {
-      uni.setStorageSync('biometric-enabled', false)
-    }
-    catch {
-      // Only the preference is lost; the feature stays off for this launch.
-    }
+    return
+  }
+
+  statusText.value = '等待验证…'
+  const failure = await biometric.enableWithConfirmation()
+  busy.value = false
+  statusText.value = ''
+
+  if (!failure) {
+    uni.showToast({ icon: 'none', title: '已开启快速解锁' })
+    return
+  }
+
+  // A cancel is not an error — the user simply changed their mind, and saying
+  // anything about it would be noise.
+  if (failure.reason !== 'cancelled') {
+    errorMessage.value = failure.message || describeBiometricFailure(capability)
+  }
+}
+
+/**
+ * Re-reads the capability whenever this screen is shown.
+ *
+ * The common path is: user turns the switch on, is told to enrol a face, leaves
+ * for Settings and comes back. Without this the stale `'unavailable'` would
+ * still be displayed and the switch would refuse to turn on.
+ */
+onShow(() => {
+  if (!biometric.enabled) {
+    return
+  }
+
+  void syncCapability()
+})
+
+/** Re-reads the capability and refreshes the status line it drives. */
+async function syncCapability(): Promise<void> {
+  const capability = await probeSupport()
+
+  if (capability === 'unavailable') {
+    statusText.value = `未设置${biometricLabel()}，请在下方确认凭据`
+  }
+  else if (capability === 'available' && statusText.value.startsWith('未设置')) {
+    // The user fixed it; clear the stale complaint rather than leaving it up.
+    statusText.value = ''
   }
 }
 </script>
 
 <template>
-  <view class="page">
+  <view class="page" :class="themeClass">
     <view class="brand">
       <view class="brand-mark">
         <view class="brand-bubble">
@@ -405,7 +544,7 @@ function toggleBiometric() {
     </view>
 
     <!-- Unlock path -->
-    <view v-if="hasStored" class="card">
+    <AppCard v-if="hasStored" class="card">
       <text class="card-title">欢迎回来</text>
       <text class="card-hint">
         {{ biometricEnabled ? '使用指纹或面容快速解锁' : '已保存登录信息' }}
@@ -416,14 +555,12 @@ function toggleBiometric() {
            parent view, which is why tapping the row did nothing. -->
       <button class="switch-row" @tap="toggleBiometric">
         <view class="switch-body">
-          <text class="switch-label">指纹 / 面容解锁</text>
+          <text class="switch-label">{{ biometricTitle }}</text>
           <text class="switch-hint">
             开启后每次启动需验证身份才能查看会话
           </text>
         </view>
-        <view class="switch" :class="[biometricEnabled ? 'switch-on' : '']">
-          <view class="switch-knob" />
-        </view>
+        <AppSwitch :on="biometricEnabled" />
       </button>
 
       <view v-if="errorMessage" class="error">
@@ -458,10 +595,10 @@ function toggleBiometric() {
       <button class="ghost" @tap="useCredentialForm">
         改用凭据登录
       </button>
-    </view>
+    </AppCard>
 
     <!-- Credential path -->
-    <view v-else class="card">
+    <AppCard v-else class="card">
       <text class="card-title">登录</text>
       <text class="card-hint">
         {{ useCookieMode
@@ -537,7 +674,7 @@ function toggleBiometric() {
       <button class="ghost" @tap="toggleCookieMode">
         {{ useCookieMode ? '改用账号密码登录' : '改用 Cookie 登录（高级）' }}
       </button>
-    </view>
+    </AppCard>
 
     <view class="footnote">
       凭据仅保存在本机，用于访问你自己的网关。
@@ -570,6 +707,10 @@ function toggleBiometric() {
   display: flex;
   align-items: center;
   justify-content: center;
+  /* Not a token: this is the app icon's own corner, drawn as one piece with the
+     glyph inside it and sized with the mark. Sharing a radius token with the
+     controls would tie the icon's shape to the button scale, which is not a
+     relationship that exists. Diameter ÷ 4 is the icon's own proportion. */
   border-radius: 32rpx;
   /* The one place a gradient is allowed: this is the brand mark itself, the
      same artwork that ships as the app icon (design spec 2.3.4). */
@@ -588,7 +729,7 @@ function toggleBiometric() {
 
 .brand-line {
   height: 8rpx;
-  border-radius: 4rpx;
+  border-radius: $radius-chip;
   background-color: $color-primary;
 }
 
@@ -675,34 +816,8 @@ function toggleBiometric() {
   line-height: 1.55;
 }
 
-/* Drawn rather than using <switch>: the native control sizes and colours
-   differently per platform, and this row needs to match the app's accent. */
-.switch {
-  flex: none;
-  width: 92rpx;
-  height: 52rpx;
-  padding: 4rpx;
-  box-sizing: border-box;
-  border-radius: 26rpx;
-  background-color: $color-border;
-  transition: background-color 0.18s ease;
-}
-
-.switch-on {
-  background-color: $color-primary;
-}
-
-.switch-knob {
-  width: 44rpx;
-  height: 44rpx;
-  border-radius: 50%;
-  background-color: $color-surface;
-  transition: transform 0.18s ease;
-}
-
-.switch-on .switch-knob {
-  transform: translateX(40rpx);
-}
+/* The switch itself lives in `AppSwitch.vue`: the settings page offers the same
+   opt-in and had drawn its own at a different size. */
 
 .field {
   margin-top: 28rpx;

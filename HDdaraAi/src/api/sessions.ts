@@ -107,6 +107,43 @@ export async function loginWithPassword(
     .send()
 }
 
+/**
+ * Exchanges the stored session for a fresh one, extending its life.
+ *
+ * This is what keeps a biometric unlock from ending at a password prompt. The
+ * old behaviour was a cliff: the console session was valid for 8 hours, and the
+ * first launch after it lapsed scanned a face, got a 401, and asked the user to
+ * retype a password the device had never kept. Renewing on every successful
+ * unlock turns that cliff into a slope — a user who opens the app at all
+ * regularly never reaches the expiry at all.
+ *
+ * No password is involved, which is the point: the credential being renewed is
+ * the one already on the device, so nothing new has to be persisted. See
+ * `renewAdminSession` on the gateway for why it cannot mint a session that did
+ * not already exist.
+ *
+ * `skipToken` for the same reason as the sibling calls: this module attaches the
+ * credential itself, and the interceptor's `Authorization` header is not the
+ * shape the console routes accept.
+ */
+export async function renewSession(): Promise<string> {
+  const result = await alovaInstance
+    .Post<{ token?: string }>(
+      '/admin-api/auth/session/renew',
+      {},
+      {
+        headers: {
+          ...consoleHeaders(),
+          'skipToken': true,
+          'x-client-platform': getPlatformType() || 'APP',
+        },
+      } as never,
+    )
+    .send()
+
+  return String(result?.token ?? '').trim()
+}
+
 export async function fetchSessions(windowMinutes: number): Promise<SessionListPayload> {
   return alovaInstance
     .Get<SessionListPayload>(
