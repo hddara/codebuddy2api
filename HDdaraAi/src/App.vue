@@ -104,6 +104,11 @@ onShow(() => {
  */
 page {
   background-color: var(--c-page);
+  /* The full screen height, home-indicator inset included. A page root sized
+     with `min-height: 100%` needs a parent with a definite height to resolve
+     against — without this the percentage falls back to `auto` and the page
+     stops at its content again, which is the gap this is here to close. */
+  min-height: 100%;
 }
 
 /* The same floor for the H5 and App runtimes, where the scroll container is
@@ -112,6 +117,7 @@ page {
 html,
 body {
   background-color: var(--c-page);
+  min-height: 100%;
 }
 /* #endif */
 </style>

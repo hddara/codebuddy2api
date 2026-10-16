@@ -31,6 +31,16 @@
         }
       },
       "sdkConfigs": {}
+    },
+    "launchwebview": {
+      "render": "always"
+    },
+    "safearea": {
+      "background": "#f5f6f8",
+      "backgroundDark": "#16181c",
+      "bottom": {
+        "offset": "none"
+      }
     }
   },
   "app-harmony": {

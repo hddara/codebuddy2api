@@ -24,7 +24,7 @@ interface NavigateToOptions {
 interface RedirectToOptions extends NavigateToOptions {}
 
 interface SwitchTabOptions {
-  
+  url: "/pages/sessions/index" | "/pages/settings/index"
 }
 
 type ReLaunchOptions = NavigateToOptions | SwitchTabOptions;

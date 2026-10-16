@@ -19,6 +19,50 @@ export default defineManifestConfig({
     usingComponents: true,
     nvueStyleCompiler: 'uni-app',
     compilerVersion: 3,
+    /**
+     * Keeps the launch webview full-screen, under the home indicator.
+     *
+     * The compiler sets this itself — but **only when no `tabBar` is
+     * registered**. `initSafearea` in `@dcloudio/uni-cli-shared` branches on
+     * exactly that: with a tab bar it writes a `safearea` block instead, and
+     * the `render: 'always'` that the else-branch would have applied is never
+     * emitted. The webview is then laid out above the inset, leaving a band at
+     * the bottom painted by the container rather than by the page.
+     *
+     * We do register a tab bar — it is what makes `switchTab` legal, and
+     * `switchTab` is what keeps the tab pages alive — so the branch that would
+     * have done this no longer runs, and the value has to be set explicitly.
+     *
+     * Note the bar registered in `pages.config.ts` is hidden at runtime
+     * (`utils/native-tabbar.ts`); this flag is unrelated to that. It concerns
+     * the webview's own height, not the platform's bar.
+     */
+    launchwebview: {
+      render: 'always',
+    },
+    /**
+     * Stops the platform reserving the home-indicator strip at the bottom.
+     *
+     * With `offset: 'auto'` (the compiler's default whenever a `tabBar` is
+     * registered — see above) the webview is laid out above the inset and the
+     * band below it is painted by the container, not by the page. It measures
+     * 34pt on an iPhone 12 and shows up as a seam: the container's colour is
+     * `#f4f7f8` where the page uses `#f5f6f8`, so the page looks like it stops
+     * one shade short of the screen edge, and on a dark theme the difference is
+     * a light strip under a dark page.
+     *
+     * `'none'` gives the webview the full screen height instead. The bar floats
+     * over the content and the pages already reserve room for it
+     * (`$gap-tabbar-clearance`, which includes `env(safe-area-inset-bottom)`),
+     * so nothing ends up under the home indicator once this is off.
+     */
+    safearea: {
+      background: '#f5f6f8',
+      backgroundDark: '#16181c',
+      bottom: {
+        offset: 'none',
+      },
+    },
     splashscreen: {
       alwaysShowBeforeRender: true,
       waiting: true,

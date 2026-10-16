@@ -452,12 +452,22 @@ onPullDownRefresh(async () => {
 @use '@/styles/tokens.scss' as *;
 
 .page {
-  min-height: 100vh;
+  /**
+   * `100%`, not `100vh`.
+   *
+   * `vh` on the App runtime is the viewport *excluding* the home-indicator
+   * inset, so a page sized in `vh` stops short of the screen and leaves a band
+   * below it showing whatever the container paints. `100%` inherits the `page`
+   * element's height instead, which does span the full screen — so the page's
+   * own background reaches the bottom edge and nothing has to be painted under
+   * it.
+   */
+  min-height: 100%;
   background-color: $color-page;
   padding: $gap-page;
-  /* This page sits behind the native tab bar, which is drawn over the webview:
-     without the clearance the last cards are unreachable — a tap lands on the
-     bar, so the row looks broken rather than covered. */
+  /* The bar floats over the content, so the last card needs room to clear it.
+     Not the platform's bar — that one is hidden (see `utils/native-tabbar.ts`)
+     — but ours, which still overlaps the scroll area. */
   padding-bottom: $gap-tabbar-clearance;
   box-sizing: border-box;
 }

@@ -465,13 +465,22 @@ onShow(() => {
 @use '@/styles/tokens.scss' as *;
 
 .page {
-  min-height: 100vh;
+  /**
+   * `100%`, not `100vh`.
+   *
+   * `vh` excludes the home-indicator inset on the App runtime, so a page sized
+   * in `vh` ends above the bottom of the screen and the strip below it shows
+   * the container's paint rather than the page's own background — a visible
+   * seam on anything but the exact colour the container happens to use.
+   * `100%` takes the `page` element's full height instead.
+   */
+  min-height: 100%;
   background-color: $color-page;
   padding: $gap-page;
-  /* This page sits behind the native tab bar, which is drawn over the webview.
-     The previous value cleared only the bottom-sheet area (~36px) and left the
-     tail of the page under the bar: the last two groups — 网关设置 and 调用统计
-     — could not be scrolled to and could not be tapped. */
+  /* Room for the floating bar, which overlaps the scroll area. The previous
+     value cleared only the bottom-sheet area (~36px) and left the tail of the
+     page under the bar: the last two groups — 网关设置 and 调用统计 — could not
+     be scrolled to and could not be tapped. */
   padding-bottom: $gap-tabbar-clearance;
   box-sizing: border-box;
 }
