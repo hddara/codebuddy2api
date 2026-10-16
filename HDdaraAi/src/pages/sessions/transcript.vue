@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import type { TranscriptEntry } from '@/api/sessions'
-import { onLoad } from '@dcloudio/uni-app'
+import { onLoad, onShow } from '@dcloudio/uni-app'
 
 import { computed, ref } from 'vue'
 import { fetchTranscripts, MAX_TRANSCRIPT_PAGE } from '@/api/sessions'
 import StateBlock from '@/components/StateBlock.vue'
+import { useNativeChrome } from '@/composables/useNativeChrome'
+import { ensureUnlocked } from '@/utils/app-guard'
 import { formatDateTime } from '@/utils/format'
 import { extractQuestion, renderMarkdown } from '@/utils/markdown'
 
@@ -13,9 +15,16 @@ definePage({
   style: { navigationBarTitleText: '问答详情' },
 })
 
+// Repaints this page's native title bar; it is per-webview and would
+// otherwise revert to the light default on each navigation.
+useNativeChrome()
 const entry = ref<TranscriptEntry | null>(null)
 const loading = ref(true)
 const errorMessage = ref('')
+
+/** Route parameters, kept in refs so `onShow` can reload without them. */
+const conversationId = ref('')
+const entryId = ref('')
 
 /**
  * Re-fetches the turn by id rather than receiving it through the URL.
@@ -55,8 +64,6 @@ async function load(conversationId: string, entryId: string) {
     loading.value = false
   }
 }
-
-const conversationId = ref('')
 
 const question = computed(() => extractQuestion(entry.value?.question ?? ''))
 /**
@@ -130,12 +137,31 @@ onLoad((query) => {
   const params = query as Record<string, string>
 
   conversationId.value = decodeParam(params?.conversationId)
-  void load(conversationId.value, decodeParam(params?.entryId))
+  entryId.value = decodeParam(params?.entryId)
+  void load(conversationId.value, entryId.value)
+})
+
+/**
+ * Re-checks the lock on every return, not only on first entry.
+ *
+ * This page renders the full text of one stored question and answer. It is
+ * reached by deep link as readily as from the list, and `onLoad` does not fire
+ * when the app comes back from the background — the case the lock is for.
+ */
+onShow(() => {
+  if (!ensureUnlocked())
+    return
+
+  // Reloaded rather than left as-is: the guard may have bounced the user to the
+  // lock screen, and the record could have been pruned while the app was away.
+  if (conversationId.value) {
+    void load(conversationId.value, entryId.value)
+  }
 })
 </script>
 
 <template>
-  <view class="page">
+  <view class="page" :class="themeClass">
     <StateBlock v-if="loading" :loading="true" text="加载中…" />
 
     <StateBlock

@@ -9,6 +9,8 @@ import {
   renameSession,
 } from '@/api/sessions'
 import StateBlock from '@/components/StateBlock.vue'
+import { useNativeChrome } from '@/composables/useNativeChrome'
+import { ensureUnlocked } from '@/utils/app-guard'
 import { describeError } from '@/utils/errors'
 import { formatRelative } from '@/utils/format'
 import { toSnippet } from '@/utils/markdown'
@@ -26,6 +28,10 @@ definePage({
  * answer was easy to reach. It is now an index: one entry per destination, each
  * showing just enough to decide whether to open it.
  */
+
+// Repaints this page's native title bar; it is per-webview and would
+// otherwise revert to the light default on each navigation.
+useNativeChrome()
 const conversationId = ref('')
 const entries = ref<TranscriptEntry[]>([])
 const loading = ref(true)
@@ -292,13 +298,21 @@ onLoad((query) => {
 })
 
 // Refreshed on every show so returning from a question shows the new turn.
+//
+// The guard runs first: this page renders stored question/answer text, so a
+// deep link (or a restored stack) reaching it while the app is locked would
+// show the conversation without the unlock. `onLoad` alone is not enough —
+// returning from the background fires `onShow`, not `onLoad`.
 onShow(() => {
+  if (!ensureUnlocked())
+    return
+
   void load()
 })
 </script>
 
 <template>
-  <view class="page">
+  <view class="page" :class="themeClass">
     <view class="head">
       <view class="head-row">
         <text class="head-title">{{ displayTitle }}</text>
@@ -597,7 +611,7 @@ onShow(() => {
 
 .hint {
   padding: 36rpx 24rpx;
-  border-radius: 20rpx;
+  border-radius: $radius-card;
   background-color: $color-surface;
   font-size: 26rpx;
   color: $color-text-muted;

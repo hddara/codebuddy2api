@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { AccountCredits } from '@/api/account-status'
 import type {
   CredentialDraft,
   CredentialLimit,
@@ -9,6 +10,7 @@ import type {
 import { onShow } from '@dcloudio/uni-app'
 
 import { computed, ref } from 'vue'
+import { creditPercentage, fetchAccountStatus, formatCredits } from '@/api/account-status'
 import { consoleErrorMessage } from '@/api/core/console'
 import {
   clearCredentialLimits,
@@ -24,6 +26,8 @@ import {
   saveCredentialModels,
   selectCredential,
 } from '@/api/credentials'
+import AppCard from '@/components/AppCard.vue'
+import { useNativeChrome } from '@/composables/useNativeChrome'
 import { ensureUnlocked } from '@/utils/app-guard'
 import { formatDateTime } from '@/utils/format'
 
@@ -32,6 +36,9 @@ definePage({
   style: { navigationBarTitleText: '凭证管理' },
 })
 
+// Repaints this page's native title bar; it is per-webview and would
+// otherwise revert to the light default on each navigation.
+useNativeChrome()
 const credentials = ref<CredentialListItem[]>([])
 const current = ref<CurrentCredential | null>(null)
 const limits = ref<CredentialLimit[]>([])
@@ -64,6 +71,16 @@ const modelDrafts = ref<Record<string, string | undefined>>({})
  */
 const draft = ref<(CredentialDraft & { index?: number }) | null>(null)
 const draftAdvanced = ref(false)
+
+/**
+ * Remaining credits per credential, keyed by filename.
+ *
+ * A missing key means "not known yet" — either the read is still in flight or
+ * the gateway could not reach that account. Both render the same way (no
+ * balance line), because from the user's side they are the same situation.
+ */
+const credits = ref<Record<string, AccountCredits>>({})
+const creditsLoading = ref(false)
 
 const limitByFilename = computed(() => {
   const map = new Map<string, CredentialLimit>()
@@ -108,6 +125,30 @@ const canSaveDraft = computed(() => {
 
 const editing = computed(() => draft.value?.index !== undefined)
 
+/**
+ * How alarming a remaining balance should look.
+ *
+ * Thresholds are on the percentage, not the absolute figure, because what
+ * matters is how much of the allowance is gone — 500 credits is comfortable on
+ * a 10k plan and nearly out on a 600 one. The bands are coarse on purpose:
+ * three states are enough to answer "am I about to be throttled", and a finer
+ * scale would imply a precision the upstream does not report.
+ */
+function creditTone(value: AccountCredits): string {
+  const percent = creditPercentage(value)
+
+  if (percent === null)
+    return 'credits-fill-ok'
+
+  if (percent <= 10)
+    return 'credits-fill-low'
+
+  if (percent <= 30)
+    return 'credits-fill-warn'
+
+  return 'credits-fill-ok'
+}
+
 async function load() {
   loading.value = true
   errorMessage.value = ''
@@ -130,6 +171,51 @@ async function load() {
   }
   finally {
     loading.value = false
+  }
+
+  // Credits load separately, and after the list is already on screen.
+  //
+  // Not part of the `Promise.all` above: the gateway answers this endpoint by
+  // asking every upstream account in turn, so it costs one round trip per
+  // credential and is the slowest thing on the page by an order of magnitude.
+  // Folding it into the batch would hold the credential list — which the user
+  // came here to see — behind a number that is a nice-to-have. Fired without
+  // `await` so the list paints first.
+  void loadCredits()
+}
+
+/**
+ * Reads per-account credit balances and indexes them by filename.
+ *
+ * Failure is deliberately silent on the UI: the balances are supplementary, and
+ * a toast for a number that failed to load would train the user to dismiss
+ * toasts on this page — which is where real write failures are reported. The
+ * rows simply render without a balance, which is honest about what is known.
+ */
+async function loadCredits() {
+  creditsLoading.value = true
+
+  try {
+    const payload = await fetchAccountStatus()
+
+    const map: Record<string, AccountCredits> = {}
+
+    for (const snapshot of payload.statuses) {
+      // Skip accounts whose snapshot came back partial: reporting a `0` for a
+      // balance the gateway could not read would be worse than showing none —
+      // it reads as "used up" and invites a pointless panic.
+      if (!snapshot.error && snapshot.credits) {
+        map[snapshot.filename] = snapshot.credits
+      }
+    }
+
+    credits.value = map
+  }
+  catch {
+    credits.value = {}
+  }
+  finally {
+    creditsLoading.value = false
   }
 }
 
@@ -387,7 +473,7 @@ onShow(() => {
 </script>
 
 <template>
-  <view class="page">
+  <view class="page" :class="themeClass">
     <StateBlock
       v-if="errorMessage"
       tone="danger"
@@ -556,26 +642,66 @@ onShow(() => {
         hint="添加后网关才能在多个账号间轮询。"
       />
 
-      <view
+      <AppCard
         v-for="item in credentials"
         :key="item.filename"
         class="card"
       >
-        <view class="card-head">
+        <template #header>
           <text class="card-title">{{ item.name || item.email }}</text>
+          <!-- In the slot rather than through the `subtitle` prop: the value is
+               a filename and has to wrap, which the prop's single-line style
+               does not allow. -->
+          <text class="card-subtitle">{{ subtitle(item) }}</text>
+        </template>
+
+        <template #action>
           <StatusTag
             :tone="limitByFilename.get(item.filename) ? 'warning' : (item.is_expired ? 'danger' : 'success')"
           >
             {{ describeCredential(item) }}
           </StatusTag>
-        </view>
-
-        <text class="card-subtitle">{{ subtitle(item) }}</text>
+        </template>
 
         <view v-if="limitByFilename.get(item.filename)" class="limit">
           <view class="limit-icon i-carbon:warning-alt" />
           <text class="limit-text">
             {{ limitText(limitByFilename.get(item.filename)!) }}
+          </text>
+        </view>
+
+        <!-- ============================================================
+             剩余积分。
+
+             每个上游账号的额度才是「这个账号还能用多久」的答案，而此前这
+             个页面只显示凭证是否有效——一个还有 3% 额度、即将限流的账号
+             和一个满额度账号看起来完全一样，等到真正被限流才发现。额度属
+             于账号本身，所以放在账号卡片里，而不是单独做一页汇总。
+             ============================================================ -->
+        <view v-if="credits[item.filename]" class="credits">
+          <view class="credits-head">
+            <text class="credits-label">剩余积分</text>
+            <text class="credits-value">
+              {{ formatCredits(credits[item.filename]!.remaining) }}
+              <text class="credits-total">
+                / {{ formatCredits(credits[item.filename]!.total) }}
+              </text>
+            </text>
+          </view>
+
+          <!-- The bar only renders when the ratio is knowable: an unbounded
+               plan reports a zero total, and a bar at 0% would read as "used
+               up" when it means "no limit". -->
+          <view v-if="creditPercentage(credits[item.filename]!) !== null" class="credits-track">
+            <view
+              class="credits-fill"
+              :class="creditTone(credits[item.filename]!)"
+              :style="{ width: `${creditPercentage(credits[item.filename]!)}%` }"
+            />
+          </view>
+
+          <text v-if="credits[item.filename]!.plan" class="credits-plan">
+            {{ credits[item.filename]!.plan }}
           </text>
         </view>
 
@@ -664,7 +790,7 @@ onShow(() => {
             {{ models[item.filename]?.error }}
           </text>
         </view>
-      </view>
+      </AppCard>
 
       <view class="section">
         <text class="section-title">关于凭证与密钥</text>
@@ -686,6 +812,9 @@ onShow(() => {
 .page {
   min-height: 100vh;
   padding: $gap-page;
+  /* Sub-page: nothing is drawn over the webview, but the home indicator still
+     sits on top of the final card on notched devices. */
+  padding-bottom: $gap-page-bottom;
   box-sizing: border-box;
   background-color: $color-page;
 }
@@ -840,7 +969,7 @@ onShow(() => {
   margin: 0;
   padding: 14rpx 0;
   border: none;
-  border-radius: 12rpx;
+  border-radius: $radius-segment;
   background-color: transparent;
   font-size: $font-label;
   line-height: 1.4;
@@ -860,23 +989,15 @@ onShow(() => {
   margin-bottom: $gap-page;
 }
 
+/* Spacing only. The surface, radius and padding belong to `AppCard` — repeating
+   them here is how the card corner ended up at two different values. */
 .card {
+  display: block;
   margin-bottom: $gap-page;
-  padding: $gap-page;
-  border-radius: $radius-card;
-  background-color: $color-surface;
-}
-
-.card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: $gap-inline;
 }
 
 .card-title {
-  flex: 1;
-  min-width: 0;
+  display: block;
   font-size: $font-section;
   font-weight: 600;
   color: $color-text;
@@ -885,6 +1006,8 @@ onShow(() => {
   text-overflow: ellipsis;
 }
 
+/* The credential's own subtitle can carry a long filename, so it wraps rather
+   than truncating — `AppCard`'s default subtitle line does not know that. */
 .card-subtitle {
   display: block;
   margin-top: 8rpx;
@@ -916,6 +1039,80 @@ onShow(() => {
   min-width: 0;
   font-size: $font-meta;
   color: $color-warning;
+}
+
+/* ---------------------------------------------------------------------------
+ * Remaining credits.
+ *
+ * A quiet block, not another alert: most accounts are healthy most of the time,
+ * and a coloured card for the normal case leaves nothing to escalate to. The
+ * colour lives in the bar alone, so the block reads as information and only the
+ * bar draws the eye when the number is low.
+ * ------------------------------------------------------------------------- */
+.credits {
+  display: flex;
+  flex-direction: column;
+  gap: 10rpx;
+  margin-top: 14rpx;
+  padding: 12rpx 16rpx;
+  background-color: $color-surface-sunken;
+  border-radius: $radius-control;
+}
+
+.credits-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.credits-label {
+  font-size: $font-meta;
+  color: $color-text-muted;
+}
+
+.credits-value {
+  font-size: $font-label;
+  font-weight: 600;
+  color: $color-text;
+  /* Tabular figures keep the decimals from shifting the row as balances
+     change between reloads. */
+  font-variant-numeric: tabular-nums;
+}
+
+.credits-total {
+  font-size: $font-micro;
+  font-weight: 400;
+  color: $color-text-faint;
+}
+
+.credits-track {
+  height: 8rpx;
+  overflow: hidden;
+  background-color: $color-border;
+  border-radius: $radius-pill;
+}
+
+.credits-fill {
+  height: 100%;
+  border-radius: $radius-pill;
+  transition: width 320ms ease;
+}
+
+.credits-fill-ok {
+  background-color: $color-success;
+}
+
+.credits-fill-warn {
+  background-color: $color-warning;
+}
+
+.credits-fill-low {
+  background-color: $color-danger;
+}
+
+.credits-plan {
+  font-size: $font-micro;
+  color: $color-text-faint;
 }
 
 .card-actions {

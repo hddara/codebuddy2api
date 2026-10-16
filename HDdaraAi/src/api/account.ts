@@ -1,3 +1,5 @@
+import type { RegistrationOptionsJson } from '@/utils/webauthn'
+
 import {
   consoleDelete,
   consoleGet,
@@ -124,6 +126,50 @@ export async function deletePasskey(id: string): Promise<{ success: boolean }> {
   return consoleDelete<{ success: boolean }>(
     `/admin-api/auth/passkeys/${encodeURIComponent(id)}`,
   )
+}
+
+/**
+ * Step one of registration: asks the server for a challenge.
+ *
+ * The name is sent now, not at the end, because the server echoes back the
+ * trimmed value it will store — `Passkey 3` when the user left the field empty.
+ * Naming it in the final request instead would mean the screen had to guess the
+ * same fallback.
+ *
+ * Returns the options untouched. Parsing them belongs to `utils/webauthn.ts`,
+ * which is also where the base64url conversion lives; doing it here would spread
+ * the same knowledge across two modules.
+ */
+export async function beginPasskeyRegistration(name: string): Promise<{
+  name: string
+  options: RegistrationOptionsJson
+}> {
+  return consolePost<{ name: string, options: RegistrationOptionsJson }>(
+    '/admin-api/auth/passkeys/registration/options',
+    { name },
+  )
+}
+
+/**
+ * Step two: hands the attestation back for verification and storage.
+ *
+ * The name is repeated because the server writes it to the record here — the
+ * challenge only carries the user handle. Sending the echoed `begin` result
+ * rather than the raw input keeps both steps naming the credential identically.
+ */
+export async function finishPasskeyRegistration(
+  name: string,
+  response: Record<string, unknown>,
+): Promise<{ passkeys: StoredPasskey[], success: boolean }> {
+  const payload = await consolePost<{
+    passkeys?: Record<string, unknown>[]
+    success: boolean
+  }>('/admin-api/auth/passkeys/registration/verify', { name, response })
+
+  return {
+    passkeys: (payload.passkeys ?? []).map(toVisiblePasskey),
+    success: payload.success,
+  }
 }
 
 /**

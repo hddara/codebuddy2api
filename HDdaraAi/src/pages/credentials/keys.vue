@@ -11,9 +11,12 @@ import {
   fetchAccessKeySecret,
   formatModelAliases,
   parseModelAliases,
+  updateAccessKey,
 } from '@/api/access-keys'
 import { consoleErrorMessage } from '@/api/core/console'
 import { fetchCredentials } from '@/api/credentials'
+import AppCard from '@/components/AppCard.vue'
+import { useNativeChrome } from '@/composables/useNativeChrome'
 import { ensureUnlocked } from '@/utils/app-guard'
 import { formatRelative } from '@/utils/format'
 
@@ -22,6 +25,9 @@ definePage({
   style: { navigationBarTitleText: '访问密钥' },
 })
 
+// Repaints this page's native title bar; it is per-webview and would
+// otherwise revert to the light default on each navigation.
+useNativeChrome()
 const keys = ref<AccessKeySummary[]>([])
 const credentials = ref<CredentialListItem[]>([])
 const loading = ref(true)
@@ -39,6 +45,15 @@ const creating = ref(false)
 const draftName = ref('')
 const draftFilenames = ref<string[]>([])
 const draftAliases = ref('')
+
+/**
+ * The key being edited, or `null` when the draft is a new one.
+ *
+ * One draft serves both paths because the fields are identical — only the
+ * request differs (POST vs PATCH) and the button's wording. Two separate forms
+ * had been drifting apart in the console for exactly that reason.
+ */
+const editingId = ref<string | null>(null)
 
 const canCreate = computed(
   () => draftName.value.trim().length > 0 && draftFilenames.value.length > 0,
@@ -69,6 +84,7 @@ async function load() {
 
 function resetDraft() {
   creating.value = false
+  editingId.value = null
   draftName.value = ''
   draftFilenames.value = []
   draftAliases.value = ''
@@ -78,7 +94,33 @@ function beginCreate() {
   notice.value = ''
   errorMessage.value = ''
   creating.value = true
+  editingId.value = null
+  draftName.value = ''
+  // Everything is selected by default: a key that can use one credential is the
+  // common case, and unticking one is faster than ticking several.
   draftFilenames.value = credentials.value.map(item => item.filename)
+  draftAliases.value = ''
+}
+
+/**
+ * Opens the draft with an existing key's values.
+ *
+ * Renaming, re-binding a credential and editing aliases all go through
+ * `PATCH /admin-api/access-keys/:id`, which the app had wrapped but never
+ * called — so the only way to change a key was to delete it, which also throws
+ * away its secret and breaks every client already configured with it.
+ */
+function beginEdit(item: AccessKeySummary) {
+  notice.value = ''
+  errorMessage.value = ''
+  creating.value = true
+  editingId.value = item.id
+  draftName.value = item.name
+  draftFilenames.value = [...item.credentialFilenames]
+  draftAliases.value = formatModelAliases(item.modelAliases)
+  // Collapse any open reveal, so the form and the secret are not both on screen
+  // claiming to be the subject of the page.
+  revealed.value = null
 }
 
 function toggleCredential(filename: string) {
@@ -102,12 +144,24 @@ async function submitCreate() {
   errorMessage.value = ''
   notice.value = ''
 
+  const payload = {
+    credential_filenames: draftFilenames.value,
+    model_aliases: parseModelAliases(draftAliases.value),
+    name: draftName.value.trim(),
+  }
+
   try {
-    const result = await createAccessKey({
-      credential_filenames: draftFilenames.value,
-      model_aliases: parseModelAliases(draftAliases.value),
-      name: draftName.value.trim(),
-    })
+    if (editingId.value) {
+      const result = await updateAccessKey(editingId.value, payload)
+
+      notice.value = `已保存「${result.access_key.name}」`
+      resetDraft()
+      await load()
+
+      return
+    }
+
+    const result = await createAccessKey(payload)
 
     // Held on screen rather than only toasted: the server never repeats the
     // plaintext, so this is the user's single chance to copy it.
@@ -116,7 +170,10 @@ async function submitCreate() {
     await load()
   }
   catch (error) {
-    errorMessage.value = consoleErrorMessage(error, '创建失败')
+    errorMessage.value = consoleErrorMessage(
+      error,
+      editingId.value ? '保存失败' : '创建失败',
+    )
   }
   finally {
     busy.value = false
@@ -212,7 +269,7 @@ onShow(() => {
 </script>
 
 <template>
-  <view class="page">
+  <view class="page" :class="themeClass">
     <StateBlock
       v-if="errorMessage"
       tone="danger"
@@ -250,7 +307,9 @@ onShow(() => {
 
       <template v-if="creating">
         <view class="section">
-          <text class="section-title">新建访问密钥</text>
+          <text class="section-title">
+            {{ editingId ? '编辑访问密钥' : '新建访问密钥' }}
+          </text>
 
           <view class="field">
             <text class="field-label">名称</text>
@@ -315,7 +374,7 @@ onShow(() => {
               :disabled="!canCreate || busy"
               @tap="submitCreate"
             >
-              {{ busy ? '创建中…' : '创建' }}
+              {{ busy ? '保存中…' : (editingId ? '保存' : '创建') }}
             </AppButton>
           </view>
         </view>
@@ -339,17 +398,19 @@ onShow(() => {
         hint="密钥让客户端用 cb2_ 令牌访问网关，与上游账号分开管理。"
       />
 
-      <view
+      <AppCard
         v-for="item in keys"
         :key="item.id"
         class="card"
       >
-        <view class="card-head">
+        <template #header>
           <text class="card-title">{{ item.name }}</text>
-          <text class="card-time">{{ formatRelative(item.createdAt) }}创建</text>
-        </view>
+          <text class="card-subtitle">{{ bindSummary(item) }}</text>
+        </template>
 
-        <text class="card-subtitle">{{ bindSummary(item) }}</text>
+        <template #action>
+          <text class="card-time">{{ formatRelative(item.createdAt) }}创建</text>
+        </template>
 
         <view class="secret-row">
           <text class="secret-masked">
@@ -374,6 +435,13 @@ onShow(() => {
             复制
           </AppButton>
           <AppButton
+            variant="tonal"
+            :disabled="busy"
+            @tap="beginEdit(item)"
+          >
+            编辑
+          </AppButton>
+          <AppButton
             :variant="confirmDeleteId === item.id ? 'solid' : 'tonal'"
             :tone="confirmDeleteId === item.id ? 'danger' : 'neutral'"
             :disabled="busy"
@@ -382,7 +450,7 @@ onShow(() => {
             {{ confirmDeleteId === item.id ? '确认删除' : '删除' }}
           </AppButton>
         </view>
-      </view>
+      </AppCard>
 
       <view class="section">
         <text class="section-title">这个密钥怎么用</text>
@@ -401,6 +469,9 @@ onShow(() => {
 .page {
   min-height: 100vh;
   padding: $gap-page;
+  /* Sub-page: nothing is drawn over the webview, but the home indicator still
+     sits on top of the final card on notched devices. */
+  padding-bottom: $gap-page-bottom;
   box-sizing: border-box;
   background-color: $color-page;
 }
@@ -549,7 +620,7 @@ onShow(() => {
   flex: none;
   width: 40rpx;
   height: 40rpx;
-  border-radius: 8rpx;
+  border-radius: $radius-chip;
 }
 
 .picker-off {
@@ -591,23 +662,14 @@ onShow(() => {
   margin-bottom: $gap-page;
 }
 
+/* Spacing only. Surface, radius and padding come from `AppCard`. */
 .card {
+  display: block;
   margin-bottom: $gap-page;
-  padding: $gap-page;
-  border-radius: $radius-card;
-  background-color: $color-surface;
-}
-
-.card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: $gap-inline;
 }
 
 .card-title {
-  flex: 1;
-  min-width: 0;
+  display: block;
   font-size: $font-section;
   font-weight: 600;
   color: $color-text;

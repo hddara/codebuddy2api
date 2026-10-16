@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import type { ChatHandle, ChatMessage, StreamHandle } from '@/api/sessions'
-import { onLoad, onPageScroll, onUnload } from '@dcloudio/uni-app'
+import { onLoad, onPageScroll, onShow, onUnload } from '@dcloudio/uni-app'
 
 import { computed, nextTick, ref } from 'vue'
 import { fetchLiveSnapshot, openSessionStream, sendChatMessage } from '@/api/sessions'
 import StateBlock from '@/components/StateBlock.vue'
+import { useNativeChrome } from '@/composables/useNativeChrome'
+import { ensureUnlocked } from '@/utils/app-guard'
 import { isAuthError, REAUTH_HINT } from '@/utils/errors'
 import { renderIncremental, resetIncrementalRender } from '@/utils/incremental-markdown'
 
@@ -23,6 +25,9 @@ interface Turn {
   stopped: boolean
 }
 
+// Repaints this page's native title bar; it is per-webview and would
+// otherwise revert to the light default on each navigation.
+useNativeChrome()
 const conversationId = ref('')
 const turns = ref<Turn[]>([])
 const draft = ref('')
@@ -264,6 +269,15 @@ function finalizeOwnTurn(stopped: boolean) {
   chat = null
 }
 
+/**
+ * Set when the gateway reported it was out of subscriber slots.
+ *
+ * A plain flag rather than writing the message inside `applyEvent`, because
+ * `streamError` is declared below it — reading it there would be a
+ * use-before-define. The subscriber turns this into the notice.
+ */
+let overflowed = false
+
 function applyEvent(event: Record<string, unknown>) {
   const type = String(event.type ?? '')
 
@@ -285,6 +299,23 @@ function applyEvent(event: Record<string, unknown>) {
   // than broken.
   const ownTurnOpen = sending.value
 
+  // The gateway's first frame. Without this the page sat on 「正在连接…」 for the
+  // whole session: the stream was connected and healthy, but every frame type it
+  // sends afterwards was one this function knew, and this one — the only frame
+  // that says "you are connected" — fell through to the end and did nothing. A
+  // connected stream therefore looked exactly like a stream that never opened.
+  //
+  // It is also the honest signal for "nothing is running": a `stream.ready` with
+  // no snapshot after it means the conversation is idle right now, which is a
+  // real state worth showing rather than an indefinite connection attempt.
+  if (type === 'stream.ready') {
+    if (status.value === 'idle') {
+      statusLabel.value = ownTurnOpen ? '正在输出…' : '等待输出'
+    }
+
+    return
+  }
+
   if (type === 'session.snapshot') {
     latestAnswer.value = String(event.text ?? '')
 
@@ -293,15 +324,18 @@ function applyEvent(event: Record<string, unknown>) {
     return
   }
 
+  // Appended, never assigned.
+  //
+  // `session.delta` carries only the new text — the protocol says so on the
+  // gateway side, and the accumulated reply rides on the lifecycle events and
+  // on `session.snapshot` instead, so that a per-chunk publish stays O(delta)
+  // rather than O(reply length). An earlier revision here read a `text` field
+  // on this event and assigned it, which was a branch that could never run:
+  // `text` is never set on a delta. It has been removed rather than left as a
+  // fallback, because a dead branch that looks like the live path is what makes
+  // the next reader "fix" the wrong one.
   if (type === 'session.delta') {
-    const text = event.text
-
-    if (typeof text === 'string' && text) {
-      latestAnswer.value = text
-    }
-    else {
-      append(String(event.delta ?? ''))
-    }
+    append(String(event.delta ?? ''))
 
     status.value = 'live'
     statusLabel.value = ownTurnOpen ? '正在输出…' : '别处正在输出…'
@@ -322,10 +356,35 @@ function applyEvent(event: Record<string, unknown>) {
     return
   }
 
+  // A new turn began, possibly in the IDE rather than here.
+  //
+  // Not previously handled, which meant a turn started elsewhere left the page
+  // showing whatever the last one ended with until the first delta arrived —
+  // and an answer that opens with a long think showed a finished status for the
+  // whole of it. `ownTurnOpen` keeps this page's own wording: it can stop a turn
+  // it started and cannot stop one it is only watching.
+  if (type === 'session.started') {
+    status.value = 'live'
+    statusLabel.value = ownTurnOpen ? '正在输出…' : '别处正在输出…'
+    errorMessage.value = ''
+
+    return
+  }
+
   if (type === 'session.failed') {
     status.value = 'failed'
     statusLabel.value = '回答失败'
     errorMessage.value = String(event.error ?? '未知错误')
+
+    return
+  }
+
+  // `session.overflow`: the gateway is at its subscriber cap and dropped this
+  // connection. Recorded through `overflowed` rather than writing `streamError`
+  // here, which is declared further down and would be a use-before-define; the
+  // subscriber below turns the flag into the message.
+  if (type === 'session.overflow') {
+    overflowed = true
   }
 }
 
@@ -457,6 +516,17 @@ async function pollOnce() {
     else {
       idleRounds += 1
 
+      // A poll that answers "no text" is still an answer, and it is the one the
+      // page needs when the stream is unavailable: the snapshot endpoint returns
+      // 200 with empty text for an idle conversation. Leaving the label at its
+      // initial 「正在连接…」 made a successfully-polled page indistinguishable
+      // from one whose requests were all failing — which is how a working idle
+      // conversation came to look broken.
+      if (status.value === 'idle') {
+        status.value = 'done'
+        statusLabel.value = '当前没有输出'
+      }
+
       if (idleRounds >= IDLE_ROUNDS_BEFORE_STOP) {
         // Nothing has started. Stop rather than poll forever; sending a question
         // starts the watcher again.
@@ -529,9 +599,15 @@ function subscribe() {
       },
       onEvent: (event) => {
         streamLive = true
-        streamError.value = ''
         idleRounds = 0
         applyEvent(event)
+
+        // Applied after the dispatch: an overflow frame is the one event that
+        // must not clear the notice, and every other frame is proof the stream
+        // recovered, so clearing belongs on the success path rather than before.
+        streamError.value = overflowed
+          ? '实时连接数已达上限，已降级为轮询刷新'
+          : ''
       },
     })
   }
@@ -783,6 +859,23 @@ onLoad((query) => {
 })
 
 /**
+ * Re-checks the lock on every return to this page.
+ *
+ * This page streams live replies and lets a question be asked, so it is the most
+ * sensitive screen in the app — and it had no guard at all, being entered by
+ * deep link as often as from the list. `onLoad` does not fire when the app comes
+ * back from the background, which is exactly the case the lock exists for.
+ */
+onShow(() => {
+  if (!ensureUnlocked()) {
+    // Tear the stream down: the page is being replaced by the lock screen, and
+    // a subscription left running would keep delivering text nobody sees.
+    stopWatching()
+    chat?.stop()
+  }
+})
+
+/**
  * uni's page-level scroll hook. Wired here rather than through a `<scroll-view>`
  * because the transcript uses the page's own scrolling, which is what makes
  * `uni.pageScrollTo` work.
@@ -831,7 +924,7 @@ onUnload(() => {
        the root container puts every drag through this handler during gesture
        arbitration, which made vertical scrolling feel sticky. The intent is
        "the reader took control", which a touch already expresses. -->
-  <view class="page" @touchstart="onScrollAway">
+  <view class="page" :class="themeClass" @touchstart="onScrollAway">
     <view class="status">
       <view class="status-dot" :class="[`dot-${status}`]" />
       <text class="status-label">{{ statusLabel }}</text>
@@ -911,7 +1004,6 @@ onUnload(() => {
         :maxlength="-1"
         :show-confirm-bar="false"
         placeholder="向这个会话提问…"
-        auto-height
         :focus="draftFocused"
         confirm-type="send"
         @focus="draftFocused = true"
@@ -940,7 +1032,17 @@ onUnload(() => {
 <style scoped lang="scss">
 @use '@/styles/tokens.scss' as *;
 
+/* Clears the fixed composer, which sits outside this box.
+ *
+ * The composer is a fixed-height bar now (a 76rpx input plus 20rpx of padding
+ * on each side, so 116rpx), plus room for the safe area the runtime adds. 260rpx
+ * is that with margin: a reserve that is too short puts the last line of an
+ * answer under the bar with no way to scroll to it. */
 .page {
+  /* `100vh` rather than `100%`: the page is not a flex child of anything with a
+     definite height, and `100%` collapses to the content height — which is what
+     let the bottom of a short page show the webview's own background. `vh` is
+     the viewport, which on the App runtime already excludes the native tab bar. */
   min-height: 100vh;
   padding: 20rpx $gap-page 260rpx;
   box-sizing: border-box;
@@ -1077,7 +1179,7 @@ onUnload(() => {
   flex: none;
   width: 40rpx;
   height: 40rpx;
-  border-radius: 10rpx;
+  border-radius: $radius-chip;
   background-color: $color-primary;
   font-size: $font-micro;
   line-height: 40rpx;
@@ -1135,6 +1237,22 @@ onUnload(() => {
   word-break: break-word;
 }
 
+/* The bottom bar.
+ *
+ * `bottom: 0` is not the bottom of the usable area on a device with a home
+ * indicator: `env(safe-area-inset-bottom)` is 0 on the App runtime (the webview
+ * does not expose it), so the padding collapsed to its 20rpx floor and the input
+ * sat half-under the system gesture bar.
+ *
+ * `constant()` is tried first for older WebKit, then `env()`, then a plain
+ * fallback — the cascade takes the first one the runtime understands. The
+ * fallback is not zero: an unknown-inset device still needs the bar clear of the
+ * home indicator, and 34rpx matches what iOS reserves on the models this ships
+ * to.
+ *
+ * The page's own bottom padding has to clear this bar, which is why it is a
+ * shared value rather than two numbers that agree today.
+ */
 .composer {
   position: fixed;
   left: 0;
@@ -1142,7 +1260,11 @@ onUnload(() => {
   bottom: 0;
   display: flex;
   gap: 16rpx;
-  padding: 20rpx $gap-page calc(20rpx + env(safe-area-inset-bottom));
+  /* No bottom padding: the bar sits flush to the viewport above it. Its own
+     safe-area inset is handled by the WebView, which on the App runtime already
+     reports a height that excludes the home indicator — adding the inset again
+     pushed the input below the visible area, which is why it looked clipped. */
+  padding: 20rpx $gap-page;
   box-sizing: border-box;
   background-color: $color-surface;
   border-top: 1rpx solid $color-border;
@@ -1158,9 +1280,20 @@ onUnload(() => {
   min-width: 0;
 }
 
+/* A fixed height rather than `auto-height`.
+ *
+ * `auto-height` was on the tag alongside `:fixed="true"`, and Wot positions a
+ * `fixed` textarea against the keyboard by translating its own container. With
+ * `auto-height` the element also reports its height back, so it was laid out
+ * twice — once by the container's translate and once by its own measured
+ * height — and the result sat below the composer's bottom edge, which is the
+ * clipped input reported on device.
+ *
+ * A bounded box with internal scrolling is what the Wot component expects when
+ * it owns the keyboard positioning, and it keeps the bar's height stable while
+ * typing. */
 .composer-input :deep(.wd-textarea__value) {
-  min-height: 76rpx;
-  max-height: 240rpx;
+  height: 76rpx;
   padding: 18rpx 20rpx;
   box-sizing: border-box;
   border-radius: $radius-control;
@@ -1170,6 +1303,7 @@ onUnload(() => {
 }
 
 .composer-input :deep(.wd-textarea__inner) {
+  height: 40rpx;
   padding: 0;
   font-size: $font-body;
   color: $color-text;

@@ -8,7 +8,9 @@ import {
   fetchSessions,
   renameSession,
 } from '@/api/sessions'
+import AppTabBar from '@/components/AppTabBar.vue'
 import StateBlock from '@/components/StateBlock.vue'
+import { useNativeChrome } from '@/composables/useNativeChrome'
 import { useAuthStore } from '@/store/authStore'
 import { parseStored } from '@/store/persist'
 import { ensureUnlocked } from '@/utils/app-guard'
@@ -20,6 +22,9 @@ definePage({
   style: { navigationBarTitleText: '会话' },
 })
 
+// Repaints this page's native title bar; it is per-webview and would
+// otherwise revert to the light default on each navigation.
+useNativeChrome()
 const auth = useAuthStore()
 const loading = ref(false)
 const errorMessage = ref('')
@@ -323,7 +328,7 @@ onPullDownRefresh(async () => {
 </script>
 
 <template>
-  <view class="page">
+  <view class="page" :class="themeClass">
     <view class="toolbar">
       <!-- Each option is a <button>: as a plain <view> inside a horizontal
            scroll-view, a tap lost the race against the scroll gesture and the
@@ -404,6 +409,8 @@ onPullDownRefresh(async () => {
       当前范围：{{ windowLabel }}
     </view>
   </view>
+
+  <AppTabBar active="/pages/sessions/index" />
 </template>
 
 <style scoped lang="scss">
@@ -413,6 +420,10 @@ onPullDownRefresh(async () => {
   min-height: 100vh;
   background-color: $color-page;
   padding: $gap-page;
+  /* This page sits behind the native tab bar, which is drawn over the webview:
+     without the clearance the last cards are unreachable — a tap lands on the
+     bar, so the row looks broken rather than covered. */
+  padding-bottom: $gap-tabbar-clearance;
   box-sizing: border-box;
 }
 
