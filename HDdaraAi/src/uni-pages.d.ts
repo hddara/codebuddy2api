@@ -6,6 +6,7 @@
 type _LocationUrl =
   "/pages/login/index" |
   "/pages/account/index" |
+  "/pages/account/stats" |
   "/pages/account/usage" |
   "/pages/credentials/index" |
   "/pages/credentials/keys" |
@@ -13,6 +14,8 @@ type _LocationUrl =
   "/pages/sessions/index" |
   "/pages/sessions/live" |
   "/pages/sessions/transcript" |
+  "/pages/settings/connection" |
+  "/pages/settings/gateway" |
   "/pages/settings/index";
 
 interface NavigateToOptions {
@@ -21,7 +24,7 @@ interface NavigateToOptions {
 interface RedirectToOptions extends NavigateToOptions {}
 
 interface SwitchTabOptions {
-  url: "/pages/sessions/index" | "/pages/settings/index"
+  
 }
 
 type ReLaunchOptions = NavigateToOptions | SwitchTabOptions;

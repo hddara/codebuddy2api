@@ -67,6 +67,14 @@ export default defineUniPages({
       },
     },
     {
+      // Split out of `settings/index`, which had accumulated nine unrelated
+      // settings on one screen.
+      path: 'pages/settings/connection',
+      style: {
+        navigationBarTitleText: '连接配置',
+      },
+    },
+    {
       // Account management: who is signed in and how they sign in.
       //
       // A sub-page of settings rather than a third tab: the tab bar is for the
@@ -96,34 +104,20 @@ export default defineUniPages({
       },
     },
   ],
-  tabBar: {
-    color: '#8a8f99',
-    // Matches the accent used everywhere else (active chip, links, primary
-    // button) so the selected tab reads as the same system, not a separate one.
-    selectedColor: '#0a84ff',
-    backgroundColor: '#ffffff',
-    borderStyle: 'white',
-    // `black` would be the default and draws a 2px line in every runtime;
-    // `white` keeps the bar flat against the page and lets the shadow do the
-    // separating.
-    fontSize: '11px',
-    iconWidth: '24px',
-    spacing: '4px',
-    list: [
-      {
-        pagePath: 'pages/sessions/index',
-        text: '会话',
-        // Absolute paths are required: a relative one resolves against the
-        // current page on App and silently shows no icon.
-        iconPath: '/static/tabbar/chat.png',
-        selectedIconPath: '/static/tabbar/chat-active.png',
-      },
-      {
-        pagePath: 'pages/settings/index',
-        text: '设置',
-        iconPath: '/static/tabbar/gear.png',
-        selectedIconPath: '/static/tabbar/gear-active.png',
-      },
-    ],
-  },
+  /**
+   * No `tabBar` block, on purpose.
+   *
+   * The native bar is composited above the webview by the platform and cannot
+   * be restyled — `uni.setTabBarStyle` takes a `backgroundColor` and ignores it
+   * on the App runtime, which is why a white strip survived every dark-mode
+   * attempt. It also reserves its height in the layout, ruling out a floating
+   * or translucent treatment.
+   *
+   * The bar is drawn by `components/AppTabBar.vue` instead, mounted by the two
+   * root pages it used to address. Consequences that are easy to miss:
+   *   - `uni.switchTab` no longer works on these routes (they are not in
+   *     `tabBar.list` any more); navigation uses `reLaunch`.
+   *   - the pages must reserve room for the bar themselves, via
+   *     `$gap-tabbar-clearance`.
+   */
 })
