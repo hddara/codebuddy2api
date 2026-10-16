@@ -18,6 +18,7 @@ import {
   listAdminPasskeys,
   loginWithAdminPassword,
   logoutAdminSession,
+  renewAdminSession,
   setupAdminPassword,
   updateAdminSessionUsagePreferences,
 } from '@/lib/server/admin/session';
@@ -486,6 +487,109 @@ describe('admin auth and storage', () => {
     const h5Payload = (await h5Login.json()) as { token?: unknown };
     expect(h5Login.status).toBe(200);
     expect(h5Payload.token).toBeUndefined();
+  });
+
+  it('renews a live session and retires the token it was given', async () => {
+    await setupAdminPassword(
+      makeRequest('/admin-api/auth/setup'),
+      'correct horse battery staple',
+    );
+
+    // Renewal is meaningless without a session to renew.
+    expect(
+      (await renewAdminSession(makeRequest('/admin-api/auth/session/renew')))
+        .status,
+    ).toBe(401);
+    expect(
+      (
+        await renewAdminSession(
+          makeRequest('/admin-api/auth/session/renew', {
+            cookie: 'codebuddy_admin_session=unknown-session',
+          }),
+        )
+      ).status,
+    ).toBe(401);
+
+    const loginResponse = await loginWithAdminPassword(
+      makeRequest('/admin-api/auth/session', {
+        headers: { 'x-client-platform': 'APP' },
+      }),
+      'correct horse battery staple',
+    );
+    const originalToken = String(
+      ((await loginResponse.json()) as { token?: unknown }).token,
+    );
+    expect(originalToken.length).toBeGreaterThan(20);
+
+    const renewResponse = await renewAdminSession(
+      makeRequest('/admin-api/auth/session/renew', {
+        headers: { 'x-client-platform': 'APP' },
+        cookie: `codebuddy_admin_session=${originalToken}`,
+      }),
+    );
+    expect(renewResponse.status).toBe(200);
+    const renewedToken = String(
+      ((await renewResponse.json()) as { token?: unknown }).token,
+    );
+
+    expect(renewedToken).not.toBe(originalToken);
+    expect(
+      await isAdminSessionAuthenticated(
+        makeRequest('/admin-api/settings', {
+          cookie: `codebuddy_admin_session=${renewedToken}`,
+        }),
+      ),
+    ).toBe(true);
+
+    // The presented token is retired by the exchange, so a copy that leaked
+    // from an earlier backup cannot outlive the renewal that replaced it.
+    expect(
+      await isAdminSessionAuthenticated(
+        makeRequest('/admin-api/settings', {
+          cookie: `codebuddy_admin_session=${originalToken}`,
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it('gives native clients a longer session than browsers', async () => {
+    await setupAdminPassword(
+      makeRequest('/admin-api/auth/setup'),
+      'correct horse battery staple',
+    );
+
+    const ttlSeconds = (response: Response): number => {
+      const match = /Max-Age=(\d+)/.exec(getCookieHeader(response));
+      return Number(match?.[1] ?? 0);
+    };
+
+    const browserLogin = await loginWithAdminPassword(
+      makeRequest('/admin-api/auth/session'),
+      'correct horse battery staple',
+    );
+    const appLogin = await loginWithAdminPassword(
+      makeRequest('/admin-api/auth/session', {
+        headers: { 'x-client-platform': 'APP' },
+      }),
+      'correct horse battery staple',
+    );
+
+    // 8 hours for a browser: whoever holds the profile is the admin, and the
+    // cookie outlives a restart, so the bound is the only thing ending it.
+    expect(ttlSeconds(browserLogin)).toBe(60 * 60 * 8);
+    // 30 days for the app: every launch is gated behind a biometric match, so
+    // the token is not the thing standing between a thief and the data.
+    expect(ttlSeconds(appLogin)).toBe(60 * 60 * 24 * 30);
+
+    // An unrecognised header must not buy the long session — the client has to
+    // say it is the app, not merely decline to say it is a browser.
+    const unknownClient = await loginWithAdminPassword(
+      makeRequest('/admin-api/auth/session', {
+        headers: { 'x-client-platform': 'something-else' },
+      }),
+      'correct horse battery staple',
+    );
+    expect(ttlSeconds(unknownClient)).toBe(60 * 60 * 8);
   });
 
   it('requires an admin session before starting or polling OAuth credentials', async () => {

@@ -24,7 +24,31 @@ import type { UsageRange } from '../domain/usage';
 const ADMIN_AUTH_NAMESPACE = 'admin-auth';
 const ADMIN_AUTH_KEY = 'state';
 const ADMIN_SESSION_COOKIE = 'codebuddy_admin_session';
+/**
+ * How long a console session stays valid, per client kind.
+ *
+ * The two are deliberately different, and the asymmetry is the point.
+ *
+ * A browser keeps the token in an `HttpOnly` cookie that survives restarts, so
+ * on a shared or stolen machine an 8-hour bound is the only thing that ends the
+ * session. There is no second factor to fall back on: whoever holds the browser
+ * profile is the admin.
+ *
+ * A native client is not the same situation. The token sits in the app's
+ * sandbox and every launch is gated behind a biometric match — measured on the
+ * iPhone 12, a cold start with `biometric-enabled` set presents the Face ID
+ * sheet before any session data renders. Spending that protection on an 8-hour
+ * token produced the worst of both: the user scanned their face, the request
+ * 401'd anyway, and the app asked them to retype a password the device could
+ * not remember. Renewing there is not a weakening, because the biometric was
+ * already required to reach the screen that renews it.
+ *
+ * 30 days is the bound on the *unattended* case: a phone left in a drawer stays
+ * usable, which is what makes the app worth installing, while the app's own
+ * 30-second background relock (see `App.vue`) still governs the attended one.
+ */
 const ADMIN_SESSION_TTL_SECONDS = 60 * 60 * 8;
+const ADMIN_SESSION_TTL_NATIVE_SECONDS = 60 * 60 * 24 * 30;
 const WEBAUTHN_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 const PASSWORD_MIN_LENGTH = 8;
 const ADMIN_RP_NAME = 'CodeBuddy2API Admin';
@@ -330,12 +354,10 @@ const mutateAdminAuthState = async <T>(
   });
 };
 
-const createAdminSession = () => {
+const createAdminSession = (ttlSeconds: number = ADMIN_SESSION_TTL_SECONDS) => {
   const token = randomBytes(32).toString('base64url');
   const now = new Date();
-  const expiresAt = new Date(
-    now.getTime() + ADMIN_SESSION_TTL_SECONDS * 1000,
-  ).toISOString();
+  const expiresAt = new Date(now.getTime() + ttlSeconds * 1000).toISOString();
   const session: StoredSessionRecord = {
     createdAt: now.toISOString(),
     expiresAt,
@@ -350,14 +372,34 @@ const createAdminSession = () => {
   };
 };
 
+/**
+ * The TTL this request's client should get.
+ *
+ * Keyed off the same `x-client-platform` header that decides whether the token
+ * goes in the body, and for the same reason: it is how a client says "I am not
+ * a browser". Reusing it keeps the two decisions from drifting — a client that
+ * receives the token because it cannot read a cookie is exactly the client that
+ * also has biometrics in front of it.
+ *
+ * Unlike `buildSessionResponse`, this is read *before* the session is created,
+ * so an unrecognised or absent header gets the conservative browser TTL rather
+ * than the long one.
+ */
+const getSessionTtlSeconds = (request: RequestLike): number => {
+  return isCookieIncapableClient(request)
+    ? ADMIN_SESSION_TTL_NATIVE_SECONDS
+    : ADMIN_SESSION_TTL_SECONDS;
+};
+
 const attachSessionCookie = (
   request: RequestLike,
   response: Response,
   token: string,
+  ttlSeconds: number = ADMIN_SESSION_TTL_SECONDS,
 ): Response => {
   response.headers.set(
     'Set-Cookie',
-    buildCookieString(request, token, ADMIN_SESSION_TTL_SECONDS),
+    buildCookieString(request, token, ttlSeconds),
   );
   return response;
 };
@@ -382,6 +424,23 @@ export const NATIVE_CLIENT_HEADER = 'x-client-platform';
 const COOKIE_INCAPABLE_CLIENTS = new Set(['app', 'wx_ma', 'mp_alipay']);
 
 /**
+ * Whether this request declared itself unable to use a cookie.
+ *
+ * One reader for both decisions that depend on it — where the token is handed
+ * over (`buildSessionResponse`) and how long it lives (`getSessionTtlSeconds`).
+ * Two copies of this lookup is how a client ends up receiving the token but
+ * being issued a browser-length session, which is the bug this whole change is
+ * about: the client was told it was special and then treated as if it were not.
+ */
+const isCookieIncapableClient = (request: RequestLike): boolean => {
+  const client = (request.headers.get(NATIVE_CLIENT_HEADER) ?? '')
+    .trim()
+    .toLowerCase();
+
+  return COOKIE_INCAPABLE_CLIENTS.has(client);
+};
+
+/**
  * Builds a login response the client can actually consume.
  *
  * A browser gets the session through `Set-Cookie` and never needs the token in
@@ -398,15 +457,13 @@ const buildSessionResponse = (
   request: RequestLike,
   payload: Record<string, unknown>,
   token: string,
+  ttlSeconds: number,
 ): Response => {
-  const client = (request.headers.get(NATIVE_CLIENT_HEADER) ?? '')
-    .trim()
-    .toLowerCase();
-  const body: Record<string, unknown> = COOKIE_INCAPABLE_CLIENTS.has(client)
+  const body: Record<string, unknown> = isCookieIncapableClient(request)
     ? { ...payload, token }
     : payload;
 
-  return attachSessionCookie(request, Response.json(body), token);
+  return attachSessionCookie(request, Response.json(body), token, ttlSeconds);
 };
 
 const attachLogoutCookie = (
@@ -797,7 +854,8 @@ export const setupAdminPassword = async (
   }
 
   const nextPassword = createPasswordHash(normalized);
-  const { session, token } = createAdminSession();
+  const ttlSeconds = getSessionTtlSeconds(request);
+  const { session, token } = createAdminSession(ttlSeconds);
 
   const configured = await mutateAdminAuthState((state) => {
     if (state.enabled) {
@@ -840,6 +898,7 @@ export const setupAdminPassword = async (
       },
     },
     token,
+    ttlSeconds,
   );
 };
 
@@ -878,7 +937,8 @@ export const loginWithAdminPassword = async (
     );
   }
 
-  const { session, token } = createAdminSession();
+  const ttlSeconds = getSessionTtlSeconds(request);
+  const { session, token } = createAdminSession(ttlSeconds);
 
   await mutateAdminAuthState((current) => {
     current.sessions.push(session);
@@ -898,6 +958,7 @@ export const loginWithAdminPassword = async (
       },
     },
     token,
+    ttlSeconds,
   );
 };
 
@@ -1020,6 +1081,97 @@ export const logoutAdminSession = async (
     Response.json({
       success: true,
     }),
+  );
+};
+
+/**
+ * Issues a fresh session for an already-authenticated one ("sliding renewal").
+ *
+ * Why this exists rather than simply a longer TTL: a TTL, however long, is a
+ * cliff. The user meets it on a cold start, with no warning, at whatever moment
+ * it happens to fall — and the only way past it is to retype the console
+ * password. Measured on the iPhone 12, that is exactly what the 8-hour token
+ * did: the biometric matched, the request 401'd, and the app asked for a
+ * password the device had never kept. Renewing turns the cliff into a slope:
+ * any launch inside the window extends it, so a user who opens the app at all
+ * regularly never sees the expiry.
+ *
+ * **The old session is revoked as part of the renewal**, not merely superseded.
+ * Two reasons: a renewal is the moment to retire a credential that has been
+ * sitting on a device, and leaving both live would let an old copy that leaked
+ * from an earlier backup keep working for the rest of its own TTL. The client
+ * that renewed is holding the new one, so nothing usable is lost.
+ *
+ * Unlike `loginWithAdminPassword` there is no password and no second factor
+ * here — the caller's proof of identity is the session it already holds. That
+ * is sound only because this endpoint cannot mint a session from nothing: an
+ * expired, unknown or absent token is refused exactly as any other admin route
+ * would refuse it. Renewal extends a live session; it cannot create one.
+ */
+export const renewAdminSession = async (
+  request: RequestLike,
+): Promise<Response> => {
+  const token = getSessionToken(request);
+
+  if (!token) {
+    return Response.json(
+      {
+        error: {
+          code: 'admin_auth_required',
+          message: 'Admin session required',
+        },
+      },
+      { status: 401 },
+    );
+  }
+
+  const tokenHash = hashSessionToken(token);
+  const ttlSeconds = getSessionTtlSeconds(request);
+  const { session, token: nextToken } = createAdminSession(ttlSeconds);
+
+  const renewed = await mutateAdminAuthState((state) => {
+    const current = state.sessions.find((entry) => {
+      return entry.tokenHash === tokenHash;
+    });
+
+    if (!current) {
+      return false;
+    }
+
+    // Carry the preferences across. They are per-session by storage shape, but
+    // they are really per-user settings; dropping them here would silently reset
+    // the usage dashboard's range and filters on every renewal, which the user
+    // would experience as "my settings keep forgetting themselves".
+    session.usagePreferences = current.usagePreferences;
+
+    state.sessions = state.sessions.filter((entry) => {
+      return entry.tokenHash !== tokenHash;
+    });
+    state.sessions.push(session);
+
+    return true;
+  });
+
+  if (!renewed) {
+    // Deliberately the same 401 shape as `getAdminSessionErrorResponse`: from
+    // the client's point of view "your token is no longer valid" is one
+    // condition, whether it expired on its own or was already revoked.
+    return Response.json(
+      {
+        error: {
+          code: 'admin_auth_required',
+          message: 'Admin session required',
+        },
+      },
+      { status: 401 },
+    );
+  }
+
+  return buildSessionResponse(
+    request,
+    { success: true },
+    nextToken,
+    ttlSeconds,
   );
 };
 
@@ -1270,7 +1422,8 @@ export const finishAdminPasskeyAuthentication = async (
     );
   }
 
-  const { session, token } = createAdminSession();
+  const ttlSeconds = getSessionTtlSeconds(request);
+  const { session, token } = createAdminSession(ttlSeconds);
 
   await mutateAdminAuthState((current) => {
     current.sessions.push(session);
@@ -1300,5 +1453,6 @@ export const finishAdminPasskeyAuthentication = async (
       },
     },
     token,
+    ttlSeconds,
   );
 };
