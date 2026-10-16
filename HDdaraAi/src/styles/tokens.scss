@@ -149,6 +149,16 @@ $shadow-tabbar: var(--c-tabbar-shadow);
 $gap-tabbar-clearance: calc(140rpx + env(safe-area-inset-bottom, 0px));
 
 /**
+ * Side inset of the floating tab bar.
+ *
+ * Deliberately not `$gap-page`. That value is the gutter a content column
+ * wants, and a control that spans the full width minus a text margin stops
+ * reading as a floating bar — 24rpx a side left it 702rpx wide on a 750rpx
+ * screen, which is a rounded rectangle rather than a pill.
+ */
+$gap-tabbar-inset: 96rpx;
+
+/**
  * Bottom clearance for pages with nothing drawn over the webview.
  *
  * Smaller than the tab-bar case because only the home indicator overlaps, but

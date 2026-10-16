@@ -68,21 +68,28 @@ const activeIndex = computed(() => {
 })
 
 /**
- * Navigates to a root page.
+ * Navigates to a tab page.
  *
- * `reLaunch` rather than `switchTab`: the target pages are no longer registered
- * in `pages.json`'s `tabBar.list`, and `switchTab` fails on a page that is not
- * one — silently, leaving the tap dead.
+ * `switchTab`, not `reLaunch`. Both reach the page, but only `switchTab` leaves
+ * the one being left alive — and that difference is what the bar was being
+ * blamed for. Under `reLaunch` every tap rebuilt the target from scratch: its
+ * `onShow` load re-ran, the list was empty until the reply arrived, and this
+ * component was unmounted before its own slide could finish. The flicker was
+ * the page being recreated, not the bar being redrawn.
  *
- * Tapping the current entry is a no-op instead of a relaunch: relaunching the
- * page you are already on discards its scroll position and reloads its data,
- * which reads as a glitch rather than a navigation.
+ * Valid only because the routes are registered in `pages.json`'s `tabBar.list`
+ * — `switchTab` throws on a route that is not a tab. The platform bar that
+ * registration implies is hidden in `App.vue`.
+ *
+ * Tapping the current entry is a no-op rather than a switch to the page already
+ * on screen: the platform treats it as a navigation and resets the scroll
+ * position, which reads as a glitch.
  */
 function go(item: TabBarItem) {
   if (item.path === props.active)
     return
 
-  uni.reLaunch({ url: item.path })
+  uni.switchTab({ url: item.path })
 }
 </script>
 
@@ -130,7 +137,16 @@ function go(item: TabBarItem) {
   bottom: 0;
   left: 0;
   z-index: 100;
-  padding: $gap-inline $gap-page calc(#{$gap-inline} + env(safe-area-inset-bottom, 0px));
+  /**
+   * Side inset is its own value, wider than `$gap-page`.
+   *
+   * The page gutter is the margin a *content* column wants — 24rpx, enough to
+   * keep text off the glass. A bar is not a column: at that margin it spanned
+   * 702 of the 750rpx screen, which reads as a full-width band that happens to
+   * have rounded corners rather than as a floating control. 96rpx a side is
+   * what makes the two states look different.
+   */
+  padding: $gap-inline $gap-tabbar-inset calc(#{$gap-inline} + env(safe-area-inset-bottom, 0px));
   /* Transparent so the page's own background shows behind the floating bar;
      the page reserves room for it with `$gap-tabbar-clearance`. */
   background-color: transparent;

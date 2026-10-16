@@ -15,6 +15,7 @@ import { ensureUnlocked } from '@/utils/app-guard'
 import { getAppVersion } from '@/utils/app-info'
 import { biometricLabel, describeBiometricFailure } from '@/utils/biometric'
 import { describeError } from '@/utils/errors'
+import { hideNativeTabBar } from '@/utils/native-tabbar'
 
 definePage({
   name: 'settings',
@@ -314,6 +315,10 @@ const connectionHint = computed(() => {
 onShow(() => {
   if (!ensureUnlocked())
     return
+
+  // See `utils/native-tabbar.ts`: the platform bar must be hidden from a tab
+  // page as well, because `App.vue`'s call can land before the bar exists.
+  hideNativeTabBar()
 
   biometric.loadEnabled()
   void refreshBiometricHint()

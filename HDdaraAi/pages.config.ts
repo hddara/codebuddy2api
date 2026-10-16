@@ -105,19 +105,42 @@ export default defineUniPages({
     },
   ],
   /**
-   * No `tabBar` block, on purpose.
+   * Registered, then hidden at runtime — the two are separate steps.
    *
-   * The native bar is composited above the webview by the platform and cannot
-   * be restyled — `uni.setTabBarStyle` takes a `backgroundColor` and ignores it
-   * on the App runtime, which is why a white strip survived every dark-mode
-   * attempt. It also reserves its height in the layout, ruling out a floating
-   * or translucent treatment.
+   * `tabBar.list` is what makes a route count as a tab page, and only
+   * `uni.switchTab` keeps the pages alive across a switch. That matters here
+   * for a reason that shows up as a visual bug: the alternative, `reLaunch`,
+   * destroys the page it leaves and rebuilds the one it enters, so every tap
+   * re-ran the target's `onShow` load, left an empty list until the reply
+   * arrived, and unmounted `AppTabBar` before its slide could play. The bar
+   * looked like it was flickering; the pages were being recreated under it.
    *
-   * The bar is drawn by `components/AppTabBar.vue` instead, mounted by the two
-   * root pages it used to address. Consequences that are easy to miss:
-   *   - `uni.switchTab` no longer works on these routes (they are not in
-   *     `tabBar.list` any more); navigation uses `reLaunch`.
-   *   - the pages must reserve room for the bar themselves, via
-   *     `$gap-tabbar-clearance`.
+   * The platform bar that the registration implies is hidden with
+   * `uni.hideTabBar()` (see `App.vue`). It has to be *registered and hidden*,
+   * not omitted — dropping the block makes `switchTab` throw, which is why the
+   * earlier revision of this file went without and used `reLaunch` instead.
+   * `custom: true` would be the declarative way to ask for the same thing, but
+   * the page table lists it for 微信小程序 / 抖音小程序 only; on App it is
+   * ignored and the native bar stays visible, on top of ours.
+   *
+   * The values below are never seen — they exist because the block must be
+   * well-formed. `backgroundColor` is set to the page colour anyway so that the
+   * instant before `hideTabBar()` lands is not a white flash on a dark theme.
    */
+  tabBar: {
+    color: '#8a8f98',
+    selectedColor: '#3b82f6',
+    backgroundColor: '#f5f6f8',
+    borderStyle: 'white',
+    list: [
+      {
+        pagePath: 'pages/sessions/index',
+        text: '会话',
+      },
+      {
+        pagePath: 'pages/settings/index',
+        text: '设置',
+      },
+    ],
+  },
 })

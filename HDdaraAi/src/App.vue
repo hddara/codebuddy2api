@@ -4,6 +4,7 @@ import { onHide, onLaunch, onShow } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/store/authStore'
 import { applyInitialTheme, watchSystemTheme } from '@/store/themeStore'
 import { setPendingRoute, takeLaunchRoute } from '@/utils/launch-route'
+import { hideNativeTabBar } from '@/utils/native-tabbar'
 
 onLaunch((options) => {
   // Before anything renders: a theme applied after the first paint shows the
@@ -12,6 +13,8 @@ onLaunch((options) => {
   const theme = applyInitialTheme()
 
   watchSystemTheme(dark => theme.setSystemDark(dark))
+
+  hideNativeTabBar()
 
   const auth = useAuthStore()
 
@@ -51,6 +54,11 @@ onHide(() => {
 })
 
 onShow(() => {
+  // Re-hidden on every return: the platform restores its own bar when the app
+  // comes back from the background or from the biometric sheet, which would
+  // leave the native strip sitting under ours.
+  hideNativeTabBar()
+
   const auth = useAuthStore()
 
   if (!auth.unlocked || !backgroundedAt)

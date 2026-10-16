@@ -16,6 +16,7 @@ import { parseStored } from '@/store/persist'
 import { ensureUnlocked } from '@/utils/app-guard'
 import { describeError } from '@/utils/errors'
 import { formatCount, formatRelative } from '@/utils/format'
+import { hideNativeTabBar } from '@/utils/native-tabbar'
 
 definePage({
   name: 'sessions',
@@ -109,10 +110,19 @@ async function awaitCredential(timeoutMs = 5_000): Promise<boolean> {
  */
 let loadToken = 0
 
-async function load() {
+/**
+ * Fetches the list.
+ *
+ * `silent` suppresses the skeleton and leaves the current rows in place, for
+ * the refresh that happens when the user comes back to a page that is already
+ * showing data. The request is otherwise identical — the flag changes only
+ * what a slow reply looks like, never what is asked for.
+ */
+async function load({ silent = false }: { silent?: boolean } = {}) {
   const token = (loadToken += 1)
 
-  loading.value = true
+  if (!silent)
+    loading.value = true
 
   if (!(await awaitCredential())) {
     if (token === loadToken) {
@@ -312,12 +322,37 @@ function openDetail(item: SessionRow) {
   })
 }
 
+/**
+ * Whether this page has ever painted a list.
+ *
+ * Drives the difference between the first load and every later one. Since the
+ * page now survives a tab switch (`switchTab` keeps it alive), `onShow` fires
+ * on each return — and reloading the way the first load does would put the
+ * skeleton back over data the user was just looking at, which is the flicker
+ * this change exists to remove, just at a different moment.
+ */
+const loadedOnce = ref(false)
+
 onShow(() => {
   // Guarded on every show, not just at launch: a tab switch or a restored
   // stack can reach this page without the lock screen having run.
   if (!ensureUnlocked())
     return
 
+  // The platform's bar is hidden from here as well as from `App.vue`: the call
+  // is a no-op before the bar exists, and by the time a tab page is showing it
+  // provably does. See `utils/native-tabbar.ts`.
+  hideNativeTabBar()
+
+  // First paint shows the skeleton; later shows refresh behind the existing
+  // list, so the rows stay on screen while the request is in flight. A stale
+  // row for a few hundred milliseconds is not a defect — an empty screen is.
+  if (loadedOnce.value) {
+    void load({ silent: true })
+    return
+  }
+
+  loadedOnce.value = true
   void load()
 })
 
