@@ -10,8 +10,9 @@ declare module 'vue' {
     AppButton: typeof import('./components/AppButton.vue')['default']
     AppCard: typeof import('./components/AppCard.vue')['default']
     AppSkeleton: typeof import('./components/AppSkeleton.vue')['default']
+    AppSwitch: typeof import('./components/AppSwitch.vue')['default']
+    AppTabBar: typeof import('./components/AppTabBar.vue')['default']
     StateBlock: typeof import('./components/StateBlock.vue')['default']
     StatusTag: typeof import('./components/StatusTag.vue')['default']
-    WdTextarea: typeof import('wot-design-uni/components/wd-textarea/wd-textarea.vue')['default']
   }
 }

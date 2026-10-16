@@ -49,7 +49,7 @@ withDefaults(defineProps<{
 
 .skeleton-line {
   height: 28rpx;
-  border-radius: 8rpx;
+  border-radius: $radius-chip;
   background-color: $color-border-strong;
   animation: skeleton-pulse 1.4s ease-in-out infinite;
 }
