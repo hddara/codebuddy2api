@@ -177,18 +177,33 @@ export const getRequestHeaderMap = (
   }, {});
 };
 
+export interface ErrorResponseOptions {
+  /** Machine-readable discriminator, e.g. `upstream_credentials_exhausted`. */
+  code?: string;
+  /** Extra response headers, e.g. `Retry-After`. */
+  headers?: Record<string, string>;
+  /** OpenAI-compatible error type, e.g. `rate_limit_error`. */
+  type?: string;
+}
+
 export const createErrorResponse = (
   status: number,
   message: string,
   detail?: unknown,
+  options: ErrorResponseOptions = {},
 ): Response => {
-  return Response.json(
-    {
-      error: {
-        message,
-        detail,
-      },
-    },
-    { status },
-  );
+  const { code, headers, type } = options;
+  // `type` and `code` are only attached when a caller asks for them, so the
+  // shape returned by every other route stays exactly what it has always been.
+  const error: Record<string, unknown> = { message, detail };
+
+  if (type) {
+    error.type = type;
+  }
+
+  if (code) {
+    error.code = code;
+  }
+
+  return Response.json({ error }, { headers, status });
 };

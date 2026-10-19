@@ -171,9 +171,11 @@ describe('anthropic messages api', () => {
       messages: [{ role: 'user', content: 'Retry later' }],
     });
     expect(limitedResponse.status).toBe(429);
+    // The upstream reason is folded into an explanatory message so an Anthropic
+    // client sees why the request failed instead of a bare status code.
     expect(await limitedResponse.json()).toMatchObject({
       error: {
-        message: 'Responses tenant is rate limited',
+        message: expect.stringContaining('Responses tenant is rate limited'),
         type: 'rate_limit_error',
       },
       type: 'error',

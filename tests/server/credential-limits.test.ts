@@ -538,6 +538,69 @@ describe('credential rate limit tracking', () => {
     expect(await listCredentialLimits()).toHaveLength(1);
   });
 
+  it('explains in the body why every credential failed', async () => {
+    await addCredential(
+      { bearer_token: 'token-a', user_id: 'a@example.com' },
+      'a',
+    );
+    await addCredential(
+      { bearer_token: 'token-b', user_id: 'b@example.com' },
+      'b',
+    );
+    const detail = quotaDetailResettingIn(30 * 60 * 1000);
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        new Response(detail, {
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          status: 429,
+        }),
+      ),
+    );
+
+    const response = await proxyChatCompletions(
+      makeNextRequest('http://localhost/v1/chat/completions'),
+      {
+        messages: [{ content: 'hi', role: 'user' }],
+        model: 'deepseek-v4.1-flash',
+      },
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(response.status).toBe(429);
+
+    const body = (await response.json()) as {
+      error: {
+        code?: string;
+        detail?: {
+          attempts?: number;
+          reason?: string;
+          resumeAt?: string;
+          retryAfterSeconds?: number;
+        };
+        message: string;
+        type?: string;
+      };
+    };
+
+    // The reason has to reach the caller in the field every client renders,
+    // not only inside a nested upstream payload.
+    expect(body.error.type).toBe('rate_limit_error');
+    expect(body.error.code).toBe('upstream_credentials_exhausted');
+    expect(body.error.message).toContain(
+      'All 2 tried credentials are rate limited',
+    );
+    expect(body.error.message).toContain('使用量已超出频率限制');
+    expect(body.error.detail).toMatchObject({
+      attempts: 2,
+      reason: expect.stringContaining('使用量已超出频率限制'),
+      resumeAt: expect.any(String),
+    });
+    expect(body.error.detail?.retryAfterSeconds).toBeGreaterThan(0);
+    expect(Number(response.headers.get('retry-after'))).toBe(
+      body.error.detail?.retryAfterSeconds,
+    );
+  });
+
   it('does not rotate away from a credential pinned by the caller', async () => {
     const created = await addCredential(
       { bearer_token: 'token-a', user_id: 'a@example.com' },

@@ -880,11 +880,16 @@ const getUpstreamResponseTimeoutMs = (): number => {
 const isUpstreamTimeout = (error: unknown): boolean =>
   error instanceof Error && error.name === 'AbortError';
 
-const buildUpstreamTimeoutResponse = (timeoutMs: number): Response =>
+const buildUpstreamTimeoutResponse = (
+  timeoutMs: number,
+  attempts = 1,
+): Response =>
   new Response(
     JSON.stringify({
       error: {
-        message: `Upstream did not respond within ${timeoutMs}ms`,
+        message:
+          `Upstream did not respond within ${timeoutMs}ms` +
+          ` (after ${attempts} credential attempt(s))`,
         type: 'upstream_timeout',
       },
     }),
@@ -893,6 +898,81 @@ const buildUpstreamTimeoutResponse = (timeoutMs: number): Response =>
       status: 504,
     },
   );
+
+/**
+ * Turns the final upstream failure into a response that explains why the
+ * request failed, in the field clients actually render.
+ *
+ * A throttled credential is answered with a payload such as
+ * `{"code":6004,"msg":"您的使用量已超出频率限制，将在 2026-10-20 10:55:51 UTC+8 重置，您也可以切换其他模型继续使用。"}`
+ * and the pool then rotates. When *every* eligible account is throttled the
+ * rotated request still ends in a bare 429 whose detail is a nested JSON
+ * string, so a caller only sees "Upstream CodeBuddy request failed" and has no
+ * way to tell that the accounts are out of quota rather than the model being
+ * broken. This folds the upstream reason, the number of accounts tried and the
+ * recovery instant into `error.message`, repeats them as structured fields and
+ * adds `Retry-After`.
+ */
+const buildUpstreamErrorResponse = async ({
+  attempts,
+  detail,
+  response,
+}: {
+  attempts: number;
+  detail?: string;
+  response: Response;
+}): Promise<Response> => {
+  if (response.status !== 429) {
+    return createErrorResponse(
+      response.status,
+      'Upstream CodeBuddy request failed',
+      detail,
+    );
+  }
+
+  const signal = parseRateLimitSignal({
+    detail,
+    maxCooldownMs: await getCredentialLimitCooldownMs(),
+    retryAfter: response.headers.get('retry-after'),
+    status: response.status,
+  });
+  const resumeAt = signal?.resumeAt ?? Date.now();
+  const resumeAtIso = new Date(resumeAt).toISOString();
+  const retryAfterSeconds = Math.max(
+    0,
+    Math.ceil((resumeAt - Date.now()) / 1_000),
+  );
+  const reason = signal?.reason ?? 'upstream rate limit';
+  // A pinned caller only ever gets one credential tried, so claiming "all" of
+  // them are limited would be wrong there.
+  const exhaustion =
+    attempts > 1
+      ? `All ${attempts} tried credentials are rate limited`
+      : 'The upstream credential is rate limited';
+  const message =
+    `${exhaustion}. Earliest recovery at ${resumeAtIso}.` +
+    ` Upstream said: ${reason}`;
+
+  return createErrorResponse(
+    response.status,
+    message,
+    {
+      attempts,
+      reason,
+      resumeAt: resumeAtIso,
+      retryAfterSeconds,
+      upstreamDetail: detail ?? null,
+    },
+    {
+      code: 'upstream_credentials_exhausted',
+      headers:
+        retryAfterSeconds > 0
+          ? { 'Retry-After': String(retryAfterSeconds) }
+          : undefined,
+      type: 'rate_limit_error',
+    },
+  );
+};
 
 /**
  * Calls the upstream and, while attempts remain, rotates to another credential
@@ -991,7 +1071,7 @@ const fetchUpstreamWithRotation = async ({
           attempts,
           context,
           detail: `Upstream did not respond within ${timeoutMs}ms`,
-          response: buildUpstreamTimeoutResponse(timeoutMs),
+          response: buildUpstreamTimeoutResponse(timeoutMs, attempts),
         };
       }
 
@@ -3517,11 +3597,11 @@ export const proxyChatCompletions = async (
 
       if (!upstreamResponse.ok) {
         setDebugTraceError(debugTrace, upstreamCall.detail);
-        return createErrorResponse(
-          upstreamResponse.status,
-          'Upstream CodeBuddy request failed',
-          upstreamCall.detail,
-        );
+        return buildUpstreamErrorResponse({
+          attempts: upstreamCall.attempts,
+          detail: upstreamCall.detail,
+          response: upstreamResponse,
+        });
       }
 
       if (body.stream) {
@@ -3604,11 +3684,11 @@ export const proxyChatCompletions = async (
 
     if (!upstreamResponse.ok) {
       setDebugTraceError(debugTrace, upstreamCall.detail);
-      return createErrorResponse(
-        upstreamResponse.status,
-        'Upstream CodeBuddy request failed',
-        upstreamCall.detail,
-      );
+      return buildUpstreamErrorResponse({
+        attempts: upstreamCall.attempts,
+        detail: upstreamCall.detail,
+        response: upstreamResponse,
+      });
     }
 
     if (body.stream) {
@@ -3740,11 +3820,11 @@ export const proxyResponsesUpstream = async (
 
     if (!upstreamResponse.ok) {
       setDebugTraceError(debugTrace, upstreamCall.detail);
-      return createErrorResponse(
-        upstreamResponse.status,
-        'Upstream CodeBuddy request failed',
-        upstreamCall.detail,
-      );
+      return buildUpstreamErrorResponse({
+        attempts: upstreamCall.attempts,
+        detail: upstreamCall.detail,
+        response: upstreamResponse,
+      });
     }
 
     const model = String(upstreamBody.model ?? 'unknown');
