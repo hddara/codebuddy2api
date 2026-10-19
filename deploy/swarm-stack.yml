@@ -20,7 +20,7 @@ version: '3.8'
 
 services:
   app:
-    image: registry.cn-hangzhou.aliyuncs.com/hucx/codebuddy2api:20261016.T01
+    image: registry.cn-hangzhou.aliyuncs.com/hucx/codebuddy2api:20261019.T01
     ports:
       - '8001:8001'
     environment:
