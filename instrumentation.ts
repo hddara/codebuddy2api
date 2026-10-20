@@ -1,6 +1,8 @@
 export const register = async (): Promise<void> => {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
+  const { installProcessDiagnostics, startMemoryWatchdog } =
+    await import('@/lib/server/shared/diagnostics');
   const { scheduleAutoCheckin } =
     await import('@/lib/server/domain/auto-checkin');
   const { refreshMissingCredentialModels } =
@@ -11,6 +13,11 @@ export const register = async (): Promise<void> => {
     await import('@/lib/server/domain/session-transcripts');
   const { ensureSessionTitleRecorder } =
     await import('@/lib/server/domain/session-title-recorder');
+
+  // Samples resident memory every minute and marks the snapshot WARN/ERROR
+  // once it approaches the point where the host OOM killer steps in.
+  startMemoryWatchdog();
+  installProcessDiagnostics();
 
   void refreshMissingCredentialModels();
   void scheduleAutoCheckin();

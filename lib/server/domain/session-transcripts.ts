@@ -5,6 +5,7 @@ import {
   readStorageJson,
   writeStorageJson,
 } from '../storage';
+import { logEvent, truncateLogText } from '../shared/log';
 import { subscribeToSessionEvents, type SessionEvent } from './session-stream';
 
 /**
@@ -898,6 +899,22 @@ export const ensureSessionTranscriptRecorder = (): void => {
         // ends stored every turn with a zero-length duration.
         startedAt: new Date(event.startedAt ?? event.occurredAt).toISOString(),
         toolTurn: event.toolTurn,
+      }).catch((error: unknown) => {
+        // Persisting a finished turn is fire-and-forget, so without this the
+        // failure only surfaced as an unhandled rejection with no context.
+        void logEvent({
+          level: 'ERROR',
+          message: 'Failed to persist session turn',
+          payload: {
+            answerChars: (event.text ?? '').length,
+            conversationId: event.conversationId,
+            error:
+              error instanceof Error
+                ? error.message
+                : truncateLogText(String(error)),
+            model: event.model ?? null,
+          },
+        });
       });
 
       return true;

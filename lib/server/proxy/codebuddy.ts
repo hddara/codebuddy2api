@@ -31,9 +31,11 @@ import {
   publishSessionStarted,
 } from '../domain/session-stream';
 import { extractQuestionText } from '../domain/session-transcripts';
+import { getMemorySnapshot } from '../shared/diagnostics';
 import { createErrorResponse, getRequestHeaderMap } from '../shared/http';
 import { logEvent, summarizeLogHeaders, truncateLogText } from '../shared/log';
 import { parseRateLimitSignal } from '../shared/rate-limit';
+import { runWithRequestContext } from '../shared/request-context';
 import { recordUsageEvent, type UsageSnapshot } from '../domain/usage';
 
 interface OpenAIMessage {
@@ -240,17 +242,37 @@ const recordProxyUsage = async ({
   route: string;
   usage: unknown;
 }): Promise<void> => {
-  await recordUsageEvent({
-    accessKeyId: proxyContext.accessKeyId,
-    accessKeyName: proxyContext.accessKeyName,
-    completionChars: completionChars ?? 0,
-    conversationId: proxyContext.requestDetails.conversationId,
-    credentialFilename: proxyContext.credentialFilename,
-    model,
-    promptChars: proxyContext.requestDetails.promptChars,
-    route,
-    usage: toUsageSnapshot(usage) ?? {},
-  });
+  try {
+    await recordUsageEvent({
+      accessKeyId: proxyContext.accessKeyId,
+      accessKeyName: proxyContext.accessKeyName,
+      completionChars: completionChars ?? 0,
+      conversationId: proxyContext.requestDetails.conversationId,
+      credentialFilename: proxyContext.credentialFilename,
+      model,
+      promptChars: proxyContext.requestDetails.promptChars,
+      route,
+      usage: toUsageSnapshot(usage) ?? {},
+    });
+  } catch (error) {
+    // Billing is a downstream step: the failure has to be visible on its own
+    // line, otherwise a broken usage write is indistinguishable from a broken
+    // upstream call in the caller-facing error.
+    void logEvent({
+      level: 'ERROR',
+      message: 'Failed to record proxy usage',
+      payload: {
+        ...getMemorySnapshot(),
+        accessKeyId: proxyContext.accessKeyId,
+        credentialFilename: proxyContext.credentialFilename,
+        error: error instanceof Error ? error.message : error,
+        model,
+        route,
+      },
+    });
+
+    throw error;
+  }
 };
 
 /**
@@ -690,6 +712,10 @@ const logUpstreamFailure = ({
     payload.error = error;
   }
 
+  // Memory rides along with the failure so a crash that follows a burst of
+  // failures can be read from the same stream without a metrics backend.
+  Object.assign(payload, getMemorySnapshot());
+
   void logEvent({
     level: 'ERROR',
     message: 'Upstream request failed',
@@ -900,6 +926,83 @@ const buildUpstreamTimeoutResponse = (
   );
 
 /**
+ * Reports the end of every streaming response.
+ *
+ * A stream can end in three ways — upstream finished, client hung up, upstream
+ * errored — and none of them used to leave a trace, so a request that died
+ * mid-stream looked exactly like one that never arrived. The byte count and
+ * duration also tell a truncated answer apart from a short one, and the memory
+ * sample tells whether the stream was the reason the process grew.
+ */
+const instrumentStreamResponse = (
+  response: Response,
+  meta: {
+    credentialFilename?: string | null;
+    model: string;
+    route: string;
+  },
+): Response => {
+  const body = response.body;
+
+  if (!body) return response;
+
+  const reader = body.getReader();
+  const startedAt = Date.now();
+  let bytes = 0;
+  let finished = false;
+
+  const logFinished = (outcome: 'cancelled' | 'completed' | 'failed'): void => {
+    if (finished) return;
+
+    finished = true;
+    void logEvent({
+      level: outcome === 'failed' ? 'ERROR' : 'INFO',
+      message: 'Response stream finished',
+      payload: {
+        ...getMemorySnapshot(),
+        bytes,
+        credentialFilename: meta.credentialFilename ?? null,
+        durationMs: Date.now() - startedAt,
+        model: meta.model,
+        outcome,
+        route: meta.route,
+      },
+    });
+  };
+
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      async cancel(reason) {
+        logFinished('cancelled');
+        await reader.cancel(reason);
+      },
+      async pull(controller) {
+        try {
+          const { done, value } = await reader.read();
+
+          if (done) {
+            logFinished('completed');
+            controller.close();
+            return;
+          }
+
+          bytes += value.byteLength;
+          controller.enqueue(value);
+        } catch (error) {
+          logFinished('failed');
+          controller.error(error);
+        }
+      },
+    }),
+    {
+      headers: response.headers,
+      status: response.status,
+      statusText: response.statusText,
+    },
+  );
+};
+
+/**
  * Turns the final upstream failure into a response that explains why the
  * request failed, in the field clients actually render.
  *
@@ -1016,12 +1119,29 @@ const fetchUpstreamWithRotation = async ({
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     let response: Response;
+    const payloadText = JSON.stringify(plan.body);
+
+    void logEvent({
+      level: 'DEBUG',
+      message: 'Upstream request dispatched',
+      payload: {
+        ...getMemorySnapshot(),
+        attempt: attempts,
+        credentialFilename: context.credentialFilename,
+        model,
+        payloadBytes: payloadText.length,
+        route,
+        stream,
+        timeoutMs,
+        url: plan.url,
+      },
+    });
 
     try {
       response = enqueueUpstreamResponseSnapshot(
         debugTrace,
         await fetch(plan.url, {
-          body: JSON.stringify(plan.body),
+          body: payloadText,
           cache: 'no-store',
           headers: plan.headers,
           method: 'POST',
@@ -1172,6 +1292,7 @@ const logUpstreamSuccess = ({
     level: 'DEBUG',
     message: 'Upstream request completed',
     payload: {
+      ...getMemorySnapshot(),
       credentialFilename: credentialFilename ?? null,
       elapsedMs,
       model: model ?? null,
@@ -3531,7 +3652,46 @@ export const getModelsResponse = async (
   });
 };
 
+/**
+ * Entry point for every chat-shaped request.
+ *
+ * The work runs inside a request context so that every stage of one request
+ * (alias resolution, credential selection, upstream dispatch, stream end)
+ * shares a single `reqId`. Without it the lines of concurrent requests are
+ * indistinguishable and "which step failed" cannot be answered from the logs.
+ */
 export const proxyChatCompletions = async (
+  request: NextRequest,
+  body: ChatRequestBody,
+  context?: ProxyContext,
+  debugTrace?: DebugTrace,
+  usageRoute = '/v1/chat/completions',
+): Promise<Response> =>
+  runWithRequestContext(usageRoute, async () => {
+    void logEvent({
+      level: 'INFO',
+      message: 'Request received',
+      payload: {
+        ...getMemorySnapshot(),
+        bodyChars: JSON.stringify(body).length,
+        messageCount: body.messages?.length ?? 0,
+        model: String(body.model ?? ''),
+        route: usageRoute,
+        stream: Boolean(body.stream),
+        toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
+      },
+    });
+
+    return proxyChatCompletionsInScope(
+      request,
+      body,
+      context,
+      debugTrace,
+      usageRoute,
+    );
+  });
+
+const proxyChatCompletionsInScope = async (
   request: NextRequest,
   body: ChatRequestBody,
   context?: ProxyContext,
@@ -3605,14 +3765,21 @@ export const proxyChatCompletions = async (
       }
 
       if (body.stream) {
-        return mapResponsesStreamToChat(
-          upstreamResponse,
-          String(upstreamBody.model ?? 'unknown'),
-          activeContext,
-          usageRoute,
-          body.stop,
-          Boolean(body.stream_options?.include_usage) ||
-            usageRoute === '/v1/messages',
+        return instrumentStreamResponse(
+          mapResponsesStreamToChat(
+            upstreamResponse,
+            String(upstreamBody.model ?? 'unknown'),
+            activeContext,
+            usageRoute,
+            body.stop,
+            Boolean(body.stream_options?.include_usage) ||
+              usageRoute === '/v1/messages',
+          ),
+          {
+            credentialFilename: activeContext.credentialFilename,
+            model: String(upstreamBody.model ?? 'unknown'),
+            route: usageRoute,
+          },
         );
       }
 
@@ -3692,12 +3859,19 @@ export const proxyChatCompletions = async (
     }
 
     if (body.stream) {
-      return normalizeStreamingResponse({
-        model: String(upstreamBody.model ?? 'unknown'),
-        proxyContext: activeContext,
-        route: usageRoute,
-        upstreamResponse,
-      });
+      return instrumentStreamResponse(
+        normalizeStreamingResponse({
+          model: String(upstreamBody.model ?? 'unknown'),
+          proxyContext: activeContext,
+          route: usageRoute,
+          upstreamResponse,
+        }),
+        {
+          credentialFilename: activeContext.credentialFilename,
+          model: String(upstreamBody.model ?? 'unknown'),
+          route: usageRoute,
+        },
+      );
     }
 
     const contentType = upstreamResponse.headers.get('content-type') ?? '';

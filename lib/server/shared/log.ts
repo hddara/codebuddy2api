@@ -1,4 +1,5 @@
 import { readStorageJson } from '../storage';
+import { getRequestContext } from './request-context';
 
 /**
  * Level gating for diagnostics. `CODEBUDDY_LOG_LEVEL` is a runtime setting, so
@@ -123,16 +124,21 @@ export const logEvent = async ({
   }
 
   const line = `[CodeBuddy2API][${level}] ${message}`;
+  // Every line carries the id of the request it belongs to, so the stages of
+  // one request can be followed across modules without threading a parameter
+  // through all of them.
+  const context = getRequestContext();
+  const tagged = context ? { reqId: context.id, ...payload } : payload;
 
   if (level === 'ERROR') {
-    console.error(line, payload ?? '');
+    console.error(line, tagged ?? '');
     return;
   }
 
   if (level === 'WARN') {
-    console.warn(line, payload ?? '');
+    console.warn(line, tagged ?? '');
     return;
   }
 
-  console.log(line, payload ?? '');
+  console.log(line, tagged ?? '');
 };
