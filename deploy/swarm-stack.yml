@@ -42,10 +42,12 @@ services:
     volumes:
       - codebuddy_creds:/app/.codebuddy_creds
       - codebuddy_data:/app/.codebuddy_data
+    # Logs are collected by Promtail from the Docker json-file log of each
+    # container. Declaring the `loki` driver here would push straight to Loki
+    # instead and blind Promtail, so keep json-file and cap the file instead.
     logging:
-      driver: loki
+      driver: json-file
       options:
-        loki-url: 'http://10.1.0.10:3100/loki/api/v1/push'
         max-size: '20m'
         max-file: '5'
     # Edge case: on 2026-10-19 the bun process grew to ~3.07 GB and triggered a
