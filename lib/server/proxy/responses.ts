@@ -11,7 +11,7 @@ import {
   type ProxyContext,
 } from './codebuddy';
 import { resolveRequestAccessKey } from './auth';
-import { createErrorResponse } from '../shared/http';
+import { createErrorResponse, waitForStreamDemand } from '../shared/http';
 import {
   deleteStorageJson,
   getStorageBackendMeta,
@@ -1401,6 +1401,15 @@ const createResponsesEventStream = async (
             return;
           }
 
+          // One upstream chunk expands into many emitted events, so the wait
+          // happens here rather than per event: what stays queued is at most the
+          // frames produced by a single read, never the whole reply.
+          await waitForStreamDemand(controller, () => cancelled);
+
+          if (cancelled) {
+            return;
+          }
+
           if (done) {
             const transcriptToolCalls =
               buildStreamingAssistantTranscriptToolCalls(
@@ -1706,7 +1715,14 @@ const createResponsesEventStream = async (
         }
       };
 
-      void pump();
+      void pump().catch(() => {
+        releaseReader();
+        try {
+          controller.close();
+        } catch {
+          // Already closed downstream.
+        }
+      });
     },
     async cancel(reason): Promise<void> {
       cancelled = true;

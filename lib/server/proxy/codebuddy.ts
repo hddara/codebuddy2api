@@ -32,7 +32,12 @@ import {
 } from '../domain/session-stream';
 import { extractQuestionText } from '../domain/session-transcripts';
 import { getMemorySnapshot } from '../shared/diagnostics';
-import { createErrorResponse, getRequestHeaderMap } from '../shared/http';
+import {
+  createErrorResponse,
+  getRequestHeaderMap,
+  readCappedResponseText,
+  waitForStreamDemand,
+} from '../shared/http';
 import { logEvent, summarizeLogHeaders, truncateLogText } from '../shared/log';
 import { parseRateLimitSignal } from '../shared/rate-limit';
 import { runWithRequestContext } from '../shared/request-context';
@@ -53,6 +58,23 @@ interface CacheableTextBlock {
 
 const MIN_AUTO_CACHE_TEXT_LENGTH = 1024;
 const MAX_STREAM_FRAME_LENGTH = 1_000_000;
+/**
+ * Characters of reply text held while a turn is streaming.
+ *
+ * The gateway only needs the finished answer for the transcript, so the buffer
+ * is capped: past this point the oldest chunks are dropped and the stored turn
+ * keeps the tail. Without a cap a single long answer would grow with the model's
+ * output size instead of with the request.
+ */
+const MAX_ANSWER_CHARS = 200_000;
+/**
+ * Ceiling when an SSE reply has to be folded into a single JSON body.
+ *
+ * The upstream is always asked for `stream: true`, so a non-streaming caller
+ * still receives an SSE body that has to be buffered in full. `.text()` has no
+ * limit; a misbehaving upstream would be held entirely in memory.
+ */
+const MAX_AGGREGATED_STREAM_BYTES = 8 * 1024 * 1024;
 /**
  * Hard ceiling for in-request credential rotation. Rotation keeps the requested
  * model and only swaps the account, walking every untried credential: each retry
@@ -585,6 +607,7 @@ const trackResponsesUsageStream = async ({
           if (done) {
             if (buffer) {
               await inspectFrame(buffer);
+              await waitForStreamDemand(controller, () => cancelled);
               controller.enqueue(encoder.encode(buffer));
             }
 
@@ -608,6 +631,8 @@ const trackResponsesUsageStream = async ({
               continue;
             }
             await inspectFrame(frame);
+            if (cancelled) return;
+            await waitForStreamDemand(controller, () => cancelled);
             if (cancelled) return;
             controller.enqueue(encoder.encode(`${frame}\n\n`));
           }
@@ -2247,6 +2272,34 @@ const mapResponsesStreamToChat = (
   let streamStarted = false;
   let streamCompleted = false;
 
+  // The reply is accumulated here, in the scope of the request that produces
+  // it, and handed to the terminal event once. Keeping it local means an
+  // aborted or throwing stream releases the buffer with the closure instead of
+  // leaving an entry behind in a process-wide map.
+  const answerChunks: string[] = [];
+  let answerChars = 0;
+
+  const appendAnswer = (text: string): void => {
+    answerChunks.push(text);
+    answerChars += text.length;
+
+    while (answerChars > MAX_ANSWER_CHARS && answerChunks.length > 1) {
+      const dropped = answerChunks.shift();
+
+      answerChars -= dropped?.length ?? 0;
+    }
+  };
+
+  const takeAnswer = (): string => {
+    const text = answerChunks.join('');
+    answerChunks.length = 0;
+    answerChars = 0;
+
+    return text.length > MAX_ANSWER_CHARS
+      ? text.slice(-MAX_ANSWER_CHARS)
+      : text;
+  };
+
   const teeStarted = (): void => {
     if (streamStarted || !conversationId) return;
     streamStarted = true;
@@ -2260,6 +2313,9 @@ const mapResponsesStreamToChat = (
 
   const teeDelta = (delta: unknown): void => {
     if (!conversationId) return;
+    if (typeof delta === 'string' && delta) {
+      appendAnswer(delta);
+    }
     teeStarted();
     publishSessionDelta({ conversationId, delta });
   };
@@ -2268,9 +2324,11 @@ const mapResponsesStreamToChat = (
     if (streamCompleted || !conversationId) return;
     streamCompleted = true;
     if (!streamStarted) return;
+    const text = takeAnswer();
     publishSessionCompleted({
       conversationId,
       error,
+      text,
       // `hasToolCalls` is final by the time this runs: it is set while the
       // upstream frames are folded, and every call site below is past that.
       toolTurn: hasToolCalls,
@@ -3123,8 +3181,34 @@ const normalizeStreamingResponse = ({
    */
   let sawToolCalls = false;
 
+  // Same reasoning as the responses path: the reply lives only for as long as
+  // the stream that produced it, so an aborted client cannot strand it.
+  const teeAnswerChunks: string[] = [];
+  let teeAnswerChars = 0;
+  const teeAppendAnswer = (text: string): void => {
+    teeAnswerChunks.push(text);
+    teeAnswerChars += text.length;
+
+    while (teeAnswerChars > MAX_ANSWER_CHARS && teeAnswerChunks.length > 1) {
+      const dropped = teeAnswerChunks.shift();
+
+      teeAnswerChars -= dropped?.length ?? 0;
+    }
+  };
+  const teeTakeAnswer = (): string => {
+    const text = teeAnswerChunks.join('');
+    teeAnswerChunks.length = 0;
+    teeAnswerChars = 0;
+
+    return text.length > MAX_ANSWER_CHARS
+      ? text.slice(-MAX_ANSWER_CHARS)
+      : text;
+  };
+
   const teeContent = (delta: unknown): void => {
     if (!teeConversationId || typeof delta !== 'string' || !delta) return;
+
+    teeAppendAnswer(delta);
 
     if (!teeStarted) {
       teeStarted = true;
@@ -3146,6 +3230,7 @@ const normalizeStreamingResponse = ({
     publishSessionCompleted({
       conversationId: teeConversationId,
       error,
+      text: teeTakeAnswer(),
       toolTurn: sawToolCalls,
     });
   };
@@ -3214,18 +3299,25 @@ const normalizeStreamingResponse = ({
         }
       };
 
-      const flushFrames = (frames: string[]): void => {
-        frames.forEach((frame) => {
+      const waitForDemand = (): Promise<void> =>
+        waitForStreamDemand(controller, () => cancelled);
+
+      const flushFrames = async (frames: string[]): Promise<void> => {
+        for (const frame of frames) {
+          await waitForDemand();
+
+          if (cancelled) return;
+
           if (frame.length > MAX_STREAM_FRAME_LENGTH) {
             controller.enqueue(
               encoder.encode(
                 'data: {"error":{"message":"Upstream SSE frame exceeds the maximum size"}}\n\n',
               ),
             );
-            return;
+            continue;
           }
           controller.enqueue(encoder.encode(`${processFrame(frame)}\n\n`));
-        });
+        }
       };
 
       const pump = async (): Promise<void> => {
@@ -3238,7 +3330,7 @@ const normalizeStreamingResponse = ({
 
           if (done) {
             if (buffer.trim()) {
-              flushFrames([buffer]);
+              await flushFrames([buffer]);
             }
 
             await recordProxyUsage({
@@ -3262,11 +3354,13 @@ const normalizeStreamingResponse = ({
           const frames = buffer.split('\n\n');
           buffer = frames.pop()!;
           if (buffer.length > MAX_STREAM_FRAME_LENGTH) {
+            await waitForDemand();
             controller.enqueue(
               encoder.encode(
                 'data: {"error":{"message":"Upstream SSE frame exceeds the maximum size"}}\n\n',
               ),
             );
+            teeFinish('Upstream SSE frame exceeds the maximum size');
             try {
               await reader!.cancel();
             } finally {
@@ -3275,11 +3369,21 @@ const normalizeStreamingResponse = ({
             }
             return;
           }
-          flushFrames(frames);
+          await flushFrames(frames);
         }
       };
 
-      void pump();
+      // A rejected pump used to be an unhandled rejection that also skipped the
+      // terminal bookkeeping; any failure has to end the turn explicitly.
+      void pump().catch((error: unknown) => {
+        releaseReader();
+        teeFinish(describeStreamError(error, 'Upstream stream failed'));
+        try {
+          controller.close();
+        } catch {
+          // Already closed downstream.
+        }
+      });
     },
     async cancel(reason): Promise<void> {
       cancelled = true;
@@ -3287,6 +3391,9 @@ const normalizeStreamingResponse = ({
         await reader?.cancel(reason);
       } finally {
         releaseReader();
+        // The turn ends here, not on the upstream's `done` branch. Without this
+        // the conversation stayed "live" with text nobody would ever collect.
+        teeFinish('Client disconnected');
       }
     },
   });
@@ -3306,7 +3413,10 @@ const aggregateUpstreamStream = async (
   upstreamResponse: Response,
   fallbackModel: string,
 ): Promise<{ model: string; response: Response; usage: unknown }> => {
-  const payloadText = await upstreamResponse.text();
+  const payloadText = await readCappedResponseText(
+    upstreamResponse,
+    MAX_AGGREGATED_STREAM_BYTES,
+  );
   const toolCalls: NonNullable<ChatStreamDelta['tool_calls']> = [];
   let responseId = '';
   let responseObject = 'chat.completion';
@@ -3673,7 +3783,10 @@ export const proxyChatCompletions = async (
       message: 'Request received',
       payload: {
         ...getMemorySnapshot(),
-        bodyChars: JSON.stringify(body).length,
+        // Counted structurally rather than with `JSON.stringify(body).length`:
+        // the old form allocated a second copy of a multi-megabyte body once per
+        // request just to print a number.
+        messageChars: countMessageChars(body.messages),
         messageCount: body.messages?.length ?? 0,
         model: String(body.model ?? ''),
         route: usageRoute,

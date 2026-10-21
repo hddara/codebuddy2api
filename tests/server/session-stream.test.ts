@@ -45,7 +45,7 @@ describe('session stream', () => {
     });
     publishSessionDelta({ conversationId: 'conv-a', delta: '你' });
     publishSessionDelta({ conversationId: 'conv-a', delta: '好' });
-    publishSessionCompleted({ conversationId: 'conv-a' });
+    publishSessionCompleted({ conversationId: 'conv-a', text: '你好' });
 
     expect(events.map((event) => event.type)).toEqual([
       'session.started',
@@ -152,7 +152,7 @@ describe('session stream', () => {
     ).toBeNull();
   });
 
-  it('exposes a snapshot so a late subscriber can render the live reply', () => {
+  it('exposes turn metadata without retaining the streamed text', () => {
     const { subscriber } = collect();
     const entry = subscribeToSessionEvents(subscriber);
 
@@ -164,11 +164,13 @@ describe('session stream', () => {
     publishSessionDelta({ conversationId: 'conv-a', delta: 'h' });
     publishSessionDelta({ conversationId: 'conv-a', delta: 'i' });
 
+    // A viewer still learns which turn is running, but the deltas themselves
+    // are not kept: the reply is held by the request that produces it.
     expect(getSessionSnapshot('conv-a')).toEqual({
       accessKeyId: null,
       model: 'deepseek-v4.1-flash',
       question: 'how are you',
-      text: 'hi',
+      text: '',
     });
     // An unknown conversation has no live turn.
     expect(getSessionSnapshot('conv-missing')).toBeNull();
@@ -178,31 +180,27 @@ describe('session stream', () => {
     expect(getSessionSubscriberCount()).toBe(0);
   });
 
-  it('releases the accumulated reply once the turn completes', () => {
+  it('forgets the turn once it completes', () => {
     const { subscriber } = collect();
 
     subscribeToSessionEvents(subscriber);
     publishSessionStarted({ conversationId: 'conv-a' });
     publishSessionDelta({ conversationId: 'conv-a', delta: 'done' });
 
-    expect(getSessionSnapshot('conv-a')?.text).toBe('done');
+    expect(getSessionSnapshot('conv-a')).not.toBeNull();
 
-    publishSessionCompleted({ conversationId: 'conv-a' });
+    publishSessionCompleted({ conversationId: 'conv-a', text: 'done' });
 
-    // The completed text travelled on the event (and into the transcript), so
-    // holding it here would only keep memory until the idle sweep.
     expect(getSessionSnapshot('conv-a')).toBeNull();
   });
 
-  it('bounds the accumulated text without losing the newest chunks', () => {
+  it('never grows a buffer from streamed deltas', () => {
     const { subscriber } = collect();
     const chunkSize = 20_000;
 
     subscribeToSessionEvents(subscriber);
     publishSessionStarted({ conversationId: 'conv-a' });
 
-    // 20 x 20k = 400k into a 200k buffer: the oldest chunks are dropped and the
-    // tail must survive byte-for-byte.
     for (let index = 1; index <= 20; index += 1) {
       publishSessionDelta({
         conversationId: 'conv-a',
@@ -210,14 +208,11 @@ describe('session stream', () => {
       });
     }
 
+    // 400k of deltas passed through; nothing of it is held.
     const snapshot = getSessionSnapshot('conv-a');
 
-    expect(snapshot?.text).toHaveLength(200_000);
-    // The last chunk is intact at the tail...
-    expect(snapshot?.text.endsWith('y'.repeat(chunkSize - 4))).toBe(true);
-    expect(snapshot?.text.includes('0020')).toBe(true);
-    // ...and the very first chunk is gone.
-    expect(snapshot?.text.includes('0001')).toBe(false);
+    expect(snapshot).not.toBeNull();
+    expect(snapshot?.text).toBe('');
   });
 
   it('never throws when a subscriber send blows up', () => {

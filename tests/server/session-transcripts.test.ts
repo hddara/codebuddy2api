@@ -517,7 +517,11 @@ describe('session transcripts', () => {
 
     publishSessionStarted({ conversationId: 'conv-tool', question: '继续4' });
     publishSessionDelta({ conversationId: 'conv-tool', delta: 'Now re-run…' });
-    publishSessionCompleted({ conversationId: 'conv-tool', toolTurn: true });
+    publishSessionCompleted({
+      conversationId: 'conv-tool',
+      text: 'Now re-run…',
+      toolTurn: true,
+    });
 
     await flushRecorder();
 
@@ -912,7 +916,9 @@ describe('transcript recorder', () => {
       question: 'what is 2+2',
     });
     publishSessionDelta({ conversationId: 'conv-live', delta: '4' });
-    publishSessionCompleted({ conversationId: 'conv-live' });
+    // The reply travels on the terminal event: deltas are not accumulated by
+    // the bus any more, so the caller that streamed them hands over the text.
+    publishSessionCompleted({ conversationId: 'conv-live', text: '4' });
 
     await flushRecorder();
 

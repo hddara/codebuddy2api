@@ -143,6 +143,86 @@ export const readJsonBodyOrErrorResponse = async <T>(
   return result;
 };
 
+/**
+ * Waits until the stream's consumer has room for another chunk.
+ *
+ * `controller.enqueue` never blocks: a producer that reads a source as fast as
+ * it can emit will queue every chunk the consumer has not taken yet, and that
+ * queue is unbounded. A model reply can be megabytes, so a client on a slow link
+ * turns into hundreds of megabytes of retained `Uint8Array` unless the producer
+ * stops at `desiredSize <= 0`. The poll is deliberate — the stream API offers no
+ * "demand changed" signal, and 5ms is far below any human-perceptible latency.
+ */
+export const waitForStreamDemand = async (
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  isCancelled: () => boolean = () => false,
+): Promise<void> => {
+  while (
+    !isCancelled() &&
+    controller.desiredSize !== null &&
+    controller.desiredSize <= 0
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+};
+
+/**
+ * Buffers a whole response body as text, refusing to exceed `maxBytes`.
+ *
+ * Used where the caller needs the complete payload (aggregating an SSE reply
+ * into one JSON object). The cap matters because `.text()` has none: an upstream
+ * that streams far more than expected would be held in memory in full.
+ */
+export const readCappedResponseText = async (
+  response: Response,
+  maxBytes: number,
+): Promise<string> => {
+  const body = response.body;
+
+  if (!body) {
+    return '';
+  }
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        break;
+      }
+
+      totalBytes += value.byteLength;
+
+      if (totalBytes > maxBytes) {
+        throw new Error(
+          `Upstream response exceeds the maximum size of ${Math.floor(
+            maxBytes / (1024 * 1024),
+          )}MB`,
+        );
+      }
+
+      chunks.push(decoder.decode(value, { stream: true }));
+    }
+
+    chunks.push(decoder.decode());
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      // The stream may already be closed or errored.
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  return chunks.join('');
+};
+
 export const getRequestHeaderMap = (
   headers: Headers,
 ): Record<string, string> => {

@@ -177,7 +177,13 @@ export const GET = async (request: Request): Promise<Response> => {
         }
       },
     },
-    { highWaterMark: MAX_QUEUE_BYTES },
+    {
+      highWaterMark: MAX_QUEUE_BYTES,
+      // `highWaterMark` counts queue *entries*, not bytes. Without a size
+      // function each frame counts as 1, so a 2MB limit became ~2 million
+      // frames and the `desiredSize <= 0` guard above could never fire.
+      size: (chunk: Uint8Array) => chunk.byteLength,
+    },
   );
 
   return new Response(stream, {

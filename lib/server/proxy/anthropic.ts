@@ -2,6 +2,7 @@ import type { NextRequest } from 'next/server';
 
 import { getDefaultModel } from '../domain/config';
 import type { DebugTrace } from '../domain/debug';
+import { waitForStreamDemand } from '../shared/http';
 
 import { proxyChatCompletions, type ChatRequestBody } from './codebuddy';
 
@@ -854,8 +855,12 @@ const mapOpenAIStreamToAnthropicSSE = (
         });
       };
 
-      const flushFrames = (frames: string[]): void => {
+      const flushFrames = async (frames: string[]): Promise<void> => {
         for (const frame of frames) {
+          await waitForStreamDemand(ctrl, () => cancelled);
+
+          if (cancelled) return;
+
           if (frame.length > MAX_STREAM_FRAME_LENGTH) {
             rejectStream();
             return;
@@ -898,7 +903,7 @@ const mapOpenAIStreamToAnthropicSSE = (
 
           if (done) {
             if (buffer.trim()) {
-              flushFrames([buffer]);
+              await flushFrames([buffer]);
             }
             if (!streamRejected) {
               finalize();
@@ -914,7 +919,7 @@ const mapOpenAIStreamToAnthropicSSE = (
           if (buffer.length > MAX_STREAM_FRAME_LENGTH) {
             rejectStream();
           } else {
-            flushFrames(frames);
+            await flushFrames(frames);
           }
           if (streamRejected) {
             try {
@@ -928,7 +933,14 @@ const mapOpenAIStreamToAnthropicSSE = (
         }
       };
 
-      void pump();
+      void pump().catch(() => {
+        releaseReader();
+        try {
+          controller.close();
+        } catch {
+          // Already closed downstream.
+        }
+      });
     },
     async cancel(reason): Promise<void> {
       cancelled = true;

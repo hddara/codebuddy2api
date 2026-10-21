@@ -14,9 +14,18 @@
  *  - Only text/reasoning deltas and lifecycle transitions are published; raw
  *    upstream payloads are never forwarded.
  *  - `session.delta` carries **only the new text**. The accumulated reply rides
- *    on lifecycle events and on `session.snapshot`, so a per-chunk publish stays
- *    O(delta) instead of O(reply length) — a full-text field on every chunk
- *    would make a long answer quadratic on both CPU and wire size.
+ *    on the terminal event, so a per-chunk publish stays O(delta) instead of
+ *    O(reply length) — a full-text field on every chunk would make a long
+ *    answer quadratic on both CPU and wire size.
+ *
+ * Streamed text is **not retained**. This module keeps only what a viewer needs
+ * to know that a turn is running — model, key and question — and the terminal
+ * event carries the finished reply once. The reply is accumulated inside the
+ * proxy call that produced it, so a client that disconnects mid-stream (or an
+ * upstream that throws) leaves nothing behind: the closure dies and its buffer
+ * with it. An earlier version kept per-conversation chunk arrays in a global
+ * map keyed by a client-supplied id, which survived every abnormal ending and
+ * had no entry cap.
  */
 
 export type SessionEventType =
@@ -53,9 +62,8 @@ export interface SessionEvent {
    */
   question?: string;
   /**
-   * Text accumulated so far for this turn. Present on `session.started`,
-   * `session.completed`, `session.failed` and `session.snapshot` — never on
-   * `session.delta`, where it would be resent in full for every chunk.
+   * The finished reply. Present on `session.completed` and `session.failed`
+   * only, and only when the caller supplied it.
    */
   text?: string;
   /**
@@ -82,25 +90,34 @@ export interface SessionSubscriber {
 /** Upper bound on concurrent SSE subscribers; beyond this, connects are refused. */
 export const MAX_SESSION_SUBSCRIBERS = 32;
 
-/** Accumulated reply text kept per conversation, capped to bound memory. */
-const MAX_ACCUMULATED_TEXT = 200_000;
+/**
+ * Upper bound on conversations tracked as "live".
+ *
+ * Only metadata is held here, but the id comes from the client, so the map needs
+ * a ceiling even so — a caller that never completes a turn must not be able to
+ * grow it without limit.
+ */
+const MAX_ACTIVE_TURNS = 512;
 
-/** Conversations idle longer than this are dropped from the accumulator. */
-const ACCUMULATED_TTL_MS = 30 * 60 * 1000;
+/** Turns idle longer than this stop being reported as live. */
+const ACTIVE_TURN_TTL_MS = 30 * 60 * 1000;
+
+/** Prompt characters kept for a viewer; the stored transcript has its own cap. */
+const MAX_QUESTION_CHARS = 4_000;
+
+const PRUNE_INTERVAL_MS = 60 * 1000;
 
 /**
- * Deltas are held as a list of chunks rather than one concatenated string.
- * Appending then becomes O(1); the join happens only when a full snapshot is
- * actually needed (turn start/end, or a subscriber connecting mid-reply).
+ * Metadata for a turn that is currently producing output.
+ *
+ * Deliberately contains no reply text: the answer is accumulated by the proxy
+ * call handling it and handed over once, on completion.
  */
-interface AccumulatedTurn {
+interface ActiveTurn {
   accessKeyId: string | null;
-  chunks: string[];
   model: string | null;
   question: string;
-  /** Publish time of `session.started`, or of the first delta if none arrived. */
   startedAt: number;
-  totalChars: number;
   updatedAt: number;
 }
 
@@ -109,12 +126,14 @@ export interface SessionSnapshot {
   accessKeyId: string | null;
   model: string | null;
   question: string;
+  /** Always empty: streamed text is not retained. */
   text: string;
 }
 
 interface SessionStreamState {
-  __codebuddy2apiAccumulated__?: Map<string, AccumulatedTurn>;
+  __codebuddy2apiActiveTurns__?: Map<string, ActiveTurn>;
   __codebuddy2apiSubscribers__?: Map<string, SessionSubscriber>;
+  __codebuddy2apiPruneTimer__?: ReturnType<typeof setInterval>;
 }
 
 const globalState = globalThis as typeof globalThis & SessionStreamState;
@@ -125,60 +144,66 @@ const getSubscribers = (): Map<string, SessionSubscriber> => {
   return globalState.__codebuddy2apiSubscribers__;
 };
 
-const getAccumulated = (): Map<string, AccumulatedTurn> => {
-  globalState.__codebuddy2apiAccumulated__ ??= new Map();
+const getActiveTurns = (): Map<string, ActiveTurn> => {
+  globalState.__codebuddy2apiActiveTurns__ ??= new Map();
 
-  return globalState.__codebuddy2apiAccumulated__;
+  return globalState.__codebuddy2apiActiveTurns__;
 };
 
-const pruneAccumulated = (now: number): void => {
-  const store = getAccumulated();
+const clampQuestion = (value: string): string =>
+  value.length > MAX_QUESTION_CHARS
+    ? value.slice(0, MAX_QUESTION_CHARS)
+    : value;
+
+/**
+ * Drops idle entries and enforces the entry ceiling, oldest first.
+ *
+ * Called on every turn start and from a timer, because a turn that never
+ * completes still has to fall out of the map eventually.
+ */
+const pruneActiveTurns = (now: number): void => {
+  const store = getActiveTurns();
 
   for (const [conversationId, turn] of store) {
-    if (now - turn.updatedAt > ACCUMULATED_TTL_MS) {
+    if (now - turn.updatedAt > ACTIVE_TURN_TTL_MS) {
       store.delete(conversationId);
     }
   }
+
+  while (store.size > MAX_ACTIVE_TURNS) {
+    const oldestId = store.keys().next().value;
+
+    if (oldestId === undefined) break;
+
+    store.delete(oldestId);
+  }
 };
 
-/** Joins the held chunks, dropping the oldest text beyond the memory cap. */
-const joinChunks = (turn: AccumulatedTurn): string => {
-  const text = turn.chunks.join('');
+/**
+ * Starts the idle sweep once per process.
+ *
+ * `unref()` so a CLI or test run is not held open by it.
+ */
+const ensurePruneTimer = (): void => {
+  if (globalState.__codebuddy2apiPruneTimer__) return;
 
-  if (text.length <= MAX_ACCUMULATED_TEXT) {
-    return text;
-  }
+  const timer = setInterval(() => {
+    pruneActiveTurns(Date.now());
+  }, PRUNE_INTERVAL_MS);
 
-  return text.slice(-MAX_ACCUMULATED_TEXT);
-};
-
-const appendChunk = (turn: AccumulatedTurn, text: string): void => {
-  turn.chunks.push(text);
-  turn.totalChars += text.length;
-
-  // Drop whole chunks from the front so the live buffer stays bounded without
-  // touching the newly appended text.
-  while (
-    turn.totalChars > MAX_ACCUMULATED_TEXT &&
-    turn.chunks.length > 1 &&
-    (turn.chunks[0]?.length ?? 0) <= turn.totalChars - MAX_ACCUMULATED_TEXT
-  ) {
-    const dropped = turn.chunks.shift();
-
-    turn.totalChars -= dropped?.length ?? 0;
-  }
+  timer.unref?.();
+  globalState.__codebuddy2apiPruneTimer__ = timer;
 };
 
 /**
  * Current live turn for a conversation, or null when nothing is streaming.
  *
- * Used to seed a subscriber that connects mid-reply so it can render without
- * replaying the deltas it missed.
+ * `text` is always empty: streamed output is not retained by the gateway.
  */
 export const getSessionSnapshot = (
   conversationId: string,
 ): SessionSnapshot | null => {
-  const turn = getAccumulated().get(conversationId);
+  const turn = getActiveTurns().get(conversationId);
 
   if (!turn) {
     return null;
@@ -188,13 +213,13 @@ export const getSessionSnapshot = (
     accessKeyId: turn.accessKeyId,
     model: turn.model,
     question: turn.question,
-    text: joinChunks(turn),
+    text: '',
   };
 };
 
-/** Conversation ids with a live or recently finished turn. */
+/** Conversation ids with a live turn. */
 export const listSessionSnapshotIds = (): string[] => [
-  ...getAccumulated().keys(),
+  ...getActiveTurns().keys(),
 ];
 
 export const getSessionSubscriberCount = (): number => getSubscribers().size;
@@ -277,16 +302,15 @@ export const publishSessionStarted = ({
   if (!conversationId) return;
 
   const now = Date.now();
-  const prompt = sanitizeText(question);
+  const prompt = clampQuestion(sanitizeText(question));
 
-  pruneAccumulated(now);
-  getAccumulated().set(conversationId, {
+  ensurePruneTimer();
+  pruneActiveTurns(now);
+  getActiveTurns().set(conversationId, {
     accessKeyId: accessKeyId ?? null,
-    chunks: [],
     model: model ?? null,
     question: prompt,
     startedAt: now,
-    totalChars: 0,
     updatedAt: now,
   });
 
@@ -296,16 +320,15 @@ export const publishSessionStarted = ({
     model: model ?? null,
     occurredAt: now,
     question: prompt,
-    text: '',
     type: 'session.started',
   });
 };
 
 /**
- * Appends a model delta and publishes it.
+ * Publishes one model delta.
  *
- * The event carries only the new text: subscribers append it themselves, and a
- * client that joined mid-reply is seeded once via `session.snapshot`.
+ * Nothing is retained: a delta only reaches subscribers that are connected at
+ * this instant, and the finished reply arrives once on the terminal event.
  */
 export const publishSessionDelta = ({
   conversationId,
@@ -320,56 +343,59 @@ export const publishSessionDelta = ({
     return;
   }
 
-  const accumulated = getAccumulated();
-  const existing = accumulated.get(conversationId);
   const now = Date.now();
-  const turn: AccumulatedTurn = existing ?? {
-    accessKeyId: null,
-    chunks: [],
-    model: null,
-    question: '',
+  const existing = getActiveTurns().get(conversationId);
+
+  if (existing) {
+    existing.updatedAt = now;
+  } else {
     // No `session.started` was seen, so the first delta is the best available
     // start: the turn cannot have begun later than its first output.
-    startedAt: now,
-    totalChars: 0,
-    updatedAt: now,
-  };
-
-  appendChunk(turn, text);
-  turn.updatedAt = now;
-  accumulated.set(conversationId, turn);
+    ensurePruneTimer();
+    pruneActiveTurns(now);
+    getActiveTurns().set(conversationId, {
+      accessKeyId: null,
+      model: null,
+      question: '',
+      startedAt: now,
+      updatedAt: now,
+    });
+  }
 
   publish({
-    accessKeyId: turn.accessKeyId,
+    accessKeyId: existing?.accessKeyId ?? null,
     conversationId,
     delta: text,
-    model: turn.model,
+    model: existing?.model ?? null,
     occurredAt: now,
     type: 'session.delta',
   });
 };
 
 /**
- * Publishes the terminal event with the full reply text, then releases the
- * accumulated turn: the text now lives in the event (and in the transcript
- * store), so keeping it here would only hold memory until the idle sweep.
+ * Publishes the terminal event with the finished reply, then forgets the turn.
+ *
+ * `text` is supplied by the caller that accumulated it — the buffer lives in
+ * that call's scope, so nothing here can outlive an abnormal ending.
  */
 export const publishSessionCompleted = ({
   conversationId,
   error,
+  text,
   toolTurn,
 }: {
   conversationId: string;
   error?: string;
+  /** The finished reply, when the caller has it. */
+  text?: string;
   /** True when the turn ended in tool calls rather than in an answer. */
   toolTurn?: boolean;
 }): void => {
   if (!conversationId) return;
 
-  const accumulated = getAccumulated();
-  const existing = accumulated.get(conversationId);
+  const activeTurns = getActiveTurns();
+  const existing = activeTurns.get(conversationId);
   const now = Date.now();
-  const text = existing ? joinChunks(existing) : '';
 
   publish({
     accessKeyId: existing?.accessKeyId ?? null,
@@ -379,16 +405,21 @@ export const publishSessionCompleted = ({
     occurredAt: now,
     question: existing?.question ?? '',
     startedAt: existing?.startedAt ?? now,
-    text,
+    text: sanitizeText(text),
     toolTurn: toolTurn ? true : undefined,
     type: error ? 'session.failed' : 'session.completed',
   });
 
-  accumulated.delete(conversationId);
+  activeTurns.delete(conversationId);
 };
 
-/** Test/teardown helper: clears subscribers and accumulated text. */
+/** Test/teardown helper: clears subscribers, live turns and the sweep timer. */
 export const resetSessionStreamRuntime = (): void => {
+  if (globalState.__codebuddy2apiPruneTimer__) {
+    clearInterval(globalState.__codebuddy2apiPruneTimer__);
+    globalState.__codebuddy2apiPruneTimer__ = undefined;
+  }
+
   delete globalState.__codebuddy2apiSubscribers__;
-  delete globalState.__codebuddy2apiAccumulated__;
+  delete globalState.__codebuddy2apiActiveTurns__;
 };
