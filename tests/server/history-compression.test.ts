@@ -210,6 +210,89 @@ describe('compressMessages', () => {
     );
   });
 
+  describe('images', () => {
+    const imagePart = (data: string) => ({
+      image_url: { url: data },
+      type: 'image_url',
+    });
+
+    it('replaces a historical image with a text note', () => {
+      const messages = [
+        message('user', [
+          { text: 'what is wrong here?', type: 'text' },
+          imagePart(`data:image/png;base64,${'A'.repeat(40_000)}`),
+        ]),
+        message('assistant', 'I will look.'),
+        message('user', 'any update?'),
+      ];
+
+      const result = compressMessages(messages, { budgetChars: 1_000 });
+
+      expect(result.charsAfter).toBeLessThan(result.charsBefore);
+      const blocks = result.messages[0]?.content as Array<{
+        text?: string;
+        type?: string;
+      }>;
+      expect(blocks.some((part) => part.type === 'image_url')).toBe(false);
+      // The prose beside the image survives; it is what gives it meaning.
+      expect(blocks[0]?.text).toBe('what is wrong here?');
+    });
+
+    it('keeps the image attached to the last user turn', () => {
+      const messages = [
+        message('user', 'first'),
+        message('user', [
+          { text: 'look at this', type: 'text' },
+          imagePart(`data:image/png;base64,${'A'.repeat(40_000)}`),
+        ]),
+      ];
+
+      const result = compressMessages(messages, { budgetChars: 10 });
+
+      const blocks = result.messages[1]?.content as Array<{ type?: string }>;
+      // The current turn's image may be the question itself.
+      expect(blocks.some((part) => part.type === 'image_url')).toBe(true);
+    });
+
+    it('counts an image towards the size it measures', () => {
+      const withImage = [
+        message('user', [
+          { text: 'see', type: 'text' },
+          imagePart(`data:image/png;base64,${'A'.repeat(9_000)}`),
+        ]),
+        message('assistant', 'ok'),
+      ];
+      const withoutImage = [
+        message('user', [{ text: 'see', type: 'text' }]),
+        message('assistant', 'ok'),
+      ];
+
+      const a = compressMessages(withImage, { budgetChars: 100_000 });
+      const b = compressMessages(withoutImage, { budgetChars: 100_000 });
+
+      // A budget that ignored the base64 could never see the overflow coming.
+      expect(a.charsBefore - b.charsBefore).toBeGreaterThan(9_000);
+    });
+
+    it('reads a flat image_url string as well as the nested form', () => {
+      const messages = [
+        message('user', [
+          {
+            image_url: `data:image/png;base64,${'A'.repeat(9_000)}`,
+            type: 'input_image',
+          },
+        ]),
+        message('user', 'next'),
+      ];
+
+      const result = compressMessages(messages, { budgetChars: 500 });
+
+      expect(result.charsAfter).toBeLessThan(result.charsBefore);
+      const blocks = result.messages[0]?.content as Array<{ type?: string }>;
+      expect(blocks[0]?.type).toBe('text');
+    });
+  });
+
   it('reports the character totals it measured', () => {
     const messages = [
       message('system', 'S'.repeat(2_000)),

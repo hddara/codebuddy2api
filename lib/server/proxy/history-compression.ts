@@ -65,6 +65,37 @@ const DEFAULT_HISTORY_BUDGET_CHARS = 400_000;
 const TOOL_RESULT_HEAD_CHARS = 2_000;
 const TOOL_RESULT_TAIL_CHARS = 500;
 
+/**
+ * Placeholder left where a historical image used to be.
+ *
+ * An image arrives as a base64 data URL, which is roughly 1.33x the binary
+ * size, and every turn resends the whole history — so one screenshot taken at
+ * turn five is still paying its full cost at turn two hundred. That is the
+ * single largest contributor to a session drifting past the body cap.
+ */
+const OMITTED_IMAGE_TEXT = '[image omitted to fit the request size budget]';
+
+/** Number of characters a data URL occupies, as a size proxy. */
+const readImageChars = (part: unknown): number => {
+  if (!part || typeof part !== 'object') {
+    return 0;
+  }
+
+  const url = (part as { image_url?: unknown }).image_url;
+
+  if (typeof url === 'string') {
+    return url.length;
+  }
+
+  if (url && typeof url === 'object') {
+    const nested = (url as { url?: unknown }).url;
+
+    return typeof nested === 'string' ? nested.length : 0;
+  }
+
+  return 0;
+};
+
 const readBooleanEnv = (name: string): boolean =>
   ['1', 'true', 'yes', 'on'].includes(
     (process.env[name] ?? '').trim().toLowerCase(),
@@ -136,7 +167,7 @@ export const pruneToolDefinitions = (
   return forbidsToolUse(toolChoice) ? undefined : tools;
 };
 
-/** Reads the text of one message, whether content is a string or blocks. */
+/** Reads the size of one message, whether content is a string or blocks. */
 const readMessageChars = (message: CompressibleMessage): number => {
   const { content } = message;
 
@@ -155,7 +186,13 @@ const readMessageChars = (message: CompressibleMessage): number => {
 
     const text = (part as { text?: unknown }).text;
 
-    return total + (typeof text === 'string' ? text.length : 0);
+    // An image is measured too: it is usually the largest thing in the
+    // message, so a budget that ignored it could never see the overflow.
+    return (
+      total +
+      (typeof text === 'string' ? text.length : 0) +
+      readImageChars(part)
+    );
   }, 0);
 };
 
@@ -202,6 +239,36 @@ const truncateToolResult = (
   }
 
   return { ...message, content: elide(content) };
+};
+
+/**
+ * Replaces every image in a message with a one-line note.
+ *
+ * The note keeps the block's type as `text` so the upstream still sees a
+ * well-formed content array. Only the image is rewritten; any prose the turn
+ * carried stays readable, which matters because the surrounding text is often
+ * what makes the image meaningful ("this screenshot shows the failure").
+ */
+const dropImages = (message: CompressibleMessage): CompressibleMessage => {
+  const { content } = message;
+
+  if (!Array.isArray(content)) {
+    return message;
+  }
+
+  let touched = false;
+
+  const next = content.map((part) => {
+    if (readImageChars(part) === 0) {
+      return part;
+    }
+
+    touched = true;
+
+    return { text: OMITTED_IMAGE_TEXT, type: 'text' };
+  });
+
+  return touched ? { ...message, content: next } : message;
 };
 
 const elide = (text: string): string => {
@@ -328,11 +395,32 @@ export const compressMessages = <T extends CompressibleMessage>(
   const { pinned } = findPinnedIndexes(messages);
   const next: CompressibleMessage[] = messages.slice();
 
-  // Tool results are elided in place first: it recovers the most size for the
-  // least semantic damage, and often brings the conversation back under budget
-  // without touching the transcript at all.
+  // Images go first. A single base64 screenshot can outweigh an entire
+  // transcript, so removing the historical ones is the cheapest large win —
+  // and unlike eliding text it loses nothing the model cannot ask to see again.
+  // The last user turn is exempt: its image may be the question itself.
   let running = 0;
 
+  for (let index = 0; index < next.length; index += 1) {
+    const message = next[index];
+
+    if (!message || pinned.has(index)) {
+      continue;
+    }
+
+    const before = readMessageChars(message);
+    const dropped = dropImages(message);
+    const after = readMessageChars(dropped);
+
+    if (after < before) {
+      next[index] = dropped as CompressibleMessage;
+      running += before - after;
+    }
+  }
+
+  // Tool results are elided in place next: it recovers the most size for the
+  // least semantic damage, and often brings the conversation back under budget
+  // without touching the transcript at all.
   for (let index = 0; index < next.length; index += 1) {
     const message = next[index];
 
@@ -348,11 +436,6 @@ export const compressMessages = <T extends CompressibleMessage>(
       next[index] = { ...truncated } as CompressibleMessage;
       running += before - after;
     }
-  }
-
-  if (running === 0 && charsBefore > budgetChars) {
-    // Nothing shrinkable in the tool results; fall through to stubbing.
-    running = 0;
   }
 
   const target = budgetChars;
