@@ -49,6 +49,8 @@ After migration, set `CODEBUDDY_STORAGE_IMPORT_LEGACY_FILES=false` and remove th
 | `CODEBUDDY_AUTH_MODE`                   | Upstream authentication mode                                     | `auto` / `token`                                 |
 | `CODEBUDDY_INTERNET_ENVIRONMENT`        | Network environment                                              | `internal` / `ioa` / `public`                    |
 | `CODEBUDDY_LOG_LEVEL`                   | Server log level                                                 | `INFO`                                           |
+| `CODEBUDDY_COMPRESS_HISTORY`            | Shrinks oversized requests before dispatch                       | `true` / `false`; default `false`                |
+| `CODEBUDDY_HISTORY_BUDGET_CHARS`        | Character budget for conversation history                        | number; default `400000`                         |
 | `CODEBUDDY_ADMIN_PASSKEY_RP_ID`         | Admin passkey hostname                                           | `example.com`                                    |
 | `CODEBUDDY_AUTO_CHECKIN_ENABLED`        | Runs the daily automatic check-in                                | `true` / `false`; default `false`                |
 | `CODEBUDDY_AUTO_CHECKIN_TIME`           | Automatic check-in time (server local)                           | `HH:mm`; default `00:30`                         |

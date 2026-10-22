@@ -49,6 +49,8 @@ SQLite 文件默认位于容器内的 `/app/.codebuddy_data/storage.sqlite`。�
 | `CODEBUDDY_AUTH_MODE`                   | 上游认证模式                           | `auto` / `token`                                 |
 | `CODEBUDDY_INTERNET_ENVIRONMENT`        | 网络环境                               | `internal` / `ioa` / `public`                    |
 | `CODEBUDDY_LOG_LEVEL`                   | 日志级别                               | `INFO`                                           |
+| `CODEBUDDY_COMPRESS_HISTORY`            | 发送前压缩超限请求                     | `true` / `false`，默认 `false`                   |
+| `CODEBUDDY_HISTORY_BUDGET_CHARS`        | 会话历史的字符预算                     | 数字，默认 `400000`                              |
 | `CODEBUDDY_ADMIN_PASSKEY_RP_ID`         | 管理员 Passkey 使用的 hostname         | `example.com`                                    |
 | `CODEBUDDY_AUTO_CHECKIN_ENABLED`        | 是否每天自动签到                       | `true` / `false`，默认 `false`                   |
 | `CODEBUDDY_AUTO_CHECKIN_TIME`           | 自动签到时间（服务器本地时间）         | `HH:mm`，默认 `00:30`                            |

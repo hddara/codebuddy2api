@@ -49,6 +49,8 @@ docker run -d --name codebuddy2api --restart unless-stopped -p 8001:8001 \
 | `CODEBUDDY_AUTH_MODE`                   | 上流認証モード                                     | `auto` / `token`                                 |
 | `CODEBUDDY_INTERNET_ENVIRONMENT`        | ネットワーク環境                                   | `internal` / `ioa` / `public`                    |
 | `CODEBUDDY_LOG_LEVEL`                   | サーバーログレベル                                 | `INFO`                                           |
+| `CODEBUDDY_COMPRESS_HISTORY`            | 送信前にサイズ超過リクエストを圧縮する             | `true` / `false`。既定値は `false`               |
+| `CODEBUDDY_HISTORY_BUDGET_CHARS`        | 会話履歴の文字数予算                               | 数値。既定値は `400000`                          |
 | `CODEBUDDY_ADMIN_PASSKEY_RP_ID`         | 管理者 Passkey の hostname                         | `example.com`                                    |
 | `CODEBUDDY_AUTO_CHECKIN_ENABLED`        | 毎日の自動チェックインを有効にする                 | `true` / `false`。既定値は `false`               |
 | `CODEBUDDY_AUTO_CHECKIN_TIME`           | 自動チェックイン時刻（サーバーローカル）           | `HH:mm`。既定値は `00:30`                        |

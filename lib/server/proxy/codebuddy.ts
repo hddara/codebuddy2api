@@ -7,6 +7,11 @@ import {
   rewriteHarnessIdentity,
 } from './harness-identity';
 import {
+  compressMessages,
+  isHistoryCompressionEnabled,
+  pruneToolDefinitions,
+} from './history-compression';
+import {
   getCodeBuddyApiEndpoint,
   getCredentialLimitCooldownMs,
   getDefaultModel,
@@ -1797,6 +1802,76 @@ const headersToRecord = (headers: HeadersInit): Record<string, string> => {
   return Object.fromEntries(new Headers(headers).entries());
 };
 
+/**
+ * Shrinks the outbound request in place, before it is serialised.
+ *
+ * Both levers are opt-in (`CODEBUDDY_COMPRESS_HISTORY`), because they change
+ * what the upstream is asked: dropping tool definitions is lossless when
+ * `tool_choice` forbids calling them, but bounding the history replaces older
+ * turns with a stub the model can no longer read. That is the operator's
+ * decision, not a default — same reasoning as `isHarnessIdentityRewriteEnabled`.
+ *
+ * Every failure is swallowed: being over the size cap is a degraded request,
+ * whereas a throw here would turn a working request into a failed one.
+ */
+const applySizeControls = (upstreamBody: ChatRequestBody): void => {
+  if (!isHistoryCompressionEnabled()) {
+    return;
+  }
+
+  try {
+    const prunedTools = pruneToolDefinitions(
+      upstreamBody.tools,
+      upstreamBody.tool_choice,
+    );
+
+    if (prunedTools !== upstreamBody.tools) {
+      upstreamBody.tools = prunedTools;
+
+      void logEvent({
+        level: 'INFO',
+        message: 'Dropped unreachable tool definitions',
+        payload: {
+          model: String(upstreamBody.model ?? ''),
+          toolChoice: String(upstreamBody.tool_choice),
+        },
+      });
+    }
+
+    if (!upstreamBody.messages?.length) {
+      return;
+    }
+
+    const compressed = compressMessages(upstreamBody.messages);
+
+    if (compressed.unchanged) {
+      return;
+    }
+
+    upstreamBody.messages = compressed.messages;
+
+    void logEvent({
+      level: 'INFO',
+      message: 'Compressed conversation history',
+      payload: {
+        charsAfter: compressed.charsAfter,
+        charsBefore: compressed.charsBefore,
+        keptCount: compressed.keptCount,
+        model: String(upstreamBody.model ?? ''),
+        replacedCount: compressed.replacedCount,
+      },
+    });
+  } catch (error) {
+    void logEvent({
+      level: 'WARN',
+      message: 'Conversation compression failed, sending the request as-is',
+      payload: {
+        detail: error instanceof Error ? error.message : String(error),
+      },
+    });
+  }
+};
+
 const buildUpstreamBody = async (
   body: ChatRequestBody,
   context: ProxyContext,
@@ -1835,6 +1910,8 @@ const buildUpstreamBody = async (
     thinking: body.thinking,
     reasoning_effort: body.reasoning_effort,
   };
+
+  applySizeControls(upstreamBody);
 
   if (!isHarnessIdentityRewriteEnabled()) {
     return upstreamBody;
