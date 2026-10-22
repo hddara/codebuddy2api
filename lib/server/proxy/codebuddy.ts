@@ -671,11 +671,13 @@ const trackResponsesUsageStream = async ({
 
 const logUpstreamFailure = ({
   attempt,
+  channelHeaders,
   credentialFilename,
   detail,
   elapsedMs,
   error,
   model,
+  requestHeaders,
   responseHeaders,
   route,
   status,
@@ -688,6 +690,16 @@ const logUpstreamFailure = ({
   elapsedMs?: number;
   error?: unknown;
   model?: string;
+  /**
+   * Historical field kept for the outer catch blocks, which have no header set
+   * in hand. The channel-relevant comparison rides on `channelHeaders`.
+   */
+  requestHeaders?: Record<string, string>;
+  /**
+   * Headers the channel check most likely reads, from the attempt that failed.
+   * Compared against `Upstream request accepted` to find what differs.
+   */
+  channelHeaders?: Record<string, string>;
   responseHeaders?: Headers;
   route: string;
   status?: number;
@@ -698,6 +710,14 @@ const logUpstreamFailure = ({
     route,
     url,
   };
+
+  if (requestHeaders) {
+    payload.requestHeaders = requestHeaders;
+  }
+
+  if (channelHeaders) {
+    payload.channelHeaders = channelHeaders;
+  }
 
   if (typeof attempt === 'number') {
     payload.attempt = attempt;
@@ -1233,6 +1253,21 @@ const fetchUpstreamWithRotation = async ({
     }
 
     if (response.ok) {
+      // Recorded on success too: the channel check can reject a call that looks
+      // identical to one it just accepted, and only a side-by-side of the two
+      // header sets shows which field differed.
+      void logEvent({
+        level: 'INFO',
+        message: 'Upstream request accepted',
+        payload: {
+          attempt: attempts,
+          channelHeaders: describeChannelHeaders(plan.headers),
+          credentialFilename: context.credentialFilename,
+          model,
+          route,
+          status: response.status,
+        },
+      });
       logUpstreamSuccess({
         credentialFilename: context.credentialFilename,
         elapsedMs: Date.now() - startedAt,
@@ -1254,6 +1289,7 @@ const fetchUpstreamWithRotation = async ({
       detail,
       elapsedMs: Date.now() - startedAt,
       model,
+      channelHeaders: describeChannelHeaders(plan.headers),
       responseHeaders: response.headers,
       route,
       status: response.status,
@@ -1715,6 +1751,41 @@ const buildUpstreamHeaders = async (
   headers.set('X-IDE-Version', CODEBUDDY_CLI_VERSION);
 
   return headers;
+};
+
+/**
+ * Headers the channel check is most likely to read.
+ *
+ * Logged on every success and failure so two calls of the same request shape can
+ * be compared line for line when the upstream rejects one for "not sent from an
+ * official client". Credentials are not among them; the rest stays readable.
+ */
+const describeChannelHeaders = (
+  headers: HeadersInit,
+): Record<string, string> => {
+  const record = new Headers(headers);
+  const names = [
+    'user-agent',
+    'x-ide-name',
+    'x-ide-type',
+    'x-ide-version',
+    'x-client-platform',
+    'x-product',
+    'x-product-version',
+    'x-agent-intent',
+    'origin',
+    'referer',
+    'x-requested-with',
+    'x-stainless-lang',
+    'x-stainless-runtime',
+    'x-stainless-package-version',
+  ];
+
+  return Object.fromEntries(
+    names
+      .map((name) => [name, record.get(name)] as const)
+      .filter((entry): entry is readonly [string, string] => !!entry[1]),
+  );
 };
 
 const headersToRecord = (headers: HeadersInit): Record<string, string> => {
