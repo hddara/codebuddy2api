@@ -317,6 +317,115 @@ describe('anthropic messages api', () => {
     expect(upstreamBody.stream).toBe(true);
   });
 
+  it('drops the client usage hint from a turn that carries only that hint', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        makeJsonResponse({ choices: [{ message: { content: 'ok' } }] }),
+      );
+
+    const response = await handleMessagesRequest(
+      makeNextRequest('http://localhost/v1/messages', { method: 'POST' }),
+      {
+        model: 'claude-sonnet-4.6',
+        max_tokens: 1024,
+        messages: [
+          { role: 'user', content: 'What is the weather?' },
+          { role: 'assistant', content: [{ type: 'text', text: 'Sunny.' }] },
+          {
+            role: 'user',
+            content:
+              '<system-reminder>\nToken usage: 190010/180000; -10010 remaining\n</system-reminder>',
+          },
+        ],
+      },
+    );
+
+    expect(response.status).toBe(200);
+
+    const upstreamBody = JSON.parse(
+      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+    ) as { messages: Array<Record<string, unknown>> };
+
+    // The hint is dropped, and because it was the last turn the placeholder
+    // keeps the request ending on the user rather than on the assistant.
+    expect(upstreamBody.messages.at(-1)).toEqual({
+      role: 'user',
+      content: '(no content)',
+    });
+    expect(JSON.stringify(upstreamBody.messages)).not.toContain('Token usage:');
+
+    fetchMock.mockRestore();
+  });
+
+  it('keeps the text a hint was delivered alongside', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        makeJsonResponse({ choices: [{ message: { content: 'ok' } }] }),
+      );
+
+    const response = await handleMessagesRequest(
+      makeNextRequest('http://localhost/v1/messages', { method: 'POST' }),
+      {
+        model: 'claude-sonnet-4.6',
+        max_tokens: 1024,
+        messages: [
+          {
+            role: 'user',
+            content:
+              'Summarize the diff.<total_tokens>15000000 tokens left</total_tokens>',
+          },
+        ],
+      },
+    );
+
+    expect(response.status).toBe(200);
+
+    const upstreamBody = JSON.parse(
+      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+    ) as { messages: Array<Record<string, unknown>> };
+
+    expect(upstreamBody.messages).toEqual([
+      { role: 'user', content: 'Summarize the diff.' },
+    ]);
+
+    fetchMock.mockRestore();
+  });
+
+  it('keeps a total_tokens element that is not a hint', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        makeJsonResponse({ choices: [{ message: { content: 'ok' } }] }),
+      );
+
+    const sample = '<total_tokens>the schema field</total_tokens>';
+
+    const response = await handleMessagesRequest(
+      makeNextRequest('http://localhost/v1/messages', { method: 'POST' }),
+      {
+        model: 'claude-sonnet-4.6',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: `Explain ${sample}` }],
+      },
+    );
+
+    expect(response.status).toBe(200);
+
+    const upstreamBody = JSON.parse(
+      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+    ) as { messages: Array<Record<string, unknown>> };
+
+    // Only a numeric "N tokens left" payload is a hint; a prompt quoting the
+    // element itself keeps its text.
+    expect(upstreamBody.messages).toEqual([
+      { role: 'user', content: `Explain ${sample}` },
+    ]);
+
+    fetchMock.mockRestore();
+  });
+
   it('keeps a system message that arrives inside messages', async () => {
     const fetchMock = vi
       .spyOn(globalThis, 'fetch')

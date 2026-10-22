@@ -184,6 +184,49 @@ const mapTextPartsToChatContent = (
   ]);
 };
 
+// Claude Code's client-side usage hints, appended to the tail of the
+// conversation as meta messages whenever its token-usage attachment is on:
+// `<system-reminder>\nToken usage: 190010/180000; -10010 remaining\n
+// </system-reminder>` and the padded countdown `<total_tokens>15000000 tokens
+// left</total_tokens>`, which Claude Code delivers either on its own or inside
+// the same `<system-reminder>` shell. Each wrapped form is matched before its
+// bare counterpart so the enclosing tags go away with the hint; the bare forms
+// cover a hint arriving without them. Counts can go negative when the client's
+// accounting overruns.
+//
+// The countdown only counts as a hint when it carries a numeric
+// `<N> token(s) left` payload, so a prompt that quotes a `<total_tokens>`
+// element of its own — a schema sample, say — keeps its text.
+const TOTAL_TOKENS_COUNTDOWN = String.raw`<total_tokens>\s*-?[\d,._]+\s*tokens?\s+left\s*<\/total_tokens>`;
+
+const TOKEN_USAGE_REMINDER_PATTERNS: RegExp[] = [
+  /<system-reminder>\s*Token usage:[^<]*<\/system-reminder>/gi,
+  new RegExp(
+    `<system-reminder>\\s*${TOTAL_TOKENS_COUNTDOWN}\\s*<\\/system-reminder>`,
+    'gi',
+  ),
+  new RegExp(TOTAL_TOKENS_COUNTDOWN, 'gi'),
+  /Token usage:\s*-?\d+\s*\/\s*-?\d+\s*;\s*-?\d+\s+remaining/gi,
+];
+
+/**
+ * Removes Claude Code's usage hints from a text value, leaving whatever they
+ * were delivered alongside intact.
+ *
+ * The hints report the client's own context accounting to the operator, so they
+ * carry nothing the model should act on, and the CodeBuddy upstream rejects a
+ * request carrying them.
+ */
+const stripTokenUsageReminder = (text: string): string => {
+  let stripped = text;
+
+  for (const pattern of TOKEN_USAGE_REMINDER_PATTERNS) {
+    stripped = stripped.replace(pattern, '');
+  }
+
+  return stripped;
+};
+
 const extractSystemText = (
   system: string | AnthropicContentBlock[] | undefined,
 ): ChatTextContent => {
@@ -233,7 +276,14 @@ const mapAnthropicContentToChat = (
   role: 'user' | 'assistant' | 'system',
 ): ChatMessage[] => {
   if (typeof content === 'string') {
-    return [{ role, content }];
+    const text = stripTokenUsageReminder(content);
+
+    // A turn that only carried a hint has nothing left to forward.
+    if (!text.trim()) {
+      return [];
+    }
+
+    return [{ role, content: text }];
   }
 
   // Collect text, structured tool calls, and tool results separately so
@@ -253,7 +303,7 @@ const mapAnthropicContentToChat = (
 
   for (const block of content) {
     if (block.type === 'text') {
-      const text = block.text ?? '';
+      const text = stripTokenUsageReminder(block.text ?? '');
 
       parts.push(
         block.cache_control
@@ -329,6 +379,45 @@ const mapAnthropicContentToChat = (
   return messages;
 };
 
+/**
+ * The text Claude Code itself falls back to when a user turn carries no
+ * content, reused here for the same case.
+ */
+const EMPTY_USER_TURN_CONTENT = '(no content)';
+
+/**
+ * Puts the trailing user turn back when translating it away would end the
+ * request on the assistant's own previous answer.
+ *
+ * A turn the client sent for its own bookkeeping — a token usage hint, say —
+ * leaves nothing to forward once the hint is stripped, and mid-conversation it
+ * is simply dropped. Dropping the *last* turn is not the same thing: what is
+ * left ends on the assistant, and a chat upstream reads a trailing assistant
+ * message as a prefill, carrying on from that answer instead of answering the
+ * turn. That is how one of the client's reminders ends up dictating the reply.
+ *
+ * The turn is therefore kept, with the placeholder Claude Code itself sends in
+ * this situation. A trailing turn that already produced a `user` or `tool`
+ * message is left alone, and an assistant turn the client sent on purpose — a
+ * genuine prefill — is passed through as one.
+ */
+const keepTrailingUserTurn = (
+  messages: ChatMessage[],
+  lastInput: AnthropicMessage | undefined,
+): ChatMessage[] => {
+  if (lastInput?.role !== 'user') {
+    return messages;
+  }
+
+  const last = messages.at(-1);
+
+  if (last && (last.role === 'user' || last.role === 'tool')) {
+    return messages;
+  }
+
+  return [...messages, { role: 'user', content: EMPTY_USER_TURN_CONTENT }];
+};
+
 const mapAnthropicMessagesToChat = (
   messages: AnthropicMessage[],
 ): ChatMessage[] => {
@@ -348,7 +437,7 @@ const mapAnthropicMessagesToChat = (
     }
   }
 
-  return result;
+  return keepTrailingUserTurn(result, messages.at(-1));
 };
 
 const mapAnthropicToolsToChat = (
