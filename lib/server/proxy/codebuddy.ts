@@ -2,6 +2,11 @@ import type { NextRequest } from 'next/server';
 
 import { resolveRequestAccessKey } from './auth';
 import {
+  HARNESS_IDENTITY_PLACEHOLDER,
+  isHarnessIdentityRewriteEnabled,
+  rewriteHarnessIdentity,
+} from './harness-identity';
+import {
   getCodeBuddyApiEndpoint,
   getCredentialLimitCooldownMs,
   getDefaultModel,
@@ -1811,7 +1816,7 @@ const buildUpstreamBody = async (
       ? body.model
       : (credentialModels[0] ?? (await getDefaultModel())));
 
-  return {
+  const upstreamBody: ChatRequestBody = {
     model,
     messages: normalizedMessages,
     stream: true,
@@ -1830,6 +1835,25 @@ const buildUpstreamBody = async (
     thinking: body.thinking,
     reasoning_effort: body.reasoning_effort,
   };
+
+  if (!isHarnessIdentityRewriteEnabled()) {
+    return upstreamBody;
+  }
+
+  // Applied to the normalized messages, not the raw body: that is the form the
+  // upstream actually receives, including whatever `normalizeMessages` moved
+  // into a `system` message.
+  const rewritten = rewriteHarnessIdentity(upstreamBody);
+
+  if (rewritten !== upstreamBody) {
+    void logEvent({
+      level: 'INFO',
+      message: 'Rewrote the client identity marker in system messages',
+      payload: { model, replacement: HARNESS_IDENTITY_PLACEHOLDER },
+    });
+  }
+
+  return rewritten;
 };
 
 const stringifyResponsesInputContent = (content: unknown): string => {
