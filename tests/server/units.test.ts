@@ -1671,6 +1671,65 @@ describe('server units', () => {
     expect(text).toContain('\\"}');
   });
 
+  it('keeps an assistant tool call that carries no content', async () => {
+    const context = createProxyContextFromCredential({
+      data: {
+        bearer_token: 'tool-call-without-content-token',
+        user_id: 'tool-call-without-content@example.com',
+      },
+      filePath: '/tmp/tool-call-without-content.json',
+      filename: 'tool-call-without-content.json',
+    });
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async () =>
+        makeJsonResponse({ choices: [{ message: { content: 'ok' } }] }),
+      );
+
+    const response = await proxyChatCompletions(
+      makeNextRequest('http://localhost/v1/chat/completions', {
+        method: 'POST',
+      }),
+      {
+        messages: [
+          { content: 'what is the weather', role: 'user' },
+          // `content` omitted entirely, which is what clients with
+          // omit-empty serialization send for a tool-only turn. Dropping this
+          // message leaves the tool result below orphaned, and upstream
+          // rejects a tool result with no matching call.
+          {
+            role: 'assistant',
+            tool_calls: [
+              {
+                function: { arguments: '{}', name: 'lookup' },
+                id: 'call_weather',
+                type: 'function',
+              },
+            ],
+          },
+          { content: 'sunny', role: 'tool', tool_call_id: 'call_weather' },
+        ],
+        model: 'hy3',
+      },
+      context,
+    );
+
+    await response.text();
+
+    const upstreamBody = JSON.parse(
+      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+    ) as { messages: Array<Record<string, unknown>> };
+
+    expect(
+      upstreamBody.messages.some(
+        (message) =>
+          message.role === 'assistant' && message.tool_calls !== undefined,
+      ),
+    ).toBe(true);
+
+    fetchMock.mockRestore();
+  });
+
   it('covers Responses upstream compatibility input variants', async () => {
     const context = createProxyContextFromCredential({
       data: {

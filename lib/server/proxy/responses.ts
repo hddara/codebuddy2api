@@ -1310,6 +1310,17 @@ const createResponsesEventStream = async (
         ],
       });
 
+      // Memoized: the closing events all carry the same completed item, and
+      // every rebuild is another full-size copy of the answer on the heap. The
+      // text is final by the time any of them is emitted, so sharing one
+      // object changes nothing on the wire.
+      let completedMessageItem: Record<string, unknown> | null = null;
+      const getCompletedMessageItem = (): Record<string, unknown> => {
+        completedMessageItem ??= buildStreamingMessageItem('completed');
+
+        return completedMessageItem;
+      };
+
       const ensureMessageAdded = (): void => {
         if (messageAddedEmitted) {
           return;
@@ -1482,14 +1493,16 @@ const createResponsesEventStream = async (
               ensureMessageAdded();
               enqueueEvent({
                 type: 'response.output_text.done',
-                item: buildStreamingMessageItem('completed'),
+                // `output_text.done` carries the text, not the item: the item is
+                // a second full copy of the same text, and `output_item.done`
+                // is the event defined to carry it.
                 output_index: messageState.outputIndex,
                 response_id: responseId,
                 text: outputText,
               });
               enqueueEvent({
                 type: 'response.output_item.done',
-                item: buildStreamingMessageItem('completed'),
+                item: getCompletedMessageItem(),
                 output_index: messageState.outputIndex,
                 response_id: responseId,
               });
@@ -1503,9 +1516,7 @@ const createResponsesEventStream = async (
                 previous_response_id: previousResponseId,
                 usage: mapChatUsageToResponses(latestUsage),
                 output: [
-                  ...(outputText
-                    ? [buildStreamingMessageItem('completed')]
-                    : []),
+                  ...(outputText ? [getCompletedMessageItem()] : []),
                   ...[...toolCallStates.values()].map((toolCallState) =>
                     buildResponsesToolCallOutputItem(defaults.tools, {
                       arguments: toolCallState.arguments,

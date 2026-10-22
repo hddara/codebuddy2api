@@ -25,7 +25,12 @@ interface AnthropicContentBlock {
 }
 
 interface AnthropicMessage {
-  role: 'user' | 'assistant';
+  /**
+   * `system` is not documented for `messages`, but clients do send it, and
+   * dropping the role would turn an instruction into something the model is
+   * shown as having said itself.
+   */
+  role: 'user' | 'assistant' | 'system';
   content: string | AnthropicContentBlock[];
 }
 
@@ -225,7 +230,7 @@ interface ChatMessage {
 
 const mapAnthropicContentToChat = (
   content: string | AnthropicContentBlock[],
-  role: 'user' | 'assistant',
+  role: 'user' | 'assistant' | 'system',
 ): ChatMessage[] => {
   if (typeof content === 'string') {
     return [{ role, content }];
@@ -293,10 +298,16 @@ const mapAnthropicContentToChat = (
   }
 
   // For an assistant message with tool calls, content can be null per the
-  // OpenAI spec. For user messages, keep text if present.
-  if (role === 'assistant') {
+  // OpenAI spec. For user and system messages, keep text if present.
+  //
+  // The role is the one the client declared rather than a hardcoded
+  // `assistant`: a `system` message that arrives inside `messages` — which
+  // clients do send, even though the Anthropic schema only documents `user`
+  // and `assistant` — has to stay a `system` message upstream, or its
+  // instructions reach the model as if the model had said them.
+  if (role !== 'user') {
     messages.push({
-      role: 'assistant',
+      role,
       content:
         Array.isArray(textContent) && textContent.length === 0
           ? null

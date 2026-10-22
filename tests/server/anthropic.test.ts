@@ -317,6 +317,44 @@ describe('anthropic messages api', () => {
     expect(upstreamBody.stream).toBe(true);
   });
 
+  it('keeps a system message that arrives inside messages', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        makeJsonResponse({ choices: [{ message: { content: 'ok' } }] }),
+      );
+
+    const response = await handleMessagesRequest(
+      makeNextRequest('http://localhost/v1/messages', { method: 'POST' }),
+      {
+        model: 'claude-sonnet-4.6',
+        max_tokens: 1024,
+        messages: [
+          { role: 'user', content: 'Hi' },
+          // Not documented for `messages`, but clients send it. Forwarding it
+          // as `assistant` would make the model read an instruction as its own
+          // previous output.
+          { role: 'system', content: 'Answer only in French.' },
+          { role: 'user', content: 'Hello again' },
+        ],
+      },
+    );
+
+    expect(response.status).toBe(200);
+
+    const upstreamBody = JSON.parse(
+      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+    ) as Record<string, unknown>;
+
+    expect(upstreamBody.messages).toEqual([
+      { role: 'user', content: 'Hi' },
+      { role: 'system', content: 'Answer only in French.' },
+      { role: 'user', content: 'Hello again' },
+    ]);
+
+    fetchMock.mockRestore();
+  });
+
   it('preserves explicit Anthropic cache control blocks upstream', async () => {
     const fetchMock = vi
       .spyOn(globalThis, 'fetch')
