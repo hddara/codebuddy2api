@@ -1,7 +1,7 @@
 export const register = async (): Promise<void> => {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
-  const { installProcessDiagnostics, startMemoryWatchdog } =
+  const { installProcessDiagnostics, logRuntimeLimits, startMemoryWatchdog } =
     await import('@/lib/server/shared/diagnostics');
   const { scheduleAutoCheckin } =
     await import('@/lib/server/domain/auto-checkin');
@@ -18,6 +18,12 @@ export const register = async (): Promise<void> => {
   // once it approaches the point where the host OOM killer steps in.
   startMemoryWatchdog();
   installProcessDiagnostics();
+
+  // One line at boot that records which guard settings this process actually
+  // got. Without it, "did the deploy pick up the new limits" is guesswork: the
+  // process reads its configuration from the environment, and the stack file is
+  // not proof of what a running task received.
+  logRuntimeLimits();
 
   void refreshMissingCredentialModels();
   void scheduleAutoCheckin();

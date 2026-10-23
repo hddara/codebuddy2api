@@ -9,6 +9,7 @@ import {
 import {
   compressMessages,
   isHistoryCompressionEnabled,
+  measureMessagesBytes,
   pruneToolDefinitions,
 } from './history-compression';
 import {
@@ -45,6 +46,7 @@ import { getMemorySnapshot } from '../shared/diagnostics';
 import {
   createErrorResponse,
   getRequestHeaderMap,
+  getEffectiveTargetBytes,
   readCappedResponseText,
   waitForStreamDemand,
 } from '../shared/http';
@@ -1184,6 +1186,11 @@ const fetchUpstreamWithRotation = async ({
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     let response: Response;
     const payloadText = JSON.stringify(plan.body);
+    // Byte length, not string length: every number in this pipeline is a byte
+    // count, and comparing a `.length` here against the cap logs produced the
+    // "the body is under the limit but the socket disagrees" confusion that
+    // cost a day of debugging CJK traffic.
+    const payloadBytes = Buffer.byteLength(payloadText, 'utf8');
 
     void logEvent({
       level: 'DEBUG',
@@ -1193,9 +1200,12 @@ const fetchUpstreamWithRotation = async ({
         attempt: attempts,
         credentialFilename: context.credentialFilename,
         model,
-        payloadBytes: payloadText.length,
+        // The one measurement taken after every size stage has run, so this is
+        // the number that can be compared against the cap that would refuse it.
+        payloadBytes,
         route,
         stream,
+        targetBytes: getEffectiveTargetBytes(),
         timeoutMs,
         url: plan.url,
       },
@@ -1812,23 +1822,65 @@ const headersToRecord = (headers: HeadersInit): Record<string, string> => {
 };
 
 /**
- * Shrinks the outbound request in place, before it is serialised.
+ * Bytes a body occupies once serialised, as the socket will carry it.
  *
- * Both levers are opt-in (`CODEBUDDY_COMPRESS_HISTORY`), because they change
- * what the upstream is asked: dropping tool definitions is lossless when
- * `tool_choice` forbids calling them, but bounding the history replaces older
- * turns with a stub the model can no longer read. That is the operator's
- * decision, not a default — same reasoning as `isHarnessIdentityRewriteEnabled`.
+ * `JSON.stringify` allocates a string of exactly this size, so it is measured
+ * once and then handed to `fetch` rather than being thrown away — the same
+ * single copy that has to exist for the request to be sent is also the
+ * measurement, instead of a second one alongside it.
+ */
+const measureBodyBytes = (body: unknown): number => {
+  try {
+    const encoded = JSON.stringify(body);
+
+    return encoded === undefined ? 0 : Buffer.byteLength(encoded, 'utf8');
+  } catch {
+    return 0;
+  }
+};
+
+/**
+ * Shrinks a body until it fits the dispatch target, then reports both numbers.
  *
- * Every failure is swallowed: being over the size cap is a degraded request,
- * whereas a throw here would turn a working request into a failed one.
+ * The order matters and is not incidental:
+ *
+ *  1. `pruneToolDefinitions` first — lossless, since a tool the caller forbade
+ *     could not have been called anyway.
+ *  2. Then the history, with a budget derived from what is *left* of the target
+ *     after tools, system prompt and escaping are accounted for. A fixed
+ *     message budget cannot do this: the same 96 KiB is comfortable in a
+ *     10-tool session and over budget in a 58-tool one.
+ *
+ * Both a near-miss and a real hit are logged with `bytesBefore`/`bytesAfter`/
+ * `targetBytes`. The feature looked inert for months precisely because only
+ * the hit path logged, so "never triggered" and "triggered as a no-op" were
+ * indistinguishable — and neither number was in bytes, so it could not be
+ * compared with the cap that was actually refusing requests.
  */
 const applySizeControls = (upstreamBody: ChatRequestBody): void => {
+  // Clamped against the reject cap so a mis-set target can only make the
+  // compressor more aggressive, never make every request unsendable.
+  const targetBytes = getEffectiveTargetBytes();
+  const model = String(upstreamBody.model ?? '');
+
   if (!isHistoryCompressionEnabled()) {
+    void logEvent({
+      level: 'WARN',
+      message:
+        'History compression is disabled; oversized bodies will be sent as-is',
+      payload: {
+        model,
+        requestBytes: measureBodyBytes(upstreamBody),
+        targetBytes,
+      },
+    });
+
     return;
   }
 
   try {
+    const bytesBefore = measureBodyBytes(upstreamBody);
+
     const prunedTools = pruneToolDefinitions(
       upstreamBody.tools,
       upstreamBody.tool_choice,
@@ -1841,7 +1893,9 @@ const applySizeControls = (upstreamBody: ChatRequestBody): void => {
         level: 'INFO',
         message: 'Dropped unreachable tool definitions',
         payload: {
-          model: String(upstreamBody.model ?? ''),
+          bytesAfterPrune: measureBodyBytes(upstreamBody),
+          bytesBeforePrune: bytesBefore,
+          model,
           toolChoice: String(upstreamBody.tool_choice),
         },
       });
@@ -1851,31 +1905,90 @@ const applySizeControls = (upstreamBody: ChatRequestBody): void => {
       return;
     }
 
-    const compressed = compressMessages(upstreamBody.messages);
+    // What everything except the history costs: tools, model, and the escaped
+    // overhead of the envelope. Measured by subtracting the conversation from
+    // the whole, which needs no second serializer and stays correct when a
+    // field is added to the whitelist above.
+    const messagesBytes = measureMessagesBytes(upstreamBody.messages);
+    const overheadBytes = Math.max(
+      0,
+      measureBodyBytes(upstreamBody) - messagesBytes,
+    );
+    const budgetBytes = Math.max(0, targetBytes - overheadBytes);
+
+    const compressed = compressMessages(upstreamBody.messages, {
+      budgetBytes,
+    });
 
     if (compressed.unchanged) {
+      // The near-miss line: how close this request came, in the same unit as
+      // the cap that would have refused it.
+      void logEvent({
+        level: 'DEBUG',
+        message: 'Conversation history within budget',
+        payload: {
+          budgetBytes,
+          bytesAfter: compressed.bytesAfter,
+          bytesBefore: compressed.bytesBefore,
+          headroomBytes: budgetBytes - compressed.bytesBefore,
+          messageCount: upstreamBody.messages.length,
+          model,
+          overheadBytes,
+          targetBytes,
+        },
+      });
+
       return;
     }
 
     upstreamBody.messages = compressed.messages;
 
+    const bytesAfter = measureBodyBytes(upstreamBody);
+
     void logEvent({
       level: 'INFO',
       message: 'Compressed conversation history',
       payload: {
-        charsAfter: compressed.charsAfter,
-        charsBefore: compressed.charsBefore,
+        budgetBytes,
+        bytesAfter,
+        bytesAfterMessages: compressed.bytesAfter,
+        bytesBefore,
+        bytesBeforeMessages: compressed.bytesBefore,
+        imagesDropped: compressed.imagesDropped,
         keptCount: compressed.keptCount,
-        model: String(upstreamBody.model ?? ''),
+        messageCount: upstreamBody.messages.length,
+        model,
+        overheadBytes,
         replacedCount: compressed.replacedCount,
+        savedBytes: bytesBefore - bytesAfter,
+        targetBytes,
+        toolResultsElided: compressed.toolResultsElided,
       },
     });
+
+    // A body still over the target after every stage is not an error — the
+    // upstream may accept it — but it is the shape of the next 413 if the
+    // reject cap is ever tightened, so it is worth a WARN while it is rare.
+    if (bytesAfter > targetBytes) {
+      void logEvent({
+        level: 'WARN',
+        message: 'Request still exceeds the dispatch target after compression',
+        payload: {
+          bytesAfter,
+          overByBytes: bytesAfter - targetBytes,
+          pinnedMessages: compressed.keptCount,
+          targetBytes,
+        },
+      });
+    }
   } catch (error) {
     void logEvent({
       level: 'WARN',
       message: 'Conversation compression failed, sending the request as-is',
       payload: {
         detail: error instanceof Error ? error.message : String(error),
+        requestBytes: measureBodyBytes(upstreamBody),
+        targetBytes,
       },
     });
   }

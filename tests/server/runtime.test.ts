@@ -23,9 +23,15 @@ import * as PollRoute from '@/app/codebuddy/auth/poll/route';
 import * as StartRoute from '@/app/codebuddy/auth/start/route';
 import * as HealthRoute from '@/app/health/route';
 import * as V1ChatRoute from '@/app/v1/chat/completions/route';
+import * as V1MessagesRoute from '@/app/v1/messages/route';
 import * as V1ModelsRoute from '@/app/v1/models/route';
 import * as V1ResponsesRoute from '@/app/v1/responses/route';
 import { resetCredentialRuntimeState } from '@/lib/server/domain/credentials';
+import {
+  acquireRequestSlot,
+  getConcurrencyState,
+  resetConcurrencyGateForTests,
+} from '@/lib/server/shared/concurrency-gate';
 import { listDebugLogs, updateDebugSettings } from '@/lib/server/domain/debug';
 import { resetResponseSessions } from '@/lib/server/proxy/responses';
 import { resetUsageStats } from '@/lib/server/domain/stats';
@@ -98,6 +104,9 @@ describe('server runtime', () => {
     resetStorageRuntime();
     resetCredentialRuntimeState();
     resetResponseSessions();
+    // The gate keeps process-wide counters; without this the fourth route call
+    // in a test inherits the three previous ones as still in flight.
+    resetConcurrencyGateForTests();
     await resetUsageStats();
     vi.restoreAllMocks();
     vi.clearAllMocks();
@@ -1152,5 +1161,108 @@ describe('server runtime', () => {
       cacheHitTokens: 0,
       totalTokens: 0,
     });
+  });
+
+  it('answers 503 instead of accepting more than the concurrency limit', async () => {
+    process.env.CODEBUDDY_MAX_CONCURRENT_REQUESTS = '1';
+    const first = acquireRequestSlot();
+
+    try {
+      const rejected = await V1ChatRoute.POST(
+        makeNextRequest('http://localhost/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages: [{ content: 'hello', role: 'user' }],
+          }),
+        }),
+      );
+
+      // Rejected before the body is read: the point of the gate is to avoid
+      // paying for the parse that would have caused the memory pressure.
+      expect(rejected.status).toBe(503);
+      expect(rejected.headers.get('Retry-After')).toBe('2');
+      expect(await rejected.json()).toMatchObject({
+        error: { code: 'server_busy', type: 'overloaded_error' },
+      });
+    } finally {
+      first?.release();
+      delete process.env.CODEBUDDY_MAX_CONCURRENT_REQUESTS;
+    }
+  });
+
+  it('answers an Anthropic-shaped 529 on the messages route when saturated', async () => {
+    process.env.CODEBUDDY_MAX_CONCURRENT_REQUESTS = '1';
+    const first = acquireRequestSlot();
+
+    try {
+      const rejected = await V1MessagesRoute.POST(
+        makeNextRequest('http://localhost/v1/messages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            max_tokens: 16,
+            messages: [{ content: 'hello', role: 'user' }],
+            model: 'gpt-5.5',
+          }),
+        }),
+      );
+
+      expect(rejected.status).toBe(529);
+      expect(await rejected.json()).toMatchObject({
+        type: 'error',
+      });
+    } finally {
+      first?.release();
+      delete process.env.CODEBUDDY_MAX_CONCURRENT_REQUESTS;
+    }
+  });
+
+  it('frees the slot once a proxied request finishes', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      makeSseResponse([
+        'data: {"id":"chatcmpl_gate","object":"chat.completion.chunk","model":"glm-5.1","choices":[{"delta":{"content":"ok"}}]}\n\n',
+        'data: {"choices":[{"finish_reason":"stop"}],"usage":{"completion_tokens":1,"prompt_tokens":1,"total_tokens":2}}\n\n',
+        'data: [DONE]\n\n',
+      ]),
+    );
+
+    const credentialPayload = await (
+      await AdminCredentialsRoute.POST(
+        makeJsonRequest('http://localhost/admin-api/credentials', {
+          bearer_token: 'gate-token',
+          user_id: 'gate@example.com',
+        }),
+      )
+    ).json();
+    const accessKeyPayload = await (
+      await AdminAccessKeysRoute.POST(
+        makeJsonRequest('http://localhost/admin-api/access-keys', {
+          credential_filenames: [credentialPayload.filename],
+          name: 'Gate Key',
+        }),
+      )
+    ).json();
+
+    const response = await V1ChatRoute.POST(
+      makeNextRequest('http://localhost/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${accessKeyPayload.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messages: [{ content: 'hi', role: 'user' }],
+          model: 'glm-5.1',
+          stream: false,
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await response.text();
+
+    // The slot follows the body: it is only free once the reply is drained.
+    expect(getConcurrencyState().active).toBe(0);
   });
 });

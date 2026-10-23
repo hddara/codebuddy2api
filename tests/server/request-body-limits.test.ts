@@ -1,5 +1,7 @@
 import {
+  MAX_REQUEST_BODY_ENV,
   getJsonBody,
+  getMaxRequestBodyBytes,
   readJsonBodyOrErrorResponse,
   readJsonBodyOrFailure,
   RequestBodyTooLargeError,
@@ -38,6 +40,10 @@ const makeChunkedRequest = (chunks: Uint8Array[]): Request => {
 };
 
 describe('request body limits', () => {
+  afterEach(() => {
+    delete process.env[MAX_REQUEST_BODY_ENV];
+  });
+
   it('parses a body that is within the cap', async () => {
     await expect(
       getJsonBody<{ input: string }>(
@@ -50,7 +56,7 @@ describe('request body limits', () => {
     // The header claims 2x the cap; the body itself is tiny, so only the
     // declared length can be what triggers the rejection.
     const request = makeRequest(JSON.stringify({ input: 'small' }), {
-      'Content-Length': String(16 * 1024 * 1024),
+      'Content-Length': String(64 * 1024 * 1024),
     });
 
     await expect(getJsonBody(request)).rejects.toBeInstanceOf(
@@ -62,7 +68,7 @@ describe('request body limits', () => {
     // No Content-Length: the limit must be enforced as bytes arrive, which is
     // the case a naive `request.text()` + post-check would miss.
     const chunk = new Uint8Array(1024 * 1024).fill(0x61);
-    const request = makeChunkedRequest(Array.from({ length: 12 }, () => chunk));
+    const request = makeChunkedRequest(Array.from({ length: 40 }, () => chunk));
 
     await expect(getJsonBody(request)).rejects.toBeInstanceOf(
       RequestBodyTooLargeError,
@@ -74,7 +80,7 @@ describe('request body limits', () => {
       'Content-Length': String(64 * 1024 * 1024),
     });
 
-    await expect(getJsonBody(request)).rejects.toThrow(/8MB/);
+    await expect(getJsonBody(request)).rejects.toThrow(/32MB/);
   });
 
   it('ignores a non-numeric Content-Length', async () => {
@@ -146,13 +152,27 @@ describe('request body limits', () => {
       }),
     );
     expect(tooLarge).toEqual({
-      failure: { message: expect.stringContaining('8MB'), status: 413 },
+      failure: { message: expect.stringContaining('32MB'), status: 413 },
     });
 
     const malformed = await readJsonBodyOrFailure(makeRequest('{not json'));
     expect(malformed).toEqual({
       failure: { message: 'Request body must be valid JSON', status: 400 },
     });
+  });
+
+  it('falls back to the default cap on an unusable override', () => {
+    for (const value of ['', '0', '-3', 'many']) {
+      process.env[MAX_REQUEST_BODY_ENV] = value;
+
+      // Never "off": this cap is the last thing between a client and the heap.
+      expect(getMaxRequestBodyBytes()).toBe(32 * 1024 * 1024);
+    }
+
+    process.env[MAX_REQUEST_BODY_ENV] = '1024';
+    expect(getMaxRequestBodyBytes()).toBe(1_024);
+
+    delete process.env[MAX_REQUEST_BODY_ENV];
   });
 
   it('returns the parsed body when reading succeeds', async () => {

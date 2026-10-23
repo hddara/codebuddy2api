@@ -10,39 +10,72 @@ import {
   createAnthropicError,
   handleMessagesRequest,
 } from '@/lib/server/proxy/anthropic';
+import {
+  getConcurrencyRejectionMessage,
+  getConcurrencyState,
+  withAdmission,
+} from '@/lib/server/shared/concurrency-gate';
+import { logEvent } from '@/lib/server/shared/log';
 import { readJsonBodyOrFailure } from '@/lib/server/shared/http';
+import { runWithRequestContext } from '@/lib/server/shared/request-context';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-export const POST = async (request: NextRequest): Promise<Response> => {
-  const authError = await getAnthropicAuthErrorResponse(request);
+const ROUTE = '/v1/messages';
 
-  if (authError) {
-    return authError;
-  }
+/**
+ * The Anthropic SDK reads `type: "error"` and an Anthropic error type, so a
+ * rejected request has to be shaped here rather than by the OpenAI-compatible
+ * envelope the gate defaults to.
+ */
+const rejection = (): Response =>
+  createAnthropicError(529, getConcurrencyRejectionMessage());
 
-  // Body errors go through createAnthropicError so this route keeps returning
-  // `type: "error"` with an Anthropic error type, matching every other failure
-  // on the route. A 413 maps to request_too_large and a 400 to
-  // invalid_request_error.
-  const parsed = await readJsonBodyOrFailure<Record<string, unknown>>(request);
+export const POST = async (request: NextRequest): Promise<Response> =>
+  runWithRequestContext(ROUTE, async () =>
+    withAdmission(async () => {
+      const authError = await getAnthropicAuthErrorResponse(request);
 
-  if ('failure' in parsed) {
-    return createAnthropicError(parsed.failure.status, parsed.failure.message);
-  }
+      if (authError) {
+        return authError;
+      }
 
-  const body = parsed.body;
-  const debugTrace = (await isDebugEnabled())
-    ? createDebugTrace({
-        requestBody: body,
-        requestKey:
-          request.headers.get('x-api-key') ??
-          request.headers.get('authorization'),
-        route: '/v1/messages',
-      })
-    : undefined;
+      // Body errors go through createAnthropicError so this route keeps
+      // returning `type: "error"` with an Anthropic error type, matching every
+      // other failure on the route. A 413 maps to request_too_large and a 400
+      // to invalid_request_error.
+      const parsed =
+        await readJsonBodyOrFailure<Record<string, unknown>>(request);
 
-  const response = await handleMessagesRequest(request, body, debugTrace);
-  return finalizeDebugTrace(debugTrace, response);
-};
+      if ('failure' in parsed) {
+        return createAnthropicError(
+          parsed.failure.status,
+          parsed.failure.message,
+        );
+      }
+
+      const body = parsed.body;
+      const debugTrace = (await isDebugEnabled())
+        ? createDebugTrace({
+            requestBody: body,
+            requestKey:
+              request.headers.get('x-api-key') ??
+              request.headers.get('authorization'),
+            route: ROUTE,
+          })
+        : undefined;
+
+      void logEvent({
+        level: 'INFO',
+        message: 'Request admitted',
+        payload: {
+          ...getConcurrencyState(),
+          route: ROUTE,
+        },
+      });
+
+      const response = await handleMessagesRequest(request, body, debugTrace);
+      return finalizeDebugTrace(debugTrace, response);
+    }, rejection),
+  );

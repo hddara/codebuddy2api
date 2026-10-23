@@ -7,41 +7,65 @@ import {
   isDebugEnabled,
 } from '@/lib/server/domain/debug';
 import { proxyChatCompletions } from '@/lib/server/proxy/codebuddy';
+import {
+  getConcurrencyState,
+  withAdmission,
+} from '@/lib/server/shared/concurrency-gate';
+import { logEvent } from '@/lib/server/shared/log';
 import { readJsonBodyOrErrorResponse } from '@/lib/server/shared/http';
+import { runWithRequestContext } from '@/lib/server/shared/request-context';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-export const POST = async (request: NextRequest): Promise<Response> => {
-  const authError = await getClientAuthErrorResponse(request);
+const ROUTE = '/v1/chat/completions';
 
-  if (authError) {
-    return authError;
-  }
+export const POST = async (request: NextRequest): Promise<Response> =>
+  // The context is opened here rather than only in the proxy so that auth and
+  // body failures — the two rejections that never reach the proxy — still carry
+  // the same `reqId` as the request they belong to. The proxy's own call is a
+  // no-op when a context already exists.
+  runWithRequestContext(ROUTE, async () =>
+    withAdmission(async () => {
+      const authError = await getClientAuthErrorResponse(request);
 
-  const parsed =
-    await readJsonBodyOrErrorResponse<Record<string, unknown>>(request);
+      if (authError) {
+        return authError;
+      }
 
-  if ('response' in parsed) {
-    return parsed.response;
-  }
+      const parsed =
+        await readJsonBodyOrErrorResponse<Record<string, unknown>>(request);
 
-  const body = parsed.body;
-  const debugTrace = (await isDebugEnabled())
-    ? createDebugTrace({
-        requestBody: body,
-        requestKey:
-          request.headers.get('x-api-key') ??
-          request.headers.get('authorization'),
-        route: '/v1/chat/completions',
-      })
-    : undefined;
+      if ('response' in parsed) {
+        return parsed.response;
+      }
 
-  const response = await proxyChatCompletions(
-    request,
-    body,
-    undefined,
-    debugTrace,
+      const body = parsed.body;
+      const debugTrace = (await isDebugEnabled())
+        ? createDebugTrace({
+            requestBody: body,
+            requestKey:
+              request.headers.get('x-api-key') ??
+              request.headers.get('authorization'),
+            route: ROUTE,
+          })
+        : undefined;
+
+      void logEvent({
+        level: 'INFO',
+        message: 'Request admitted',
+        payload: {
+          ...getConcurrencyState(),
+          route: ROUTE,
+        },
+      });
+
+      const response = await proxyChatCompletions(
+        request,
+        body,
+        undefined,
+        debugTrace,
+      );
+      return finalizeDebugTrace(debugTrace, response);
+    }),
   );
-  return finalizeDebugTrace(debugTrace, response);
-};

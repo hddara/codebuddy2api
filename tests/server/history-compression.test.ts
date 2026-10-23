@@ -1,6 +1,5 @@
 import {
   compressMessages,
-  getHistoryBudgetChars,
   isHistoryCompressionEnabled,
   pruneToolDefinitions,
   type CompressibleMessage,
@@ -16,15 +15,6 @@ const message = (
   ...extra,
 });
 
-const totalChars = (messages: CompressibleMessage[]): number =>
-  messages.reduce((total, item) => {
-    if (typeof item.content === 'string') {
-      return total + item.content.length;
-    }
-
-    return total;
-  }, 0);
-
 describe('history compression switches', () => {
   const original = { ...process.env };
 
@@ -32,11 +22,21 @@ describe('history compression switches', () => {
     process.env = { ...original };
   });
 
-  it('is off by default', () => {
+  it('is on by default', () => {
     delete process.env.CODEBUDDY_COMPRESS_HISTORY;
 
-    expect(isHistoryCompressionEnabled()).toBe(false);
-    expect(getHistoryBudgetChars()).toBe(400_000);
+    // Compression cannot be opt-in: the reject cap fires before an
+    // uncompressed body could ever be dispatched, so "off" means every
+    // oversized request is refused rather than sent.
+    expect(isHistoryCompressionEnabled()).toBe(true);
+  });
+
+  it('can be switched off for debugging', () => {
+    for (const value of ['0', 'false', 'no', 'off']) {
+      process.env.CODEBUDDY_COMPRESS_HISTORY = value;
+
+      expect(isHistoryCompressionEnabled()).toBe(false);
+    }
   });
 
   it('accepts the documented truthy spellings', () => {
@@ -45,18 +45,6 @@ describe('history compression switches', () => {
 
       expect(isHistoryCompressionEnabled()).toBe(true);
     }
-  });
-
-  it('falls back to the default budget on an unusable value', () => {
-    for (const value of ['0', '-5', 'abc', '']) {
-      process.env.CODEBUDDY_HISTORY_BUDGET_CHARS = value;
-
-      expect(getHistoryBudgetChars()).toBe(400_000);
-    }
-
-    process.env.CODEBUDDY_HISTORY_BUDGET_CHARS = '1200';
-
-    expect(getHistoryBudgetChars()).toBe(1200);
   });
 
   it('ignores a switch value that is not on the list', () => {
@@ -89,11 +77,11 @@ describe('pruneToolDefinitions', () => {
 describe('compressMessages', () => {
   it('returns the input untouched when it already fits', () => {
     const messages = [message('user', 'hello'), message('assistant', 'hi')];
-    const result = compressMessages(messages, { budgetChars: 1_000 });
+    const result = compressMessages(messages, { budgetBytes: 1_000 });
 
     expect(result.unchanged).toBe(true);
     expect(result.messages).toBe(messages);
-    expect(result.charsAfter).toBe(result.charsBefore);
+    expect(result.bytesAfter).toBe(result.bytesBefore);
   });
 
   it('elides the middle of a long tool result before stubbing anything', () => {
@@ -103,10 +91,10 @@ describe('compressMessages', () => {
       message('user', 'what happened?'),
     ];
 
-    const result = compressMessages(messages, { budgetChars: 5_000 });
+    const result = compressMessages(messages, { budgetBytes: 5_000 });
 
     expect(result.replacedCount).toBe(0);
-    expect(result.charsAfter).toBeLessThan(result.charsBefore);
+    expect(result.bytesAfter).toBeLessThan(result.bytesBefore);
 
     const shortened = result.messages[0]?.content as string;
 
@@ -124,10 +112,10 @@ describe('compressMessages', () => {
       message('user', 'the actual question'),
     ];
 
-    const result = compressMessages(messages, { budgetChars: 2_000 });
+    const result = compressMessages(messages, { budgetBytes: 2_000 });
 
     expect(result.replacedCount).toBeGreaterThan(0);
-    expect(result.charsAfter).toBeLessThan(result.charsBefore);
+    expect(result.bytesAfter).toBeLessThan(result.bytesBefore);
     expect(result.messages.at(-1)).toEqual(messages.at(-1));
   });
 
@@ -135,10 +123,10 @@ describe('compressMessages', () => {
     const question = message('user', 'Q'.repeat(20_000));
     const messages = [message('user', 'old'), question];
 
-    const result = compressMessages(messages, { budgetChars: 100 });
+    const result = compressMessages(messages, { budgetBytes: 100 });
 
     expect(result.messages.at(-1)).toEqual(question);
-    expect(result.charsAfter).toBeGreaterThanOrEqual(20_000);
+    expect(result.bytesAfter).toBeGreaterThanOrEqual(20_000);
   });
 
   it('keeps an assistant tool_calls turn together with its tool results', () => {
@@ -150,7 +138,7 @@ describe('compressMessages', () => {
       message('user', 'follow up'),
     ];
 
-    const result = compressMessages(messages, { budgetChars: 2_500 });
+    const result = compressMessages(messages, { budgetBytes: 2_500 });
 
     const roles = result.messages.map((item) => item.role);
     const callerIndex = roles.indexOf('assistant');
@@ -176,7 +164,7 @@ describe('compressMessages', () => {
       message('user', 'question'),
     ];
 
-    const result = compressMessages(messages, { budgetChars: 500 });
+    const result = compressMessages(messages, { budgetBytes: 500 });
 
     expect(result.messages.map((item) => item.role)).toEqual(
       messages.map((item) => item.role),
@@ -190,9 +178,9 @@ describe('compressMessages', () => {
       message('user', 'question'),
     ];
 
-    const result = compressMessages(messages, { budgetChars: 1_000 });
+    const result = compressMessages(messages, { budgetBytes: 1_000 });
 
-    expect(result.charsAfter).toBeLessThan(result.charsBefore);
+    expect(result.bytesAfter).toBeLessThan(result.bytesBefore);
     expect(Array.isArray(result.messages[0]?.content)).toBe(true);
   });
 
@@ -202,7 +190,7 @@ describe('compressMessages', () => {
       message('user', 'question'),
     ];
 
-    const result = compressMessages(messages, { budgetChars: 100 });
+    const result = compressMessages(messages, { budgetBytes: 100 });
 
     // Already malformed going in; compression must not invent a caller for it.
     expect(result.messages.filter((item) => item.role === 'tool')).toHaveLength(
@@ -226,9 +214,9 @@ describe('compressMessages', () => {
         message('user', 'any update?'),
       ];
 
-      const result = compressMessages(messages, { budgetChars: 1_000 });
+      const result = compressMessages(messages, { budgetBytes: 1_000 });
 
-      expect(result.charsAfter).toBeLessThan(result.charsBefore);
+      expect(result.bytesAfter).toBeLessThan(result.bytesBefore);
       const blocks = result.messages[0]?.content as Array<{
         text?: string;
         type?: string;
@@ -247,7 +235,7 @@ describe('compressMessages', () => {
         ]),
       ];
 
-      const result = compressMessages(messages, { budgetChars: 10 });
+      const result = compressMessages(messages, { budgetBytes: 10 });
 
       const blocks = result.messages[1]?.content as Array<{ type?: string }>;
       // The current turn's image may be the question itself.
@@ -267,11 +255,12 @@ describe('compressMessages', () => {
         message('assistant', 'ok'),
       ];
 
-      const a = compressMessages(withImage, { budgetChars: 100_000 });
-      const b = compressMessages(withoutImage, { budgetChars: 100_000 });
+      const a = compressMessages(withImage, { budgetBytes: 100_000 });
+      const b = compressMessages(withoutImage, { budgetBytes: 100_000 });
 
       // A budget that ignored the base64 could never see the overflow coming.
-      expect(a.charsBefore - b.charsBefore).toBeGreaterThan(9_000);
+      // 9,000 payload bytes plus the 22-byte `data:image/png;base64,` prefix.
+      expect(a.bytesBefore - b.bytesBefore).toBe(9_022);
     });
 
     it('reads a flat image_url string as well as the nested form', () => {
@@ -285,24 +274,94 @@ describe('compressMessages', () => {
         message('user', 'next'),
       ];
 
-      const result = compressMessages(messages, { budgetChars: 500 });
+      const result = compressMessages(messages, { budgetBytes: 500 });
 
-      expect(result.charsAfter).toBeLessThan(result.charsBefore);
+      expect(result.bytesAfter).toBeLessThan(result.bytesBefore);
       const blocks = result.messages[0]?.content as Array<{ type?: string }>;
       expect(blocks[0]?.type).toBe('text');
     });
   });
 
-  it('reports the character totals it measured', () => {
+  describe('tool call arguments', () => {
+    const writeCall = (payload: string) => ({
+      function: { arguments: payload, name: 'write_file' },
+      id: 'call-1',
+      type: 'function',
+    });
+
+    it('counts arguments towards the size it measures', () => {
+      const withArgs = [
+        message('assistant', 'writing', {
+          tool_calls: [writeCall('A'.repeat(9_000))],
+        }),
+        message('user', 'go on'),
+      ];
+      const withoutArgs = [
+        message('assistant', 'writing', { tool_calls: [writeCall('')] }),
+        message('user', 'go on'),
+      ];
+
+      const a = compressMessages(withArgs, { budgetBytes: 1_000_000 });
+      const b = compressMessages(withoutArgs, { budgetBytes: 1_000_000 });
+
+      // A session built entirely out of file writes reported almost nothing
+      // before this was counted, which is how a 7.8 MB body claimed to be 1.4k
+      // characters and sailed past every budget. Exactly the payload: 'A' is
+      // one byte and needs no JSON escaping.
+      expect(a.bytesBefore - b.bytesBefore).toBe(9_000);
+    });
+
+    it('elides long arguments and keeps the call id and name', () => {
+      const messages = [
+        message('assistant', '', {
+          tool_calls: [writeCall('A'.repeat(10_000))],
+        }),
+        message('tool', 'ok', { tool_call_id: 'call-1' }),
+        message('user', 'carry on'),
+      ];
+
+      const result = compressMessages(messages, { budgetBytes: 3_000 });
+
+      expect(result.bytesAfter).toBeLessThan(result.bytesBefore);
+      expect(result.toolResultsElided).toBeGreaterThan(0);
+
+      const call = (
+        result.messages[0]?.tool_calls as Array<{
+          function?: { arguments?: string; name?: string };
+          id?: string;
+        }>
+      )[0];
+
+      // The id and name are what the upstream pairs the call with; only the
+      // payload is shortened.
+      expect(call?.id).toBe('call-1');
+      expect(call?.function?.name).toBe('write_file');
+      expect(call?.function?.arguments).toContain('characters omitted');
+    });
+
+    it('leaves arguments alone when they are already small', () => {
+      const messages = [
+        message('assistant', 'hi', { tool_calls: [writeCall('{"path":"a"}')] }),
+        message('user', 'next'),
+      ];
+
+      const result = compressMessages(messages, { budgetBytes: 100_000 });
+
+      expect(result.unchanged).toBe(true);
+      expect(result.messages).toBe(messages);
+    });
+  });
+
+  it('reports the byte totals it measured', () => {
     const messages = [
       message('system', 'S'.repeat(2_000)),
       message('user', 'question'),
     ];
 
-    const result = compressMessages(messages, { budgetChars: 100 });
+    const result = compressMessages(messages, { budgetBytes: 100 });
 
-    expect(result.charsBefore).toBe(totalChars(messages));
-    expect(result.charsAfter).toBe(totalChars(result.messages));
+    expect(result.bytesBefore).toBeGreaterThan(2_000);
+    expect(result.bytesAfter).toBeLessThan(result.bytesBefore);
     expect(result.keptCount).toBe(messages.length - result.replacedCount);
   });
 
@@ -313,9 +372,9 @@ describe('compressMessages', () => {
       message('user', ''),
     ];
 
-    const result = compressMessages(messages, { budgetChars: 1 });
+    const result = compressMessages(messages, { budgetBytes: 1 });
 
-    expect(result.charsBefore).toBe(0);
+    expect(result.bytesBefore).toBe(0);
     expect(result.replacedCount).toBe(0);
     expect(result.unchanged).toBe(true);
   });
@@ -326,7 +385,7 @@ describe('compressMessages', () => {
       message('user', 'latest'),
     ];
 
-    const result = compressMessages(messages, { budgetChars: 50 });
+    const result = compressMessages(messages, { budgetBytes: 50 });
 
     expect(result.messages[0]?.content).toContain('omitted');
     expect(result.messages.at(-1)).toEqual(messages.at(-1));

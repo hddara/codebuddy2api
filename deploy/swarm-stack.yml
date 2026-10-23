@@ -20,7 +20,10 @@ version: '3.8'
 
 services:
   app:
-    image: registry.cn-hangzhou.aliyuncs.com/hucx/codebuddy2api:20261021.T01
+    # Keep this in step with what is actually running. On 2026-10-23 the stack
+    # defined 20261021.T01 while the service ran 20261023.T01, so a redeploy
+    # would silently have rolled the fix back to an older build.
+    image: registry.cn-hangzhou.aliyuncs.com/hucx/codebuddy2api:20261023.T01
     ports:
       - '8001:8001'
     environment:
@@ -39,6 +42,33 @@ services:
       # Optional: raise the log level to INFO or DEBUG to see credential
       # selection and successful upstream requests (defaults to WARN).
       - CODEBUDDY_LOG_LEVEL=${CODEBUDDY_LOG_LEVEL:-WARN}
+      # Memory guards. These exist because the process was killed by the kernel
+      # OOM killer several times: the container limit is 2g and RSS was observed
+      # at 1.85-2.05g before every kill. Each switch below closes one way the
+      # process could get there.
+      #
+      # Compress oversized conversation history before dispatch. On by default
+      # in code as well: the reject cap is applied when the body is read, so an
+      # uncompressed body is not "sent as-is", it is refused with a 413.
+      - CODEBUDDY_COMPRESS_HISTORY=${CODEBUDDY_COMPRESS_HISTORY:-true}
+      # Largest body dispatched upstream *after* compression, in bytes. Was a
+      # 400000-character budget, which measured a different quantity from the
+      # byte cap and was roughly 5% of it, so the two never agreed.
+      - CODEBUDDY_REQUEST_TARGET_BYTES=${CODEBUDDY_REQUEST_TARGET_BYTES:-1048576}
+      # Hard cap on an *accepted* body, in bytes. 32 MiB, not 2 and not 8: this
+      # fires when the body is read, which is *before* compression runs, so any
+      # session the compressor could have shrunk is refused here instead if it
+      # arrives above this line. Parsed cost is ~4x the wire bytes and the gate
+      # admits 4 at once, so the worst case is ~512 MB of the 2 GB limit.
+      - CODEBUDDY_MAX_REQUEST_BYTES=${CODEBUDDY_MAX_REQUEST_BYTES:-33554432}
+      # Concurrent request slots. Excess requests are refused with a 503 instead
+      # of being queued: a queued request has already had its body read, so it
+      # still holds the memory the queue was meant to protect.
+      - CODEBUDDY_MAX_CONCURRENT_REQUESTS=${CODEBUDDY_MAX_CONCURRENT_REQUESTS:-4}
+      # Recycle the process when RSS crosses this many MiB. A controlled exit(0)
+      # with a 30s drain is far cheaper than an OOM kill, and swarm restarts the
+      # task within seconds. Set to 0 to disable.
+      - CODEBUDDY_MEMORY_RECYCLE_MB=${CODEBUDDY_MEMORY_RECYCLE_MB:-1700}
     volumes:
       - codebuddy_creds:/app/.codebuddy_creds
       - codebuddy_data:/app/.codebuddy_data

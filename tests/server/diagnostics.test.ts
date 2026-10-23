@@ -11,6 +11,7 @@ const {
   getMemorySnapshot,
   installProcessDiagnostics,
   logMemorySnapshot,
+  logRuntimeLimits,
   startMemoryWatchdog,
   stopMemoryWatchdog,
 } = await import('@/lib/server/shared/diagnostics');
@@ -91,6 +92,25 @@ describe('process diagnostics', () => {
     // One sample per interval regardless of how many callers asked for it.
     expect(console.log).toHaveBeenCalledTimes(1);
     vi.useRealTimers();
+  });
+
+  it('records the limits the process actually resolved at boot', async () => {
+    stubMemory(80);
+    logRuntimeLimits();
+
+    await vi.waitFor(() =>
+      expect(console.log).toHaveBeenCalledWith(
+        '[CodeBuddy2API][INFO] Runtime limits',
+        expect.objectContaining({
+          historyCompression: true,
+          maxConcurrentRequests: 4,
+          maxRequestBodyBytes: 32 * 1024 * 1024,
+          memoryRecycleRssMb: 1700,
+          nodeVersion: process.version,
+          requestTargetBytes: 1024 * 1024,
+        }),
+      ),
+    );
   });
 
   it('installs its process hooks once', () => {

@@ -49,8 +49,11 @@ docker run -d --name codebuddy2api --restart unless-stopped -p 8001:8001 \
 | `CODEBUDDY_AUTH_MODE`                   | 上流認証モード                                     | `auto` / `token`                                 |
 | `CODEBUDDY_INTERNET_ENVIRONMENT`        | ネットワーク環境                                   | `internal` / `ioa` / `public`                    |
 | `CODEBUDDY_LOG_LEVEL`                   | サーバーログレベル                                 | `INFO`                                           |
-| `CODEBUDDY_COMPRESS_HISTORY`            | 送信前にサイズ超過リクエストを圧縮する             | `true` / `false`。既定値は `false`               |
-| `CODEBUDDY_HISTORY_BUDGET_CHARS`        | 会話履歴の文字数予算                               | 数値。既定値は `400000`                          |
+| `CODEBUDDY_COMPRESS_HISTORY`            | 送信前にサイズ超過リクエストを圧縮する             | `true` / `false`。既定値は `true`                |
+| `CODEBUDDY_REQUEST_TARGET_BYTES`        | 圧縮後に上流へ送る本文の上限（バイト）             | 数値。既定値は `1048576`（1 MiB）                |
+| `CODEBUDDY_MAX_REQUEST_BYTES`           | 受け付けるリクエスト本文の絶対上限（バイト）       | 数値。既定値は `33554432`（32 MiB）              |
+| `CODEBUDDY_MAX_CONCURRENT_REQUESTS`     | 同時に処理するリクエスト数。超過分は即座に 503     | 数値。既定値は `4`。`0` で無効化                 |
+| `CODEBUDDY_MEMORY_RECYCLE_MB`           | RSS がこの値（MiB）を超えたら正常終了して再起動    | 数値。既定値は `1700`。`0` で無効化              |
 | `CODEBUDDY_ADMIN_PASSKEY_RP_ID`         | 管理者 Passkey の hostname                         | `example.com`                                    |
 | `CODEBUDDY_AUTO_CHECKIN_ENABLED`        | 毎日の自動チェックインを有効にする                 | `true` / `false`。既定値は `false`               |
 | `CODEBUDDY_AUTO_CHECKIN_TIME`           | 自動チェックイン時刻（サーバーローカル）           | `HH:mm`。既定値は `00:30`                        |

@@ -26,10 +26,28 @@ const nextRequestId = (): string => {
   return `r${Date.now().toString(36)}-${sequence.toString(36)}`;
 };
 
+/**
+ * Runs `handler` under a request context.
+ *
+ * Nesting is a no-op: the proxy layer opens the context that covers the whole
+ * turn, and route-level work that happens *before* it (auth, reading the body)
+ * opens one too so those failures are correlatable as well. Keeping the
+ * outermost id rather than minting a second one means one request stays one id
+ * in the log — otherwise a rejected body would carry a different `reqId` than
+ * the request it belongs to.
+ */
 export const runWithRequestContext = <T>(
   route: string,
   handler: () => Promise<T>,
-): Promise<T> => storage.run({ id: nextRequestId(), route }, handler);
+): Promise<T> => {
+  const existing = storage.getStore();
+
+  if (existing) {
+    return handler();
+  }
+
+  return storage.run({ id: nextRequestId(), route }, handler);
+};
 
 export const getRequestContext = (): RequestContext | undefined =>
   storage.getStore();
