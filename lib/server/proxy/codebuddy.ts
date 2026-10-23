@@ -51,6 +51,7 @@ import {
 import { logEvent, summarizeLogHeaders, truncateLogText } from '../shared/log';
 import { parseRateLimitSignal } from '../shared/rate-limit';
 import { runWithRequestContext } from '../shared/request-context';
+import { findToolCallLeak } from './tool-call-integrity';
 import { recordUsageEvent, type UsageSnapshot } from '../domain/usage';
 
 interface OpenAIMessage {
@@ -85,6 +86,14 @@ const MAX_ANSWER_CHARS = 200_000;
  * limit; a misbehaving upstream would be held entirely in memory.
  */
 const MAX_AGGREGATED_STREAM_BYTES = 8 * 1024 * 1024;
+/**
+ * How much assistant prose is inspected for a tool call that escaped into text.
+ *
+ * The marker carries no relation to answer length: a model that loses its call
+ * writes the markup at the start of its turn, then usually stops. Bounding the
+ * scan keeps the check O(1) in the size of a legitimate answer.
+ */
+const TOOL_LEAK_SCAN_CHARS = 20_000;
 /**
  * Hard ceiling for in-request credential rotation. Rotation keeps the requested
  * model and only swaps the account, walking every untried credential: each retry
@@ -3361,6 +3370,16 @@ const normalizeStreamingResponse = ({
    */
   let sawToolCalls = false;
 
+  /**
+   * Prose the model produced, kept only to detect a tool call that escaped into
+   * text. Bounded to the first `TOOL_LEAK_SCAN_CHARS` characters: the marker
+   * appears at the start of the call, and a turn that model wrote as prose
+   * would otherwise pin a whole long answer in memory.
+   */
+  let leakScan = '';
+  let leakScanFull = false;
+  let leakReported = false;
+
   // Same reasoning as the responses path: the reply lives only for as long as
   // the stream that produced it, so an aborted client cannot strand it.
   const teeAnswerChunks: string[] = [];
@@ -3404,6 +3423,8 @@ const normalizeStreamingResponse = ({
   };
 
   const teeFinish = (error?: string): void => {
+    reportToolCallLeak();
+
     if (!teeConversationId || teeCompleted) return;
     teeCompleted = true;
     if (!teeStarted) return;
@@ -3412,6 +3433,38 @@ const normalizeStreamingResponse = ({
       error,
       text: teeTakeAnswer(),
       toolTurn: sawToolCalls,
+    });
+  };
+
+  /**
+   * Logs once if the turn carried tool-call markup as prose.
+   *
+   * A leaked call is a successful HTTP response that does nothing: the caller
+   * sees 200 with `finish_reason: stop` and a body that reads like a truncated
+   * answer. Nothing else in the request's telemetry distinguishes it, so this
+   * line is the only signal that the model failed rather than finished.
+   */
+  const reportToolCallLeak = (): void => {
+    if (leakReported || sawToolCalls || !leakScan) return;
+
+    const leak = findToolCallLeak(leakScan);
+
+    if (!leak) return;
+
+    leakReported = true;
+
+    void logEvent({
+      level: 'WARN',
+      message: 'Model emitted a tool call as plain text',
+      payload: {
+        credentialFilename: proxyContext.credentialFilename,
+        marker: leak.marker,
+        model,
+        route,
+        sample: truncateLogText(leak.sample),
+        scannedChars: leakScan.length,
+        scanTruncated: leakScanFull,
+      },
     });
   };
 
@@ -3453,6 +3506,20 @@ const normalizeStreamingResponse = ({
               delta.tool_calls.length > 0
             ) {
               sawToolCalls = true;
+            }
+            // Keep the opening of the answer for the leak check. Reasoning is
+            // excluded: a model may describe the syntax it is about to emit.
+            if (
+              !leakScanFull &&
+              typeof delta.content === 'string' &&
+              delta.content
+            ) {
+              leakScan += delta.content;
+
+              if (leakScan.length >= TOOL_LEAK_SCAN_CHARS) {
+                leakScan = leakScan.slice(0, TOOL_LEAK_SCAN_CHARS);
+                leakScanFull = true;
+              }
             }
             teeContent(delta.content);
             if (typeof delta.content !== 'string' || !delta.content) {
@@ -3694,6 +3761,26 @@ const aggregateUpstreamStream = async (
 
   if (aggregatedToolCalls.length) {
     message.tool_calls = aggregatedToolCalls;
+  }
+
+  // Same check as the streaming path. Here the whole answer is already in
+  // memory, so the scan is bounded explicitly rather than by accumulation.
+  if (!aggregatedToolCalls.length) {
+    const leak = findToolCallLeak(content.slice(0, TOOL_LEAK_SCAN_CHARS));
+
+    if (leak) {
+      void logEvent({
+        level: 'WARN',
+        message: 'Model emitted a tool call as plain text',
+        payload: {
+          marker: leak.marker,
+          model,
+          sample: truncateLogText(leak.sample),
+          scannedChars: Math.min(content.length, TOOL_LEAK_SCAN_CHARS),
+          scanTruncated: content.length > TOOL_LEAK_SCAN_CHARS,
+        },
+      });
+    }
   }
 
   return {
