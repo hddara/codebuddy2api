@@ -53,6 +53,46 @@ export const REQUEST_TARGET_ENV = 'CODEBUDDY_REQUEST_TARGET_BYTES';
 const DEFAULT_REQUEST_TARGET_BYTES = 1024 * 1024;
 
 /**
+ * Ceiling on what may be dispatched at all, as a multiple of the policy target.
+ *
+ * The target is a policy knob, not the upstream's limit: production served
+ * bodies 15% over it without complaint, so refusing everything above the target
+ * would recreate the earlier mistake one layer later — converting working
+ * requests into 413s. What is worth refusing is the case where every
+ * compression stage has run and the body is still multiples past anything real:
+ * those come back from upstream as "prompt is too long" or as a channel
+ * rejection, after a full round trip and a wasted credential.
+ *
+ * Four times the target. A conversation past that point is not merely large; it
+ * is one whose remaining content is all pinned (the newest user turn, the
+ * system prompt), which means nothing else was left to shrink.
+ */
+export const DISPATCH_CEILING_MULTIPLIER = 4;
+
+/**
+ * Thrown when a body is still far over the dispatch target after every
+ * compression stage, so the caller gets a readable 413 naming the input instead
+ * of an opaque upstream code.
+ */
+export class DispatchCeilingExceededError extends Error {
+  readonly bytes: number;
+
+  readonly limitBytes: number;
+
+  constructor(bytes: number, limitBytes: number) {
+    const mb = (value: number): string => (value / (1024 * 1024)).toFixed(1);
+
+    super(
+      `Request is ${mb(bytes)}MB after compression, over the ${mb(limitBytes)}MB dispatch ceiling.` +
+        ' Send fewer messages or a smaller current turn.',
+    );
+    this.name = 'DispatchCeilingExceededError';
+    this.bytes = bytes;
+    this.limitBytes = limitBytes;
+  }
+}
+
+/**
  * Reads a byte cap from the environment, always returning a usable number.
  *
  * A malformed or non-positive value falls back to the default rather than
@@ -85,6 +125,14 @@ export const getRequestTargetBytes = (): number =>
  */
 export const getEffectiveTargetBytes = (): number =>
   Math.min(getRequestTargetBytes(), getMaxRequestBodyBytes());
+
+/**
+ * The most that may be dispatched after compression. See
+ * `DISPATCH_CEILING_MULTIPLIER` for why this is a multiple of the target rather
+ * than the target itself.
+ */
+export const getDispatchCeilingBytes = (): number =>
+  getEffectiveTargetBytes() * DISPATCH_CEILING_MULTIPLIER;
 
 export class RequestBodyTooLargeError extends Error {
   readonly declaredBytes: number | null;

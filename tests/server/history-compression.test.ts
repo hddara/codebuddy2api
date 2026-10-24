@@ -105,10 +105,13 @@ describe('compressMessages', () => {
   });
 
   it('stubs old turns and keeps the newest ones verbatim', () => {
+    // Large enough that stubbing clears MIN_STUB_RECLAIM_BYTES: replacing a
+    // 5 KB turn to save 4.9 KB changes the request shape for nothing, so the
+    // compressor deliberately leaves it alone.
     const messages = [
       message('system', 'S'.repeat(5_000)),
-      message('user', 'U'.repeat(5_000)),
-      message('assistant', 'A'.repeat(5_000)),
+      message('user', 'U'.repeat(40_000)),
+      message('assistant', 'A'.repeat(40_000)),
       message('user', 'the actual question'),
     ];
 
@@ -117,6 +120,47 @@ describe('compressMessages', () => {
     expect(result.replacedCount).toBeGreaterThan(0);
     expect(result.bytesAfter).toBeLessThan(result.bytesBefore);
     expect(result.messages.at(-1)).toEqual(messages.at(-1));
+  });
+
+  it('never stubs the system prompt, even when nothing else can be shrunk', () => {
+    // Stubbing the system prompt was the production bug behind upstream code
+    // 11128: the call arrived with no instructions and the channel check read
+    // it as a non-official client.
+    const messages = [
+      message('system', 'S'.repeat(60_000)),
+      message('user', 'the question'),
+      message('user', 'latest'),
+    ];
+
+    const result = compressMessages(messages, { budgetBytes: 10 });
+
+    expect(result.messages[0]?.content).toBe('S'.repeat(60_000));
+    expect(result.messages[1]?.content).toBe('the question');
+  });
+
+  it('protects developer messages the same way as system ones', () => {
+    const messages = [
+      message('developer', 'D'.repeat(60_000)),
+      message('user', 'latest'),
+    ];
+
+    const result = compressMessages(messages, { budgetBytes: 10 });
+
+    expect(result.messages[0]?.content).toBe('D'.repeat(60_000));
+  });
+
+  it('leaves a turn alone when stubbing it would reclaim almost nothing', () => {
+    // The 32 KB floor exists because a stub that saves a few hundred bytes
+    // changes the request shape for no size benefit at all.
+    const messages = [
+      message('user', 'U'.repeat(4_000)),
+      message('user', 'latest'),
+    ];
+
+    const result = compressMessages(messages, { budgetBytes: 100 });
+
+    expect(result.replacedCount).toBe(0);
+    expect(result.unchanged).toBe(true);
   });
 
   it('never removes the last user turn even when it alone exceeds the budget', () => {
@@ -355,6 +399,7 @@ describe('compressMessages', () => {
   it('reports the byte totals it measured', () => {
     const messages = [
       message('system', 'S'.repeat(2_000)),
+      message('user', 'U'.repeat(40_000)),
       message('user', 'question'),
     ];
 
@@ -381,7 +426,7 @@ describe('compressMessages', () => {
 
   it('stubs the oldest message first when nothing is truncatable', () => {
     const messages = [
-      message('user', 'U'.repeat(1_000)),
+      message('user', 'U'.repeat(40_000)),
       message('user', 'latest'),
     ];
 

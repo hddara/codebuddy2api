@@ -33,6 +33,9 @@
  *  - an `assistant` message carrying `tool_calls` is kept whenever any of its
  *    `tool` results is kept, and vice versa;
  *  - the last user turn is never dropped, since it is the actual question;
+ *  - a `system` or `developer` message is never stubbed: it carries the client
+ *    identity and the standing instructions, and replacing it makes the call
+ *    look like it came from an unofficial client;
  *  - a message is only ever replaced by a stub of the same role, so the
  *    alternation the upstream expects is preserved;
  *  - anything unexpected returns the input untouched.
@@ -73,6 +76,30 @@ export interface MessageCompressionResult<T> {
  */
 const TOOL_RESULT_HEAD_CHARS = 2_000;
 const TOOL_RESULT_TAIL_CHARS = 500;
+
+/**
+ * Smallest win that justifies replacing a whole message with a stub.
+ *
+ * A stub only helps when the message it removes outweighs the stub left behind,
+ * and the difference has to be worth the change in request shape. Production
+ * spent the entire `system` prompt — identity, instructions, tool policy — to
+ * reclaim 3,796 bytes out of a 1.2 MB request, which did not bring the call
+ * under budget and did make it look like it came from an unofficial client.
+ * Below this threshold the stub is noise, not relief.
+ */
+const MIN_STUB_RECLAIM_BYTES = 32 * 1024;
+
+/**
+ * Roles whose content is instructions rather than conversation.
+ *
+ * They are small by nature (hundreds of bytes to a few kilobytes) and are the
+ * only part of a request that states who the caller is. The upstream channel
+ * check reads them; a call whose `system` message has been replaced by a
+ * placeholder is indistinguishable from one sent by a scraper, and it is
+ * answered with `code: 11128`.
+ */
+const isInstructionRole = (role: string | undefined): boolean =>
+  role === 'system' || role === 'developer';
 
 /**
  * Placeholder left where a historical image used to be.
@@ -502,11 +529,20 @@ const createStub = (message: CompressibleMessage): CompressibleMessage => {
  * almost entirely tool groups, that protected the whole transcript: production
  * logged `replacedCount: 0` on 475-message requests that were 300 KB over
  * budget, with nothing but image drops having any effect.
+ *
+ * `system` and `developer` messages are reported separately: they may be
+ * elided like anything else but they are never stubbed, because the stub
+ * removes the only declaration of who is calling.
  */
 const findPinnedIndexes = (
   messages: CompressibleMessage[],
-): { lastUserIndex: number; groupOf: Map<number, number[]> } => {
+): {
+  lastUserIndex: number;
+  groupOf: Map<number, number[]>;
+  instructionIndexes: Set<number>;
+} => {
   const groupOf = new Map<number, number[]>();
+  const instructionIndexes = new Set<number>();
   let lastUserIndex = -1;
 
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -515,6 +551,12 @@ const findPinnedIndexes = (
       break;
     }
   }
+
+  messages.forEach((message, index) => {
+    if (isInstructionRole(message?.role)) {
+      instructionIndexes.add(index);
+    }
+  });
 
   let index = messages.length - 1;
 
@@ -545,7 +587,7 @@ const findPinnedIndexes = (
     index = cursor === index ? index - 1 : cursor;
   }
 
-  return { lastUserIndex, groupOf };
+  return { groupOf, instructionIndexes, lastUserIndex };
 };
 
 /**
@@ -589,7 +631,8 @@ export const compressMessages = <T extends CompressibleMessage>(
     };
   }
 
-  const { groupOf, lastUserIndex } = findPinnedIndexes(messages);
+  const { groupOf, instructionIndexes, lastUserIndex } =
+    findPinnedIndexes(messages);
   const next: CompressibleMessage[] = messages.slice();
 
   let imagesDropped = 0;
@@ -691,8 +734,21 @@ export const compressMessages = <T extends CompressibleMessage>(
   // A message is stubbed either on its own or as its whole tool group, never
   // as half of one: an `assistant` turn carrying `tool_calls` with its results
   // missing is a hard 400 from the upstream.
+  //
+  // Two guards keep this stage from doing damage beyond its mandate. A group
+  // holding a `system` or `developer` message is skipped outright — those carry
+  // the caller identity and the standing instructions, and replacing one with a
+  // placeholder is what turned a size problem into `code: 11128` ("illegal API
+  // invocation from an unapproved channel"). And a group is only stubbed when
+  // the *net* saving clears `MIN_STUB_RECLAIM_BYTES`, because a stub that
+  // reclaims a few hundred bytes can never bring a multi-megabyte request under
+  // budget and only buys a changed request shape.
   let replacedCount = 0;
   const stubbed = new Set<number>();
+  // Snapshot taken after stages 1–3: undoing a stub must restore the message as
+  // the eliding stages left it, not the original, or the undo would silently
+  // throw away wins those stages already booked.
+  const beforeStubbing: CompressibleMessage[] = next.slice();
 
   for (let index = 0; index < next.length; index += 1) {
     if (bytesAfterElision <= budgetBytes) {
@@ -705,14 +761,21 @@ export const compressMessages = <T extends CompressibleMessage>(
 
     const group = groupOf.get(index) ?? [index];
 
-    // Skip a group that holds the last user turn or a message already stubbed.
+    // Skip a group that holds the last user turn, an instruction message or a
+    // message already stubbed.
     if (
-      group.some((member) => member === lastUserIndex || stubbed.has(member))
+      group.some(
+        (member) =>
+          member === lastUserIndex ||
+          instructionIndexes.has(member) ||
+          stubbed.has(member),
+      )
     ) {
       continue;
     }
 
     let reclaimed = 0;
+    let membersStubbed = 0;
 
     for (const member of group) {
       const target = next[member];
@@ -727,17 +790,41 @@ export const compressMessages = <T extends CompressibleMessage>(
         continue;
       }
 
-      next[member] = createStub(target) as CompressibleMessage;
+      const stub = createStub(target) as CompressibleMessage;
+      const saved = before - readMessageBytes(stub);
+
+      // A stub longer than what it replaces is pure loss; leave the message.
+      if (saved <= 0) {
+        continue;
+      }
+
+      next[member] = stub;
       stubbed.add(member);
-      reclaimed += before;
+      reclaimed += saved;
+      membersStubbed += 1;
     }
 
-    if (reclaimed === 0) {
+    if (membersStubbed === 0) {
+      continue;
+    }
+
+    if (reclaimed < MIN_STUB_RECLAIM_BYTES) {
+      // Undo: the saving was real but too small to matter, and the request
+      // shape is not worth changing for it.
+      for (const member of group) {
+        if (!stubbed.has(member)) {
+          continue;
+        }
+
+        next[member] = beforeStubbing[member] as CompressibleMessage;
+        stubbed.delete(member);
+      }
+
       continue;
     }
 
     bytesAfterElision -= reclaimed;
-    replacedCount += group.length;
+    replacedCount += membersStubbed;
   }
 
   const bytesAfter = next.reduce(

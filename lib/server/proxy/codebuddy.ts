@@ -46,6 +46,8 @@ import { extractQuestionText } from '../domain/session-transcripts';
 import { getMemorySnapshot } from '../shared/diagnostics';
 import {
   createErrorResponse,
+  DispatchCeilingExceededError,
+  getDispatchCeilingBytes,
   getRequestHeaderMap,
   getEffectiveTargetBytes,
   readCappedResponseText,
@@ -864,6 +866,42 @@ const rotateToNextCredential = async ({
 };
 
 /**
+ * Upstream refusal that means "this call did not look like it came from an
+ * official client", rather than "this credential is out of quota".
+ *
+ * `code: 11128` ("Illegal API invocation from an unapproved channel") is
+ * answered before the request is routed to a model, and it is probabilistic:
+ * production logged 55 successes and 46 refusals for byte-identical request
+ * shapes in the same hour. Treating it as a terminal 400 turned one unlucky
+ * draw into a user-visible failure, and the client's own retry then re-sent the
+ * whole body — the 43-errors-per-minute bursts in the logs.
+ *
+ * It is deliberately *not* a rate limit: the credential is healthy, so it is
+ * not marked limited, it is only skipped for this one call.
+ */
+const CHANNEL_REJECTION_CODE = 11128;
+const CHANNEL_REJECTION_PATTERN = /unapproved channel/i;
+const MAX_CHANNEL_REJECTION_RETRIES = 2;
+
+const isChannelRejection = (detail: string | undefined): boolean => {
+  if (!detail) {
+    return false;
+  }
+
+  if (CHANNEL_REJECTION_PATTERN.test(detail)) {
+    return true;
+  }
+
+  try {
+    const payload = JSON.parse(detail) as { code?: unknown };
+
+    return payload.code === CHANNEL_REJECTION_CODE;
+  } catch {
+    return false;
+  }
+};
+
+/**
  * Marks the credential behind a failed upstream call as rate limited so the
  * next request rotates away from it. Only HTTP 429 counts: treating 5xx or
  * network failures as limits would blacklist every credential on an upstream
@@ -872,8 +910,7 @@ const rotateToNextCredential = async ({
  * When `allowRotation` is set, the same client request continues on another
  * credential. The upstream answers 429 before any byte reaches the caller, so
  * both streaming and non-streaming requests can be retried safely.
- */
-const handleUpstreamRateLimit = async ({
+ */ const handleUpstreamRateLimit = async ({
   allowRotation,
   context,
   detail,
@@ -1178,6 +1215,7 @@ const fetchUpstreamWithRotation = async ({
     : [];
   let context = initialContext;
   let attempts = 0;
+  let channelRetries = 0;
 
   for (;;) {
     attempts += 1;
@@ -1339,15 +1377,46 @@ const fetchUpstreamWithRotation = async ({
       triedFilenames,
     });
 
-    if (!nextContext) {
-      return { attempts, context, detail, response };
+    if (nextContext) {
+      if (nextContext.credentialFilename) {
+        triedFilenames.push(nextContext.credentialFilename);
+      }
+
+      context = nextContext;
+      continue;
     }
 
-    if (nextContext.credentialFilename) {
-      triedFilenames.push(nextContext.credentialFilename);
+    // A channel rejection is not a rate limit — the credential is fine, the
+    // draw was unlucky — so it gets its own small retry budget on another
+    // account instead of becoming the caller's 400.
+    if (
+      channelRetries < MAX_CHANNEL_REJECTION_RETRIES &&
+      attempts < maxAttempts &&
+      isChannelRejection(detail)
+    ) {
+      channelRetries += 1;
+
+      const retryContext = await rotateToNextCredential({
+        allowRotation: true,
+        context,
+        model,
+        reason: `upstream rejected the channel (code ${CHANNEL_REJECTION_CODE})`,
+        request,
+        requestBody,
+        triedFilenames,
+      });
+
+      if (retryContext) {
+        if (retryContext.credentialFilename) {
+          triedFilenames.push(retryContext.credentialFilename);
+        }
+
+        context = retryContext;
+        continue;
+      }
     }
 
-    context = nextContext;
+    return { attempts, context, detail, response };
   }
 };
 
@@ -1841,6 +1910,46 @@ const measureBodyBytes = (body: unknown): number => {
 };
 
 /**
+ * Refuses a body that is still multiples past the target once every stage has
+ * run.
+ *
+ * Past the ceiling the call is not merely large, it is unsendable: the leftover
+ * is pinned content — the newest user turn and the system prompt — so handing
+ * it to the upstream buys a round trip, burns a credential and comes back as an
+ * opaque code ("prompt is too long", or a channel rejection). Answering here
+ * names the actual problem instead.
+ */
+const enforceDispatchCeiling = ({
+  bytes,
+  keptCount,
+  targetBytes,
+}: {
+  bytes: number;
+  keptCount: number;
+  targetBytes: number;
+}): void => {
+  const ceilingBytes = getDispatchCeilingBytes();
+
+  if (bytes <= ceilingBytes) {
+    return;
+  }
+
+  void logEvent({
+    level: 'ERROR',
+    message: 'Request exceeds the dispatch ceiling after compression',
+    payload: {
+      bytesAfter: bytes,
+      ceilingBytes,
+      overByBytes: bytes - ceilingBytes,
+      pinnedMessages: keptCount,
+      targetBytes,
+    },
+  });
+
+  throw new DispatchCeilingExceededError(bytes, ceilingBytes);
+};
+
+/**
  * Shrinks a body until it fits the dispatch target, then reports both numbers.
  *
  * The order matters and is not incidental:
@@ -1939,6 +2048,15 @@ const applySizeControls = (upstreamBody: ChatRequestBody): void => {
         },
       });
 
+      // "Nothing changed" is not the same as "sendable": a body whose only
+      // remaining mass is pinned content compresses to itself, and that is
+      // exactly the shape the ceiling exists for.
+      enforceDispatchCeiling({
+        bytes: measureBodyBytes(upstreamBody),
+        keptCount: compressed.keptCount,
+        targetBytes,
+      });
+
       return;
     }
 
@@ -1967,9 +2085,9 @@ const applySizeControls = (upstreamBody: ChatRequestBody): void => {
       },
     });
 
-    // A body still over the target after every stage is not an error — the
-    // upstream may accept it — but it is the shape of the next 413 if the
-    // reject cap is ever tightened, so it is worth a WARN while it is rare.
+    // A body still over the target after every stage is not an error in
+    // itself — production served bodies 15% over it — but it is worth a WARN
+    // while it is rare, because it is the shape of the next failure.
     if (bytesAfter > targetBytes) {
       void logEvent({
         level: 'WARN',
@@ -1982,7 +2100,19 @@ const applySizeControls = (upstreamBody: ChatRequestBody): void => {
         },
       });
     }
+
+    enforceDispatchCeiling({
+      bytes: bytesAfter,
+      keptCount: compressed.keptCount,
+      targetBytes,
+    });
   } catch (error) {
+    // The ceiling is a decision, not a hiccup: rethrow so it reaches the caller
+    // as a 413 instead of being swallowed into "sent as-is".
+    if (error instanceof DispatchCeilingExceededError) {
+      throw error;
+    }
+
     void logEvent({
       level: 'WARN',
       message: 'Conversation compression failed, sending the request as-is',
@@ -4422,6 +4552,21 @@ const proxyChatCompletionsInScope = async (
     return aggregated.response;
   } catch (error) {
     setDebugTraceError(debugTrace, error);
+
+    // The dispatch ceiling is the caller's problem, not an upstream fault, so
+    // it must not be logged as one or answered with a 500.
+    if (error instanceof DispatchCeilingExceededError) {
+      return createErrorResponse(
+        413,
+        error.message,
+        {
+          bytes: error.bytes,
+          limit_bytes: error.limitBytes,
+        },
+        { code: 'request_too_large', type: 'invalid_request_error' },
+      );
+    }
+
     logUpstreamFailure({
       error,
       route: '/v1/chat/completions',
