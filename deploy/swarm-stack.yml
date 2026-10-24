@@ -55,12 +55,22 @@ services:
       # 400000-character budget, which measured a different quantity from the
       # byte cap and was roughly 5% of it, so the two never agreed.
       - CODEBUDDY_REQUEST_TARGET_BYTES=${CODEBUDDY_REQUEST_TARGET_BYTES:-1048576}
-      # Hard cap on an *accepted* body, in bytes. 32 MiB, not 2 and not 8: this
-      # fires when the body is read, which is *before* compression runs, so any
-      # session the compressor could have shrunk is refused here instead if it
-      # arrives above this line. Parsed cost is ~4x the wire bytes and the gate
-      # admits 4 at once, so the worst case is ~512 MB of the 2 GB limit.
-      - CODEBUDDY_MAX_REQUEST_BYTES=${CODEBUDDY_MAX_REQUEST_BYTES:-33554432}
+      # Anomaly guard on an *accepted* body, in bytes. This is not a size
+      # policy — the dispatch target above is. It exists only so a runaway or
+      # hostile client cannot make the process parse an unbounded body, and it
+      # therefore sits far above any real conversation. A session that reaches
+      # it is broken, not merely large.
+      #
+      # The history matters here: 8 MiB was the number that produced the filed
+      # 413s, because it fired while reading the body — before the compressor
+      # that exists to shrink it ever ran. Raising it to 32 MiB fixed the
+      # symptom, but treating the reject cap as the size policy kept the
+      # conflation. 64 MiB means only genuinely broken input is refused.
+      #
+      # Parsed cost is ~4x the wire bytes and the gate admits 4 at once, so the
+      # absolute worst case is ~1 GB against the 2 GB limit; the memory
+      # watchdog's 1700 MiB recycle is the real backstop, not this number.
+      - CODEBUDDY_MAX_REQUEST_BYTES=${CODEBUDDY_MAX_REQUEST_BYTES:-67108864}
       # Concurrent request slots. Excess requests are refused with a 503 instead
       # of being queued: a queued request has already had its body read, so it
       # still holds the memory the queue was meant to protect.

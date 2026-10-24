@@ -164,6 +164,35 @@ export const measureMessagesBytes = (
 ): number =>
   messages.reduce((total, message) => total + readMessageBytes(message), 0);
 
+/**
+ * Bytes the images inside the conversation occupy.
+ *
+ * Split out from `measureMessagesBytes` because the two answer different
+ * questions. The total says whether a request will fit; this says *why* it does
+ * not, and image bytes are the answer often enough to be worth naming. A
+ * session carrying four screenshots is almost entirely image, and no amount of
+ * eliding tool results will bring it under a target sized for text.
+ */
+export const measureImageBytes = (
+  messages: readonly CompressibleMessage[],
+): number => {
+  let total = 0;
+
+  for (const message of messages) {
+    const { content } = message;
+
+    if (!Array.isArray(content)) {
+      continue;
+    }
+
+    for (const part of content) {
+      total += readImageBytes(part);
+    }
+  }
+
+  return total;
+};
+
 /** True when the caller has told the upstream not to call any tool. */
 const forbidsToolUse = (toolChoice: unknown): boolean => {
   if (toolChoice === 'none') {
@@ -195,24 +224,6 @@ export const pruneToolDefinitions = (
   return forbidsToolUse(toolChoice) ? undefined : tools;
 };
 
-/**
- * Bytes one message is responsible for.
- *
- * Three things this deliberately counts that a naive walk over `content` misses:
- *
- *  - **tool call arguments.** An assistant turn that wrote a file carries the
- *    whole file in `tool_calls[].function.arguments`. Measured on a real session
- *    it was 100% invisible to the old counter: 300 KB of arguments registered as
- *    2 characters, so a conversation made entirely of file writes could sit at
- *    the body cap while reporting almost nothing.
- *  - **images**, at their base64 length.
- *  - **UTF-8 width**, via `byteSizeOf`, so non-ASCII text is not understated by
- *    the factor of three that the cap sees.
- *
- * The whole message is stringified once for the structural fields, which is
- * cheaper than walking each field and comparable to the object graph it
- * describes; the result is a number, never a retained copy.
- */
 /**
  * Bytes one message is responsible for.
  *

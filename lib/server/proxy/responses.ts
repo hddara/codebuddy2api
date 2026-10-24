@@ -12,6 +12,7 @@ import {
 } from './codebuddy';
 import { resolveRequestAccessKey } from './auth';
 import { createErrorResponse, waitForStreamDemand } from '../shared/http';
+import { logEvent } from '../shared/log';
 import {
   deleteStorageJson,
   getStorageBackendMeta,
@@ -135,6 +136,35 @@ const RESPONSE_SESSION_TTL_MS = 60 * 60 * 1000;
 const MAX_RESPONSE_SESSION_BYTES = 8 * 1024 * 1024;
 const MAX_RESPONSE_SESSION_TOTAL_BYTES = 64 * 1024 * 1024;
 const MAX_RESPONSE_TRANSCRIPT_MESSAGES = 200;
+
+/**
+ * A retained transcript never keeps image bytes.
+ *
+ * An image arrives as a base64 data URL, which is about 1.33x the binary size,
+ * and a session's transcript is replayed on every later turn. Retaining the
+ * data URL therefore does not store one screenshot — it makes every subsequent
+ * request carry that screenshot again, forever. A handful of screenshots is
+ * enough to push a session past any body cap, and the failure looks like "the
+ * client sends an 8 MB request" when in fact the gateway built that request out
+ * of its own retained history.
+ *
+ * The split is between *delivering* an image and *remembering* it. The turn
+ * that carries the image still sends it upstream verbatim, because that is what
+ * the model was asked about. Only the copy written to the session store is
+ * redacted, so the next turn replays a placeholder instead of the payload.
+ * Model vision is unaffected for the turn that matters; the unbounded growth
+ * stops.
+ */
+const TRANSCRIPT_IMAGE_PLACEHOLDER = '[image omitted from retained session]';
+
+/**
+ * Matches a base64 data URL. Base64 is self-delimiting (`A-Z`, `a-z`, `0-9`,
+ * `+`, `/`, `=`), so the payload can be found and cut without parsing the
+ * surrounding JSON — which matters because by the time content reaches the
+ * transcript it has already been flattened to a string.
+ */
+const BASE64_DATA_URL_PATTERN =
+  /data:image\/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g;
 const RESPONSE_SESSION_NAMESPACE = 'responses';
 const RESPONSE_SESSION_INDEX_NAMESPACE = 'response-session-index';
 const MAX_STREAM_BUFFER_LENGTH = 1_000_000;
@@ -289,19 +319,109 @@ const getValidatedPreviousSession = async (
   return previousSession;
 };
 
+/**
+ * Cuts every base64 image payload out of a string, leaving a placeholder.
+ *
+ * Applied only on the path into the session store. Returns the input unchanged
+ * when it carries no data URL, so the common case costs one regex scan and
+ * allocates nothing.
+ */
+const redactRetainedImages = (value: string): string => {
+  if (!value.includes('data:image/')) {
+    return value;
+  }
+
+  return value.replaceAll(
+    BASE64_DATA_URL_PATTERN,
+    TRANSCRIPT_IMAGE_PLACEHOLDER,
+  );
+};
+
+/**
+ * Redacts image payloads across a whole message, covering the three places a
+ * data URL can hide: flattened `content`, tool-call `arguments` (a screenshot
+ * passed to a tool as a base64 blob) and tool outputs.
+ */
+const redactRetainedMessageImages = (
+  message: TranscriptMessage,
+): TranscriptMessage => {
+  const content =
+    message.content === null ? null : redactRetainedImages(message.content);
+  let changed = content !== message.content;
+
+  const toolCalls = message.tool_calls?.map((toolCall) => {
+    const args = redactRetainedImages(toolCall.function.arguments);
+
+    if (args === toolCall.function.arguments) {
+      return toolCall;
+    }
+
+    changed = true;
+
+    return { ...toolCall, function: { ...toolCall.function, arguments: args } };
+  });
+
+  if (!changed) {
+    return message;
+  }
+
+  return {
+    ...message,
+    content,
+    ...(toolCalls ? { tool_calls: toolCalls } : {}),
+  };
+};
+
 const storeResponseSession = async (
   session: ResponseSession,
 ): Promise<void> => {
-  const serialized = JSON.stringify(session);
-  if (Buffer.byteLength(serialized, 'utf8') > MAX_RESPONSE_SESSION_BYTES) {
+  // Redact once, up front: every branch below stores this same object, and the
+  // size guard has to measure what is actually retained, not a redacted copy
+  // that never gets persisted.
+  //
+  // Whether anything changed is tracked here rather than by stringifying the
+  // session twice: a second `JSON.stringify` of a multi-megabyte transcript
+  // would allocate exactly the copy this redaction exists to avoid.
+  let redactedMessages = 0;
+  const transcript = session.transcript.map((message) => {
+    const redacted = redactRetainedMessageImages(message);
+
+    if (redacted !== message) {
+      redactedMessages += 1;
+    }
+
+    return redacted;
+  });
+  const retained: ResponseSession = { ...session, transcript };
+  const serialized = JSON.stringify(retained);
+  const sessionBytes = Buffer.byteLength(serialized, 'utf8');
+
+  // Reported whenever redaction actually fired, because the alternative is a
+  // silent cap: a session that would have been rejected as oversized now fits,
+  // and without this line the log cannot distinguish "the images were dropped"
+  // from "the images were never there".
+  if (redactedMessages > 0) {
+    void logEvent({
+      level: 'INFO',
+      message: 'Redacted image payloads from the retained session',
+      payload: {
+        redactedMessages,
+        retainedBytes: sessionBytes,
+        sessionId: retained.id,
+        transcriptMessages: transcript.length,
+      },
+    });
+  }
+
+  if (sessionBytes > MAX_RESPONSE_SESSION_BYTES) {
     throw new Error('Response session exceeds the maximum size');
   }
 
   if (isPgResponseSessionStore()) {
-    await writeStorageJson(RESPONSE_SESSION_NAMESPACE, session.id, session);
-    await writeStorageJson(RESPONSE_SESSION_INDEX_NAMESPACE, session.id, {
-      bytes: Buffer.byteLength(serialized, 'utf8'),
-      createdAt: session.createdAt,
+    await writeStorageJson(RESPONSE_SESSION_NAMESPACE, retained.id, retained);
+    await writeStorageJson(RESPONSE_SESSION_INDEX_NAMESPACE, retained.id, {
+      bytes: sessionBytes,
+      createdAt: retained.createdAt,
     });
     try {
       await prunePgResponseSessions();
@@ -313,10 +433,9 @@ const storeResponseSession = async (
 
   const store = getSessionStore();
   const byteStore = getSessionByteStore();
-  const previousBytes = byteStore.get(session.id) ?? 0;
-  const sessionBytes = Buffer.byteLength(serialized, 'utf8');
-  store.set(session.id, session);
-  byteStore.set(session.id, sessionBytes);
+  const previousBytes = byteStore.get(retained.id) ?? 0;
+  store.set(retained.id, retained);
+  byteStore.set(retained.id, sessionBytes);
   setSessionTotalBytes(getSessionTotalBytes() - previousBytes + sessionBytes);
   pruneResponseSessions();
 };

@@ -51,7 +51,7 @@ docker run -d --name codebuddy2api --restart unless-stopped -p 8001:8001 \
 | `CODEBUDDY_LOG_LEVEL`                   | サーバーログレベル                                 | `INFO`                                           |
 | `CODEBUDDY_COMPRESS_HISTORY`            | 送信前にサイズ超過リクエストを圧縮する             | `true` / `false`。既定値は `true`                |
 | `CODEBUDDY_REQUEST_TARGET_BYTES`        | 圧縮後に上流へ送る本文の上限（バイト）             | 数値。既定値は `1048576`（1 MiB）                |
-| `CODEBUDDY_MAX_REQUEST_BYTES`           | 受け付けるリクエスト本文の絶対上限（バイト）       | 数値。既定値は `33554432`（32 MiB）              |
+| `CODEBUDDY_MAX_REQUEST_BYTES`           | 受け付ける本文の異常値ガード（サイズ方針ではない） | 数値。既定値は `67108864`（64 MiB）              |
 | `CODEBUDDY_MAX_CONCURRENT_REQUESTS`     | 同時に処理するリクエスト数。超過分は即座に 503     | 数値。既定値は `4`。`0` で無効化                 |
 | `CODEBUDDY_MEMORY_RECYCLE_MB`           | RSS がこの値（MiB）を超えたら正常終了して再起動    | 数値。既定値は `1700`。`0` で無効化              |
 | `CODEBUDDY_ADMIN_PASSKEY_RP_ID`         | 管理者 Passkey の hostname                         | `example.com`                                    |

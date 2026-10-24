@@ -339,6 +339,66 @@ describe('Responses memory bounds', () => {
     expect(writePgSession).not.toHaveBeenCalled();
   });
 
+  it('does not retain base64 image payloads in the session transcript', async () => {
+    // A screenshot arrives as a data URL and the transcript is replayed on every
+    // later turn. Retaining it would make each request carry the same image
+    // again, so the session accumulates megabytes it has already sent.
+    const screenshot = `data:image/png;base64,${'A'.repeat(400_000)}`;
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(makeChatResponse('seen'));
+
+    const response = await handleResponsesRequest(makeRequest(), {
+      input: [
+        {
+          content: [
+            { text: 'what is wrong with this screenshot?', type: 'input_text' },
+            { image_url: screenshot, type: 'input_image' },
+          ],
+          role: 'user',
+        },
+      ],
+      model: 'gpt-5.5',
+    });
+    expect(response.status).toBe(200);
+
+    // The turn carrying the image still sends it upstream verbatim: the model
+    // was asked about the screenshot, so it has to receive it.
+    const upstreamBody = String(
+      (fetchMock.mock.calls[0]?.[1] as RequestInit).body,
+    );
+    expect(upstreamBody).toContain('data:image/png;base64,AAAA');
+
+    const retained = [...pgSessions.values()][0] as {
+      transcript: Array<{ content: string | null; role: string }>;
+    };
+    const serialized = JSON.stringify(retained);
+
+    expect(serialized).not.toContain('A'.repeat(1000));
+    expect(serialized).toContain('[image omitted from retained session]');
+  });
+
+  it('redacts base64 image payloads that arrive as flattened text', async () => {
+    const diagram = `data:image/jpeg;base64,${'B'.repeat(200_000)}`;
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      makeChatResponse('noted'),
+    );
+
+    const response = await handleResponsesRequest(makeRequest(), {
+      input: `read this ${diagram}`,
+      model: 'gpt-5.5',
+    });
+    expect(response.status).toBe(200);
+
+    const retained = [...pgSessions.values()][0] as {
+      transcript: Array<{ content: string | null; role: string }>;
+    };
+    const serialized = JSON.stringify(retained);
+
+    expect(serialized).not.toContain('B'.repeat(1000));
+    expect(serialized).toContain('[image omitted from retained session]');
+  });
+
   it('maps Chat usage onto Responses usage for non-streamed requests', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(

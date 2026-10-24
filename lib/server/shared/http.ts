@@ -1,33 +1,43 @@
 import { logEvent } from './log';
 
 /**
- * Ceiling on a proxied JSON request body. `request.json()` buffers and parses
- * the whole payload before any check is possible, so an oversized body has to
- * be rejected before parsing rather than after.
+ * Anomaly guard on a proxied JSON request body — not a size policy.
  *
- * 32 MiB, and the number only makes sense alongside the dispatch target below.
- * Compression runs on the *parsed* body, which is after this cap has already
- * had its say — so a session that the compressor could have shrunk is instead
- * refused here if it arrives above this line. That is precisely the 413 that
- * was filed against this service: a long agent transcript crossed 8 MiB, was
- * rejected on arrival, and never reached the code written to shrink it. A cap
- * that fires before the fix-up it is meant to trigger is not a safety valve,
- * it is a bug with a status code.
+ * This is the one number a caller can trip, so it is worth being precise about
+ * what it is for. `request.json()` buffers and parses the whole payload before
+ * any check is possible, so something has to bound the read. But bounding the
+ * read is not the same as deciding what a conversation is allowed to weigh, and
+ * conflating the two is what produced the 413s filed against this service: a
+ * long agent transcript crossed the line on arrival and was refused *before*
+ * the compressor that exists to shrink it ever ran. A cap that fires before the
+ * fix-up it is meant to trigger is not a safety valve, it is a bug with a
+ * status code.
  *
- * The heap arithmetic: the parsed form of a JSON body measures roughly 4x its
- * wire size, so a 32 MiB body peaks near 128 MB while it is being handled. The
- * concurrency gate admits at most 4 requests at once, so the worst case is
- * about 512 MB — a quarter of the 2 GB container limit, and the compressed form
- * that actually gets dispatched is a small fraction of that again.
+ * So the roles are separated. The *policy* limit is the dispatch target below:
+ * everything a caller sends is compressed down to it before it goes upstream.
+ * This number is only here to stop a runaway or hostile client from being
+ * parsed at all, and it therefore sits far above any real conversation. A
+ * session large enough to reach it is not being "too big to send", it is
+ * broken.
  *
- * An earlier revision cut this to 2 MiB on the theory that a parsed 8 MiB body
- * costs 3-5x its size and two overlapping requests would breach the container
- * limit. Measured, it is about 4x, and two overlapping 8 MiB requests were never
- * the failure mode; the cut only converted working requests into 413s.
+ * The heap arithmetic, so the value is not arbitrary: the parsed form of a JSON
+ * body measures roughly 4x its wire size, so a 64 MiB body peaks near 256 MB
+ * while it is handled. The concurrency gate admits at most 4 at once, so the
+ * absolute worst case is about 1 GB against a 2 GB container — which is why the
+ * memory watchdog recycles the process at 1700 MB rather than trusting this
+ * number alone to keep the heap in bounds.
+ *
+ * History worth keeping: an earlier revision cut this to 2 MiB on the theory
+ * that a parsed 8 MiB body costs 3-5x its size and two overlapping requests
+ * would breach the container limit. Measured, it is about 4x, and two
+ * overlapping 8 MiB requests were never the failure mode; the cut only
+ * converted working requests into 413s. The follow-up raised it to 32 MiB while
+ * still treating it as a policy limit; this revision raises it to 64 MiB and
+ * stops treating it as one.
  */
 export const MAX_REQUEST_BODY_ENV = 'CODEBUDDY_MAX_REQUEST_BYTES';
 
-const DEFAULT_MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024;
+const DEFAULT_MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024;
 
 /**
  * Ceiling on a body actually dispatched upstream, applied after compression.
@@ -177,7 +187,7 @@ const logBodyRejection = (
 
   void logEvent({
     level: 'WARN',
-    message: 'Request body rejected: over the size cap',
+    message: 'Request body rejected: past the anomaly guard',
     payload: {
       declaredBytes: source === 'declared' ? observedBytes : null,
       limitBytes,
@@ -185,6 +195,11 @@ const logBodyRejection = (
       overByBytes: observedBytes - limitBytes,
       source,
       targetBytes,
+      // Spelled out so nobody reads this line as "the conversation was too
+      // large to serve". Reaching this guard means the body was still growing
+      // after compression was supposed to bound it, which is a client or
+      // retention bug, not a size policy doing its job.
+      hint: 'body exceeded the anomaly guard before compression could run',
     },
   });
 };

@@ -9,6 +9,7 @@ import {
 import {
   compressMessages,
   isHistoryCompressionEnabled,
+  measureImageBytes,
   measureMessagesBytes,
   pruneToolDefinitions,
 } from './history-compression';
@@ -4158,6 +4159,8 @@ export const proxyChatCompletions = async (
   usageRoute = '/v1/chat/completions',
 ): Promise<Response> =>
   runWithRequestContext(usageRoute, async () => {
+    const messages = body.messages ?? [];
+
     void logEvent({
       level: 'INFO',
       message: 'Request received',
@@ -4166,8 +4169,17 @@ export const proxyChatCompletions = async (
         // Counted structurally rather than with `JSON.stringify(body).length`:
         // the old form allocated a second copy of a multi-megabyte body once per
         // request just to print a number.
-        messageChars: countMessageChars(body.messages),
-        messageCount: body.messages?.length ?? 0,
+        messageChars: countMessageChars(messages),
+        messageCount: messages.length,
+        // The byte figure, next to the character one, because they disagree by
+        // orders of magnitude and the disagreement was invisible. `messageChars`
+        // walks text only, so it reports a few hundred characters for a body
+        // that is megabytes of base64 screenshots and tool arguments — the
+        // exact case that produced "your request is 8 MB" against a log line
+        // claiming a small conversation. Bytes are what the cap and the socket
+        // both measure; characters are a rough size hint for humans.
+        messageBytes: measureMessagesBytes(messages),
+        imageBytes: measureImageBytes(messages),
         model: String(body.model ?? ''),
         route: usageRoute,
         stream: Boolean(body.stream),

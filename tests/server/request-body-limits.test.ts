@@ -56,7 +56,7 @@ describe('request body limits', () => {
     // The header claims 2x the cap; the body itself is tiny, so only the
     // declared length can be what triggers the rejection.
     const request = makeRequest(JSON.stringify({ input: 'small' }), {
-      'Content-Length': String(64 * 1024 * 1024),
+      'Content-Length': String(128 * 1024 * 1024),
     });
 
     await expect(getJsonBody(request)).rejects.toBeInstanceOf(
@@ -68,7 +68,7 @@ describe('request body limits', () => {
     // No Content-Length: the limit must be enforced as bytes arrive, which is
     // the case a naive `request.text()` + post-check would miss.
     const chunk = new Uint8Array(1024 * 1024).fill(0x61);
-    const request = makeChunkedRequest(Array.from({ length: 40 }, () => chunk));
+    const request = makeChunkedRequest(Array.from({ length: 80 }, () => chunk));
 
     await expect(getJsonBody(request)).rejects.toBeInstanceOf(
       RequestBodyTooLargeError,
@@ -77,10 +77,10 @@ describe('request body limits', () => {
 
   it('reports the cap in the error message', async () => {
     const request = makeRequest(JSON.stringify({}), {
-      'Content-Length': String(64 * 1024 * 1024),
+      'Content-Length': String(128 * 1024 * 1024),
     });
 
-    await expect(getJsonBody(request)).rejects.toThrow(/32MB/);
+    await expect(getJsonBody(request)).rejects.toThrow(/64MB/);
   });
 
   it('ignores a non-numeric Content-Length', async () => {
@@ -113,7 +113,7 @@ describe('request body limits', () => {
 
   it('converts an oversized body into a 413 response', async () => {
     const request = makeRequest(JSON.stringify({}), {
-      'Content-Length': String(64 * 1024 * 1024),
+      'Content-Length': String(128 * 1024 * 1024),
     });
 
     const result = await readJsonBodyOrErrorResponse(request);
@@ -148,11 +148,11 @@ describe('request body limits', () => {
   it('exposes the failure as a status/message pair for non-OpenAI routes', async () => {
     const tooLarge = await readJsonBodyOrFailure(
       makeRequest(JSON.stringify({}), {
-        'Content-Length': String(64 * 1024 * 1024),
+        'Content-Length': String(128 * 1024 * 1024),
       }),
     );
     expect(tooLarge).toEqual({
-      failure: { message: expect.stringContaining('32MB'), status: 413 },
+      failure: { message: expect.stringContaining('64MB'), status: 413 },
     });
 
     const malformed = await readJsonBodyOrFailure(makeRequest('{not json'));
@@ -166,7 +166,7 @@ describe('request body limits', () => {
       process.env[MAX_REQUEST_BODY_ENV] = value;
 
       // Never "off": this cap is the last thing between a client and the heap.
-      expect(getMaxRequestBodyBytes()).toBe(32 * 1024 * 1024);
+      expect(getMaxRequestBodyBytes()).toBe(64 * 1024 * 1024);
     }
 
     process.env[MAX_REQUEST_BODY_ENV] = '1024';

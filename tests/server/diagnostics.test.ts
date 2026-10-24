@@ -104,7 +104,7 @@ describe('process diagnostics', () => {
         expect.objectContaining({
           historyCompression: true,
           maxConcurrentRequests: 4,
-          maxRequestBodyBytes: 32 * 1024 * 1024,
+          maxRequestBodyBytes: 64 * 1024 * 1024,
           memoryRecycleRssMb: 1700,
           nodeVersion: process.version,
           requestTargetBytes: 1024 * 1024,
