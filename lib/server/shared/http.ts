@@ -22,10 +22,10 @@ import { logEvent } from './log';
  *
  * The heap arithmetic, so the value is not arbitrary: the parsed form of a JSON
  * body measures roughly 4x its wire size, so a 64 MiB body peaks near 256 MB
- * while it is handled. The concurrency gate admits at most 4 at once, so the
- * absolute worst case is about 1 GB against a 2 GB container — which is why the
- * memory watchdog recycles the process at 1700 MB rather than trusting this
- * number alone to keep the heap in bounds.
+ * while it is handled. Nothing caps how many requests may be in flight, so this
+ * number alone cannot bound the heap — the memory watchdog's 1700 MB recycle is
+ * the backstop that actually does, and the dispatch target keeps ordinary
+ * conversations far below it.
  *
  * History worth keeping: an earlier revision cut this to 2 MiB on the theory
  * that a parsed 8 MiB body costs 3-5x its size and two overlapping requests

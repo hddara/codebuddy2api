@@ -1,19 +1,24 @@
 /**
- * Admission control for chat-shaped requests.
+ * In-flight tracking for chat-shaped requests, with an optional admission cap.
  *
- * Memory here is dominated by *how much is in flight at once*: one request
- * carries a multi-hundred-kilobyte conversation, its parsed object graph, a
- * serialised copy for the upstream call, and the stream buffers of the reply.
- * A single request is survivable; four overlapping ones are not, and the four
- * that arrive together are exactly what a chat client with a background agent
- * produces.
+ * The cap is **off by default**. It used to default to four, on the theory that
+ * four overlapping conversations could not fit in a 2 GB container; that theory
+ * predated the compressor and the body ceiling, and in practice it refused 8.5%
+ * of all traffic with a 503 while the process sat at a quarter of its memory
+ * limit. Refusing healthy requests to protect against a peak that the request
+ * sizing work already removed is not a safety valve, it is an outage with a
+ * status code — so the default is now "no limit".
  *
- * So the gate refuses rather than queues. Queueing looks friendlier but is
- * worse under memory pressure: a queued request has already had its body read
- * and parsed (that is the expensive part), so a deep queue means hundreds of
- * megabytes of admitted-but-waiting work — the failure mode is unchanged, only
- * later. A 503 with `Retry-After` tells the client to come back, and the client
- * is a retrying SDK far more often than a human on a form.
+ * What remains is the accounting the rest of the runtime wants anyway: how many
+ * requests are in flight (the memory watchdog drains against it before a
+ * controlled restart), the peak, and a lease that frees a slot whose holder was
+ * dropped without ever releasing it.
+ *
+ * Setting `CODEBUDDY_MAX_CONCURRENT_REQUESTS` to a positive integer re-enables
+ * the cap for an operator who wants one; `0` or a negative value means no cap.
+ * When a cap is active the gate refuses rather than queues: a queued request has
+ * already had its body read and parsed, so a deep queue holds the very memory it
+ * was meant to protect.
  */
 import { logEvent } from './log';
 import { getMemorySnapshot } from './memory';
@@ -34,13 +39,12 @@ export interface ConcurrencyState {
 export const MAX_CONCURRENT_ENV = 'CODEBUDDY_MAX_CONCURRENT_REQUESTS';
 
 /**
- * Four in flight, against a 2 GB container limit.
+ * No cap unless an operator asks for one.
  *
- * Below the observed peak of two large requests plus their parse copies (~1.8
- * GB), with room for the background work that is not admitted here (schedulers,
- * usage recording, session recorders).
+ * `null` is the value `getMaxConcurrentRequests` returns when the environment
+ * variable is unset, so the default deployment never turns a request away.
  */
-export const DEFAULT_MAX_CONCURRENT_REQUESTS = 4;
+export const DEFAULT_MAX_CONCURRENT_REQUESTS: number | null = null;
 
 /** Slower than any healthy turn; a slot held this long is a leak or a stall. */
 const SLOW_REQUEST_WARN_MS = 120_000;
@@ -66,11 +70,11 @@ let peak = 0;
 let rejected = 0;
 
 /**
- * Reads the concurrency limit, or `null` when the gate is switched off.
+ * Reads the concurrency limit, or `null` when there is no cap.
  *
- * `0` and negative values disable it. An operator debugging a different
- * bottleneck should be able to take the gate out of the way with an
- * environment change, without a new image.
+ * Unset, `0`, and negative values all mean "no cap", which is the shipped
+ * default: the service is expected never to refuse a request for concurrency.
+ * A positive integer installs a cap without needing a new image.
  */
 export const getMaxConcurrentRequests = (): number | null => {
   const raw = (process.env[MAX_CONCURRENT_ENV] ?? '').trim();

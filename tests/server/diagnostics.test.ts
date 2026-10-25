@@ -103,7 +103,7 @@ describe('process diagnostics', () => {
         '[CodeBuddy2API][INFO] Runtime limits',
         expect.objectContaining({
           historyCompression: true,
-          maxConcurrentRequests: 4,
+          maxConcurrentRequests: null,
           maxRequestBodyBytes: 64 * 1024 * 1024,
           memoryRecycleRssMb: 1700,
           nodeVersion: process.version,

@@ -67,14 +67,14 @@ services:
       # symptom, but treating the reject cap as the size policy kept the
       # conflation. 64 MiB means only genuinely broken input is refused.
       #
-      # Parsed cost is ~4x the wire bytes and the gate admits 4 at once, so the
-      # absolute worst case is ~1 GB against the 2 GB limit; the memory
-      # watchdog's 1700 MiB recycle is the real backstop, not this number.
+      # Parsed cost is ~4x the wire bytes, and the watchdog's 1700 MiB recycle
+      # is the real backstop, not this number.
       - CODEBUDDY_MAX_REQUEST_BYTES=${CODEBUDDY_MAX_REQUEST_BYTES:-67108864}
-      # Concurrent request slots. Excess requests are refused with a 503 instead
-      # of being queued: a queued request has already had its body read, so it
-      # still holds the memory the queue was meant to protect.
-      - CODEBUDDY_MAX_CONCURRENT_REQUESTS=${CODEBUDDY_MAX_CONCURRENT_REQUESTS:-4}
+      # No admission cap. Requests are never refused for being concurrent; the
+      # compressor and the body ceiling bound what one request can cost, and the
+      # watchdog below bounds the process. Set this to a positive integer only to
+      # deliberately reinstate a cap.
+      - CODEBUDDY_MAX_CONCURRENT_REQUESTS=${CODEBUDDY_MAX_CONCURRENT_REQUESTS:-0}
       # Recycle the process when RSS crosses this many MiB. A controlled exit(0)
       # with a 30s drain is far cheaper than an OOM kill, and swarm restarts the
       # task within seconds. Set to 0 to disable.
