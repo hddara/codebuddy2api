@@ -7,10 +7,7 @@ import {
   isDebugEnabled,
 } from '@/lib/server/domain/debug';
 import { proxyChatCompletions } from '@/lib/server/proxy/codebuddy';
-import {
-  getConcurrencyState,
-  withAdmission,
-} from '@/lib/server/shared/concurrency-gate';
+import { withRequestTracking } from '@/lib/server/shared/in-flight';
 import { logEvent } from '@/lib/server/shared/log';
 import { readJsonBodyOrErrorResponse } from '@/lib/server/shared/http';
 import { runWithRequestContext } from '@/lib/server/shared/request-context';
@@ -26,7 +23,7 @@ export const POST = async (request: NextRequest): Promise<Response> =>
   // the same `reqId` as the request they belong to. The proxy's own call is a
   // no-op when a context already exists.
   runWithRequestContext(ROUTE, async () =>
-    withAdmission(async () => {
+    withRequestTracking(async () => {
       const authError = await getClientAuthErrorResponse(request);
 
       if (authError) {
@@ -54,10 +51,7 @@ export const POST = async (request: NextRequest): Promise<Response> =>
       void logEvent({
         level: 'INFO',
         message: 'Request admitted',
-        payload: {
-          ...getConcurrencyState(),
-          route: ROUTE,
-        },
+        payload: { route: ROUTE },
       });
 
       const response = await proxyChatCompletions(

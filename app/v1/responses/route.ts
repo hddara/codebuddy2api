@@ -6,10 +6,7 @@ import {
   finalizeDebugTrace,
   isDebugEnabled,
 } from '@/lib/server/domain/debug';
-import {
-  getConcurrencyState,
-  withAdmission,
-} from '@/lib/server/shared/concurrency-gate';
+import { withRequestTracking } from '@/lib/server/shared/in-flight';
 import { logEvent } from '@/lib/server/shared/log';
 import { readJsonBodyOrErrorResponse } from '@/lib/server/shared/http';
 import { runWithRequestContext } from '@/lib/server/shared/request-context';
@@ -22,7 +19,7 @@ const ROUTE = '/v1/responses';
 
 export const POST = async (request: NextRequest): Promise<Response> =>
   runWithRequestContext(ROUTE, async () =>
-    withAdmission(async () => {
+    withRequestTracking(async () => {
       const authError = await getClientAuthErrorResponse(request);
 
       if (authError) {
@@ -50,10 +47,7 @@ export const POST = async (request: NextRequest): Promise<Response> =>
       void logEvent({
         level: 'INFO',
         message: 'Request admitted',
-        payload: {
-          ...getConcurrencyState(),
-          route: ROUTE,
-        },
+        payload: { route: ROUTE },
       });
 
       const response = await handleResponsesRequest(request, body, debugTrace);

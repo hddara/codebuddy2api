@@ -10,11 +10,7 @@ import {
   createAnthropicError,
   handleMessagesRequest,
 } from '@/lib/server/proxy/anthropic';
-import {
-  getConcurrencyRejectionMessage,
-  getConcurrencyState,
-  withAdmission,
-} from '@/lib/server/shared/concurrency-gate';
+import { withRequestTracking } from '@/lib/server/shared/in-flight';
 import { logEvent } from '@/lib/server/shared/log';
 import { readJsonBodyOrFailure } from '@/lib/server/shared/http';
 import { runWithRequestContext } from '@/lib/server/shared/request-context';
@@ -24,17 +20,9 @@ export const dynamic = 'force-dynamic';
 
 const ROUTE = '/v1/messages';
 
-/**
- * The Anthropic SDK reads `type: "error"` and an Anthropic error type, so a
- * rejected request has to be shaped here rather than by the OpenAI-compatible
- * envelope the gate defaults to.
- */
-const rejection = (): Response =>
-  createAnthropicError(529, getConcurrencyRejectionMessage());
-
 export const POST = async (request: NextRequest): Promise<Response> =>
   runWithRequestContext(ROUTE, async () =>
-    withAdmission(async () => {
+    withRequestTracking(async () => {
       const authError = await getAnthropicAuthErrorResponse(request);
 
       if (authError) {
@@ -69,13 +57,10 @@ export const POST = async (request: NextRequest): Promise<Response> =>
       void logEvent({
         level: 'INFO',
         message: 'Request admitted',
-        payload: {
-          ...getConcurrencyState(),
-          route: ROUTE,
-        },
+        payload: { route: ROUTE },
       });
 
       const response = await handleMessagesRequest(request, body, debugTrace);
       return finalizeDebugTrace(debugTrace, response);
-    }, rejection),
+    }),
   );

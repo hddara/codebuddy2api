@@ -15,8 +15,8 @@ const {
 } = await import('@/lib/server/shared/memory');
 const { runRecycleCheck, resetRecycleTimerForTests } =
   await import('@/lib/server/shared/diagnostics');
-const { acquireRequestSlot, resetConcurrencyGateForTests } =
-  await import('@/lib/server/shared/concurrency-gate');
+const { beginRequest, resetInFlightForTests } =
+  await import('@/lib/server/shared/in-flight');
 const { resetLogLevelCache } = await import('@/lib/server/shared/log');
 
 const BYTES_PER_MB = 1024 * 1024;
@@ -35,7 +35,7 @@ const stubUptime = (seconds: number) =>
 
 describe('memory recycling', () => {
   beforeEach(() => {
-    resetConcurrencyGateForTests();
+    resetInFlightForTests();
     resetRecycleTimerForTests();
     delete process.env[MEMORY_RECYCLE_ENV];
     resetLogLevelCache();
@@ -49,7 +49,7 @@ describe('memory recycling', () => {
 
   afterEach(() => {
     renewExit();
-    resetConcurrencyGateForTests();
+    resetInFlightForTests();
     resetRecycleTimerForTests();
     delete process.env[MEMORY_RECYCLE_ENV];
     vi.restoreAllMocks();
@@ -123,7 +123,7 @@ describe('memory recycling', () => {
     stubMemory(DEFAULT_MEMORY_RECYCLE_RSS_MB + 300);
     stubUptime(600);
 
-    const slot = acquireRequestSlot();
+    const slot = beginRequest();
 
     // The drain polls every 250ms, so let a tick pass before freeing the slot.
     setTimeout(() => slot?.release(), 10);
@@ -147,7 +147,7 @@ describe('memory recycling', () => {
     stubMemory(DEFAULT_MEMORY_RECYCLE_RSS_MB + 300);
     stubUptime(600);
 
-    setTimeout(() => acquireRequestSlot()?.release(), 5);
+    setTimeout(() => beginRequest().release(), 5);
 
     await Promise.all([runRecycleCheck(), runRecycleCheck()]);
 

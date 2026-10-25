@@ -52,7 +52,6 @@ After migration, set `CODEBUDDY_STORAGE_IMPORT_LEGACY_FILES=false` and remove th
 | `CODEBUDDY_COMPRESS_HISTORY`            | Shrinks oversized requests before dispatch                       | `true` / `false`; default `true`                 |
 | `CODEBUDDY_REQUEST_TARGET_BYTES`        | Largest body dispatched upstream after shrinking, in bytes       | number; default `1048576` (1 MiB)                |
 | `CODEBUDDY_MAX_REQUEST_BYTES`           | Anomaly guard on an accepted body, not a size policy             | number; default `67108864` (64 MiB)              |
-| `CODEBUDDY_MAX_CONCURRENT_REQUESTS`     | Optional cap on concurrent requests; unlimited by default        | number; default `0` (no cap); positive enables   |
 | `CODEBUDDY_MEMORY_RECYCLE_MB`           | Exit cleanly and restart once RSS crosses this many MiB          | number; default `1700`; `0` disables recycling   |
 | `CODEBUDDY_ADMIN_PASSKEY_RP_ID`         | Admin passkey hostname                                           | `example.com`                                    |
 | `CODEBUDDY_AUTO_CHECKIN_ENABLED`        | Runs the daily automatic check-in                                | `true` / `false`; default `false`                |

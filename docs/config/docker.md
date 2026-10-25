@@ -52,7 +52,6 @@ SQLite 文件默认位于容器内的 `/app/.codebuddy_data/storage.sqlite`。�
 | `CODEBUDDY_COMPRESS_HISTORY`            | 发送前压缩超限请求                     | `true` / `false`，默认 `true`                    |
 | `CODEBUDDY_REQUEST_TARGET_BYTES`        | 压缩后允许发往上游的请求体上限（字节） | 数字，默认 `1048576`（1 MiB）                    |
 | `CODEBUDDY_MAX_REQUEST_BYTES`           | 接收请求体的异常兜底上限，不是体积策略 | 数字，默认 `67108864`（64 MiB）                  |
-| `CODEBUDDY_MAX_CONCURRENT_REQUESTS`     | 并发请求数上限，默认不限制             | 数字，默认 `0`（不限制）；正数才有 503 闸门      |
 | `CODEBUDDY_MEMORY_RECYCLE_MB`           | RSS 超过该值（MiB）时优雅退出并重启    | 数字，默认 `1700`；设为 `0` 关闭                 |
 | `CODEBUDDY_ADMIN_PASSKEY_RP_ID`         | 管理员 Passkey 使用的 hostname         | `example.com`                                    |
 | `CODEBUDDY_AUTO_CHECKIN_ENABLED`        | 是否每天自动签到                       | `true` / `false`，默认 `false`                   |

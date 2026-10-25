@@ -1,8 +1,5 @@
-import {
-  getConcurrencyState,
-  getMaxConcurrentRequests,
-} from './concurrency-gate';
 import { getMaxRequestBodyBytes, getRequestTargetBytes } from './http';
+import { getActiveRequests } from './in-flight';
 import { logEvent } from './log';
 import {
   getMemoryLevel,
@@ -68,14 +65,14 @@ const waitForDrain = async (timeoutMs: number): Promise<boolean> => {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    if (getConcurrencyState().active <= 0) {
+    if (getActiveRequests() <= 0) {
       return true;
     }
 
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
 
-  return getConcurrencyState().active <= 0;
+  return getActiveRequests() <= 0;
 };
 
 /**
@@ -106,7 +103,7 @@ const maybeRecycle = async (): Promise<void> => {
         'Memory over the recycle threshold but uptime is too low to recycle',
       payload: {
         ...snapshot,
-        active: getConcurrencyState().active,
+        active: getActiveRequests(),
         minUptimeSeconds: Math.round(MEMORY_RECYCLE_MIN_UPTIME_MS / 1_000),
         thresholdMb,
       },
@@ -122,7 +119,7 @@ const maybeRecycle = async (): Promise<void> => {
     message: 'Recycling the process to avoid an OOM kill',
     payload: {
       ...snapshot,
-      active: getConcurrencyState().active,
+      active: getActiveRequests(),
       drainTimeoutMs: MEMORY_RECYCLE_DRAIN_TIMEOUT_MS,
       thresholdMb,
     },
@@ -137,7 +134,7 @@ const maybeRecycle = async (): Promise<void> => {
       : 'Drain timed out, forcing the restart with requests still active',
     payload: {
       ...getMemorySnapshot(),
-      active: getConcurrencyState().active,
+      active: getActiveRequests(),
       drained,
     },
   });
@@ -156,7 +153,7 @@ export const startMemoryWatchdog = (): void => {
   if (watchTimer) return;
 
   watchTimer = setInterval(() => {
-    logMemorySnapshot('interval', { active: getConcurrencyState().active });
+    logMemorySnapshot('interval', { active: getActiveRequests() });
     void maybeRecycle();
   }, MEMORY_WATCH_INTERVAL_MS);
   watchTimer.unref?.();
@@ -216,7 +213,6 @@ export const logRuntimeLimits = (): void => {
     payload: {
       ...snapshot,
       historyCompression: isHistoryCompressionEnabled(),
-      maxConcurrentRequests: getMaxConcurrentRequests(),
       maxRequestBodyBytes: getMaxRequestBodyBytes(),
       requestTargetBytes: getRequestTargetBytes(),
       memoryErrorRssMb: MEMORY_ERROR_RSS_MB,
