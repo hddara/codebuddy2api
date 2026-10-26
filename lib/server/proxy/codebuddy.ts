@@ -1431,7 +1431,6 @@ const fetchUpstreamWithRotation = async ({
         route,
         status: response.status,
         stream,
-        url: plan.url,
       });
 
       return { attempts, context, response };
@@ -1526,7 +1525,15 @@ const fetchUpstreamWithRotation = async ({
  */
 const MIN_MESSAGE_BUDGET_BYTES = 512 * 1024;
 
-const SLOW_UPSTREAM_HEADER_MS = 5_000;
+/**
+ * How long the wait for response headers may take before it is called slow.
+ *
+ * The upstream answers this model in about 6.5s at the median, so a 5s line put
+ * a third of every healthy hour into the log as a warning and buried the tail it
+ * was supposed to reveal. 15s sits above the p99 of the same distribution: what
+ * crosses it is a stall, not the normal queue.
+ */
+const SLOW_UPSTREAM_HEADER_MS = 15_000;
 
 const logUpstreamSuccess = ({
   credentialFilename,
@@ -1535,7 +1542,6 @@ const logUpstreamSuccess = ({
   route,
   status,
   stream,
-  url,
 }: {
   credentialFilename?: string | null;
   elapsedMs: number;
@@ -1543,20 +1549,23 @@ const logUpstreamSuccess = ({
   route: string;
   status: number;
   stream?: boolean;
-  url: string;
 }): void => {
+  // INFO, not DEBUG: the header wait is the latency a caller actually feels, and
+  // under a WARN-level deployment every request faster than the slow threshold
+  // was logged nowhere, so no percentile below it could be computed at all. The
+  // payload carries timings only: the body is never touched here, and the memory
+  // snapshot was per-request noise that the watchdog already reports every
+  // minute.
   void logEvent({
-    level: 'DEBUG',
+    level: 'INFO',
     message: 'Upstream request completed',
     payload: {
-      ...getMemorySnapshot(),
       credentialFilename: credentialFilename ?? null,
       elapsedMs,
       model: model ?? null,
       route,
       status,
       stream: typeof stream === 'boolean' ? stream : null,
-      url,
     },
   });
 
@@ -1572,7 +1581,6 @@ const logUpstreamSuccess = ({
         status,
         stream: typeof stream === 'boolean' ? stream : null,
         thresholdMs: SLOW_UPSTREAM_HEADER_MS,
-        url,
       },
     });
   }
