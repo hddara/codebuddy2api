@@ -245,6 +245,10 @@ const forbidsToolUse = (toolChoice: unknown): boolean => {
  *
  * Returns `undefined` when the definitions are still live, so the caller can
  * spread the result without a conditional.
+ *
+ * A body whose `tool_choice` is a function has exactly one reachable tool: the
+ * named one. A forced choice of `required` or `auto` constrains nothing, so
+ * everything stays.
  */
 export const pruneToolDefinitions = (
   tools: unknown[] | undefined,
@@ -254,7 +258,189 @@ export const pruneToolDefinitions = (
     return tools;
   }
 
-  return forbidsToolUse(toolChoice) ? undefined : tools;
+  if (forbidsToolUse(toolChoice)) {
+    return undefined;
+  }
+
+  const forced = readForcedToolName(toolChoice);
+
+  if (!forced) {
+    return tools;
+  }
+
+  const kept = tools.filter((tool) => readToolName(tool) === forced);
+
+  // A name that matches nothing is a caller bug, not a licence to strip the
+  // tool set: keep what was sent and let the upstream explain the mismatch.
+  return kept.length ? kept : tools;
+};
+
+/** `{ type: 'function', function: { name } }` in either nesting. */
+const readToolName = (tool: unknown): string | undefined => {
+  if (!tool || typeof tool !== 'object') {
+    return undefined;
+  }
+
+  const record = tool as { function?: unknown; name?: unknown };
+  const inner = record.function;
+
+  if (inner && typeof inner === 'object') {
+    const name = (inner as { name?: unknown }).name;
+
+    if (typeof name === 'string' && name) {
+      return name;
+    }
+  }
+
+  return typeof record.name === 'string' && record.name
+    ? record.name
+    : undefined;
+};
+
+/** The tool a `tool_choice` forces, when it forces exactly one. */
+const readForcedToolName = (toolChoice: unknown): string | undefined => {
+  if (!toolChoice || typeof toolChoice !== 'object') {
+    return undefined;
+  }
+
+  const record = toolChoice as {
+    function?: unknown;
+    name?: unknown;
+    type?: unknown;
+  };
+
+  if (record.type !== undefined && record.type !== 'function') {
+    return undefined;
+  }
+
+  const inner = record.function;
+
+  if (inner && typeof inner === 'object') {
+    const name = (inner as { name?: unknown }).name;
+
+    if (typeof name === 'string' && name) {
+      return name;
+    }
+  }
+
+  return typeof record.name === 'string' && record.name
+    ? record.name
+    : undefined;
+};
+
+/**
+ * Caps how much of the request `tools` may spend.
+ *
+ * Tool definitions are not history and no stage of `compressMessages` touches
+ * them, so a client that declares 140 tools pays for 140 schemas on every turn.
+ * Measured against production: 1.3 MB to 1.7 MB per request, which alone
+ * exceeds the 1 MiB dispatch target — the history can be compressed to nothing
+ * and the body still does not fit.
+ *
+ * Kept tools are the ones the conversation actually used, most recent first,
+ * because those are the ones the next step of the agent loop can call. A
+ * definition nothing referenced is dead weight to this request. When no
+ * reference exists the original order is preserved, since there is then no
+ * evidence to prefer any of them.
+ */
+export const capToolDefinitions = (
+  tools: unknown[] | undefined,
+  budgetBytes: number,
+  referencedNames: ReadonlySet<string>,
+): unknown[] | undefined => {
+  if (!Array.isArray(tools) || tools.length < 2) {
+    return tools;
+  }
+
+  const total = tools.reduce<number>(
+    (sum, tool) => sum + measureToolBytes(tool),
+    0,
+  );
+
+  if (total <= budgetBytes) {
+    return tools;
+  }
+
+  // Rank: referenced tools first, in the order the caller declared them, so a
+  // stable definition list does not churn between turns of the same session.
+  const ranked = tools
+    .map((tool, index) => ({
+      index,
+      name: readToolName(tool),
+      referenced: referencedNames.has(readToolName(tool) ?? ''),
+      size: measureToolBytes(tool),
+      tool,
+    }))
+    .sort((left, right) => {
+      if (left.referenced !== right.referenced) {
+        return left.referenced ? -1 : 1;
+      }
+
+      return left.index - right.index;
+    });
+
+  const kept: unknown[] = [];
+  let spent = 0;
+
+  for (const entry of ranked) {
+    // One definition alone over budget still goes in: an empty tool list would
+    // break the pairing with the tool calls already in the history.
+    if (kept.length && spent + entry.size > budgetBytes) {
+      continue;
+    }
+
+    kept.push(entry.tool);
+    spent += entry.size;
+  }
+
+  if (kept.length === tools.length) {
+    return tools;
+  }
+
+  kept.sort((left, right) => tools.indexOf(left) - tools.indexOf(right));
+
+  return kept;
+};
+
+/**
+ * Tool names the conversation has already called.
+ *
+ * These are the definitions worth keeping when the tool payload has to be cut:
+ * they are the workflow the session is in the middle of, and a tool the model
+ * has used before is the one it is most likely to use again.
+ */
+export const collectReferencedToolNames = (
+  messages: readonly CompressibleMessage[],
+): Set<string> => {
+  const names = new Set<string>();
+
+  for (const message of messages) {
+    const calls = message.tool_calls;
+
+    if (!Array.isArray(calls)) {
+      continue;
+    }
+
+    for (const call of calls) {
+      const name = readToolName(call);
+
+      if (name) {
+        names.add(name);
+      }
+    }
+  }
+
+  return names;
+};
+
+const measureToolBytes = (tool: unknown): number => {
+  try {
+    const encoded = JSON.stringify(tool);
+
+    return encoded === undefined ? 0 : byteSizeOf(encoded);
+  } catch {
+    return 0;
+  }
 };
 
 /**

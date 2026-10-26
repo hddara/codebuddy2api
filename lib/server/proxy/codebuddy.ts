@@ -11,6 +11,8 @@ import {
   isHistoryCompressionEnabled,
   measureImageBytes,
   measureMessagesBytes,
+  capToolDefinitions,
+  collectReferencedToolNames,
   pruneToolDefinitions,
 } from './history-compression';
 import {
@@ -2000,22 +2002,35 @@ const applySizeControls = (upstreamBody: ChatRequestBody): void => {
   try {
     const bytesBefore = measureBodyBytes(upstreamBody);
 
+    const definedTools = upstreamBody.tools?.length ?? 0;
     const prunedTools = pruneToolDefinitions(
       upstreamBody.tools,
       upstreamBody.tool_choice,
     );
 
-    if (prunedTools !== upstreamBody.tools) {
-      upstreamBody.tools = prunedTools;
+    // Tool definitions are charged to every turn and no stage of the history
+    // compressor touches them. Production run: 140 tools spent 1.3-1.7 MB of a
+    // 1 MiB target, so the body could not fit however small the history got.
+    const cappedTools = capToolDefinitions(
+      prunedTools,
+      Math.floor(targetBytes / 2),
+      collectReferencedToolNames(upstreamBody.messages ?? []),
+    );
+
+    if (cappedTools !== upstreamBody.tools) {
+      upstreamBody.tools = cappedTools;
 
       void logEvent({
         level: 'INFO',
-        message: 'Dropped unreachable tool definitions',
+        message: 'Dropped tool definitions the request cannot afford',
         payload: {
           bytesAfterPrune: measureBodyBytes(upstreamBody),
           bytesBeforePrune: bytesBefore,
           model,
           toolChoice: String(upstreamBody.tool_choice),
+          toolsAfter: cappedTools?.length ?? 0,
+          toolsBefore: definedTools,
+          toolBudgetBytes: Math.floor(targetBytes / 2),
         },
       });
     }

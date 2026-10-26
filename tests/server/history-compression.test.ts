@@ -1,4 +1,6 @@
 import {
+  capToolDefinitions,
+  collectReferencedToolNames,
   compressMessages,
   isHistoryCompressionEnabled,
   pruneToolDefinitions,
@@ -492,5 +494,112 @@ describe('compressMessages', () => {
     expect(result.bytesAfter).toBeLessThan(result.bytesBefore);
     expect(result.replacedCount).toBe(1);
     expect(result.messages.at(-1)).toEqual(message('user', 'latest'));
+  });
+});
+
+describe('capToolDefinitions', () => {
+  const tool = (name: string, padding: number) => ({
+    function: {
+      description: 'd'.repeat(padding),
+      name,
+      parameters: { properties: {}, type: 'object' },
+    },
+    type: 'function',
+  });
+
+  it('leaves a tool set that already fits alone', () => {
+    const tools = [tool('a', 10), tool('b', 10)];
+
+    expect(capToolDefinitions(tools, 1024 * 1024, new Set())).toBe(tools);
+  });
+
+  it('keeps the tools the conversation already called', () => {
+    // Production sent 140 definitions on every turn, 1.3-1.7 MB against a 1 MiB
+    // target: the history could be compressed to nothing and the body still did
+    // not fit. The definitions worth keeping are the ones in use.
+    const tools = [
+      tool('unused', 4000),
+      tool('used', 4000),
+      tool('other', 4000),
+    ];
+
+    const capped = capToolDefinitions(tools, 4200, new Set(['used']));
+
+    expect(capped).toHaveLength(1);
+    expect((capped?.[0] as { function: { name: string } }).function.name).toBe(
+      'used',
+    );
+  });
+
+  it('keeps the caller order so a definition list does not churn', () => {
+    const tools = [tool('a', 2000), tool('b', 2000), tool('c', 2000)];
+
+    const capped = capToolDefinitions(tools, 4400, new Set(['c', 'a']));
+
+    expect(
+      capped?.map(
+        (entry) => (entry as { function: { name: string } }).function.name,
+      ),
+    ).toEqual(['a', 'c']);
+  });
+
+  it('always keeps at least one definition', () => {
+    const tools = [tool('huge', 50_000), tool('small', 10)];
+
+    const capped = capToolDefinitions(tools, 100, new Set());
+
+    expect(capped).toHaveLength(1);
+  });
+});
+
+describe('collectReferencedToolNames', () => {
+  it('collects the names an assistant turn called', () => {
+    const names = collectReferencedToolNames([
+      {
+        role: 'assistant',
+        tool_calls: [
+          {
+            function: { arguments: '{}', name: 'read_file' },
+            type: 'function',
+          },
+          {
+            function: { arguments: '{}', name: 'write_file' },
+            type: 'function',
+          },
+        ],
+      },
+      message('user', 'hi'),
+    ]);
+
+    expect([...names].sort()).toEqual(['read_file', 'write_file']);
+  });
+});
+
+describe('pruneToolDefinitions with a forced choice', () => {
+  it('keeps only the tool a function tool_choice names', () => {
+    const tools = [
+      { function: { name: 'a' }, type: 'function' },
+      { function: { name: 'b' }, type: 'function' },
+    ];
+
+    const pruned = pruneToolDefinitions(tools, {
+      function: { name: 'b' },
+      type: 'function',
+    });
+
+    expect(pruned).toHaveLength(1);
+    expect((pruned?.[0] as { function: { name: string } }).function.name).toBe(
+      'b',
+    );
+  });
+
+  it('keeps everything when the choice constrains nothing', () => {
+    const tools = [
+      { function: { name: 'a' }, type: 'function' },
+      { function: { name: 'b' }, type: 'function' },
+    ];
+
+    expect(pruneToolDefinitions(tools, 'auto')).toBe(tools);
+    expect(pruneToolDefinitions(tools, 'required')).toBe(tools);
   });
 });
