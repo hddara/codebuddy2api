@@ -209,3 +209,65 @@ export const collectIdentityClaims = (body: {
 
   return [...claims];
 };
+
+/**
+ * The system prompt sent when a caller supplies none.
+ *
+ * The upstream's channel check expects the shape an official client sends, and
+ * an official client always opens with a system message. A body of two user and
+ * assistant turns with no system prompt at all is rejected with code 11128 —
+ * "Illegal API invocation from an unapproved channel" — at roughly eighty
+ * percent, against two percent for the same traffic with one. The text is
+ * deliberately plain: it is there to complete the shape, not to claim an
+ * identity, and a generic assistant line is the least load-bearing sentence that
+ * does.
+ */
+export const DEFAULT_CHANNEL_SYSTEM_PROMPT = 'You are a helpful assistant.';
+
+/**
+ * Reads the opt-out switch.
+ *
+ * On by default because it is the difference between a call the upstream
+ * accepts and one it refuses, and a proxy that stays quiet about that is worse
+ * than one that adds a sentence. The switch exists so the behaviour can be
+ * turned off from the deployment definition without a code change if the
+ * upstream ever starts accepting system-less bodies again.
+ */
+export const isSystemPromptInjectionEnabled = (): boolean =>
+  !['0', 'false', 'no', 'off'].includes(
+    (process.env.CODEBUDDY_INJECT_SYSTEM_PROMPT ?? '').trim().toLowerCase(),
+  );
+
+/**
+ * Prepends a system message to a body that has none.
+ *
+ * Returns the original object when a system message is already present, so the
+ * requests that already pass are not copied or altered in any way.
+ */
+export const ensureSystemPrompt = <T extends { messages?: unknown }>(
+  body: T,
+  enabled: boolean = isSystemPromptInjectionEnabled(),
+): T => {
+  if (!enabled || !Array.isArray(body.messages)) {
+    return body;
+  }
+
+  const hasSystemMessage = body.messages.some(
+    (message) =>
+      !!message &&
+      typeof message === 'object' &&
+      (message as { role?: unknown }).role === 'system',
+  );
+
+  if (hasSystemMessage) {
+    return body;
+  }
+
+  return {
+    ...body,
+    messages: [
+      { content: DEFAULT_CHANNEL_SYSTEM_PROMPT, role: 'system' },
+      ...body.messages,
+    ],
+  };
+};

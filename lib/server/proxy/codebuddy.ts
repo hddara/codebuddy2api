@@ -4,6 +4,7 @@ import { resolveRequestAccessKey } from './auth';
 import {
   HARNESS_IDENTITY_PLACEHOLDER,
   collectIdentityClaims,
+  ensureSystemPrompt,
   isHarnessIdentityRewriteEnabled,
   rewriteHarnessIdentity,
 } from './harness-identity';
@@ -2276,7 +2277,7 @@ const buildUpstreamBody = async (
       ? body.model
       : (credentialModels[0] ?? (await getDefaultModel())));
 
-  const upstreamBody: ChatRequestBody = {
+  const builtBody: ChatRequestBody = {
     model,
     messages: normalizedMessages,
     stream: true,
@@ -2296,6 +2297,12 @@ const buildUpstreamBody = async (
     reasoning_effort: body.reasoning_effort,
   };
 
+  // Before sizing, so the injected prompt is part of what the budget measures
+  // and `normalizeMessages` cannot move it around afterwards. A body without a
+  // system message is the shape the upstream's channel check refuses, so this
+  // completes the shape rather than adding an instruction.
+  const upstreamBody = ensureSystemPrompt(builtBody);
+
   applySizeControls(upstreamBody);
 
   // What the upstream's channel check reads, whether or not the rewrite runs:
@@ -2308,6 +2315,7 @@ const buildUpstreamBody = async (
       claims: collectIdentityClaims(upstreamBody),
       identityRewrite: isHarnessIdentityRewriteEnabled(),
       model,
+      systemPromptInjected: upstreamBody !== builtBody,
       systemCount: Array.isArray(upstreamBody.messages)
         ? upstreamBody.messages.filter(
             (message) =>

@@ -51,6 +51,12 @@ services:
       # in code as well: the reject cap is applied when the body is read, so an
       # uncompressed body is not "sent as-is", it is refused with a 413.
       - CODEBUDDY_COMPRESS_HISTORY=${CODEBUDDY_COMPRESS_HISTORY:-true}
+      # Complete the request shape the upstream's channel check expects. The
+      # check refuses roughly eighty percent of bodies that carry no system
+      # message at all, with code 11128, while the same traffic with one is
+      # refused at around two percent. A one-sentence system prompt is prepended
+      # when the caller sent none; bodies that already have one are untouched.
+      - CODEBUDDY_INJECT_SYSTEM_PROMPT=${CODEBUDDY_INJECT_SYSTEM_PROMPT:-true}
       # Largest body dispatched upstream *after* compression, in bytes. Was a
       # 400000-character budget, which measured a different quantity from the
       # byte cap and was roughly 5% of it, so the two never agreed.

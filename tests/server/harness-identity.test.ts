@@ -1,15 +1,19 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  DEFAULT_CHANNEL_SYSTEM_PROMPT,
   HARNESS_IDENTITY_PLACEHOLDER,
   collectIdentityClaims,
+  ensureSystemPrompt,
   hasBlockedHarnessIdentity,
   isHarnessIdentityRewriteEnabled,
+  isSystemPromptInjectionEnabled,
   rewriteHarnessIdentity,
 } from '@/lib/server/proxy/harness-identity';
 
 afterEach(() => {
   delete process.env.CODEBUDDY_REWRITE_HARNESS_IDENTITY;
+  delete process.env.CODEBUDDY_INJECT_SYSTEM_PROMPT;
 });
 
 describe('hasBlockedHarnessIdentity', () => {
@@ -159,5 +163,61 @@ describe('collectIdentityClaims', () => {
       }),
     ).toEqual([]);
     expect(collectIdentityClaims({})).toEqual([]);
+  });
+});
+
+describe('ensureSystemPrompt', () => {
+  it('prepends a system message when the body has none', () => {
+    const body = {
+      messages: [
+        { role: 'user', content: 'hello' },
+        { role: 'assistant', content: 'hi' },
+      ],
+    };
+
+    const shaped = ensureSystemPrompt(body, true);
+
+    expect(shaped.messages).toEqual([
+      { content: DEFAULT_CHANNEL_SYSTEM_PROMPT, role: 'system' },
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'hi' },
+    ]);
+    expect(body.messages).toHaveLength(2);
+  });
+
+  it('returns the same object when a system message is already present', () => {
+    const body = {
+      messages: [
+        { role: 'system', content: 'be terse' },
+        { role: 'user', content: 'hello' },
+      ],
+    };
+
+    expect(ensureSystemPrompt(body, true)).toBe(body);
+  });
+
+  it('leaves a body with no messages alone', () => {
+    const body = { model: 'gpt' } as { messages?: unknown };
+
+    expect(ensureSystemPrompt(body, true)).toBe(body);
+  });
+
+  it('does nothing when the behaviour is switched off', () => {
+    const body = { messages: [{ role: 'user', content: 'hello' }] };
+
+    expect(ensureSystemPrompt(body, false)).toBe(body);
+  });
+});
+
+describe('isSystemPromptInjectionEnabled', () => {
+  it('defaults to true', () => {
+    expect(isSystemPromptInjectionEnabled()).toBe(true);
+  });
+
+  it('can be switched off', () => {
+    for (const value of ['0', 'false', 'no', 'off', ' OFF ']) {
+      process.env.CODEBUDDY_INJECT_SYSTEM_PROMPT = value;
+      expect(isSystemPromptInjectionEnabled()).toBe(false);
+    }
   });
 });

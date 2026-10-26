@@ -3,6 +3,8 @@ import path from 'node:path';
 
 import { NextRequest } from 'next/server';
 
+import { DEFAULT_CHANNEL_SYSTEM_PROMPT } from '@/lib/server/proxy/harness-identity';
+
 import {
   createAccessKey,
   deleteAccessKey,
@@ -157,6 +159,37 @@ describe('server units', () => {
     cleanupTempState();
     delete process.env.CODEBUDDY_API_KEY;
     vi.useRealTimers();
+  });
+
+  it('adds a system prompt when the caller sent none', async () => {
+    process.env.CODEBUDDY_INJECT_SYSTEM_PROMPT = '1';
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        {
+          headers: { 'Content-Type': 'text/event-stream; charset=utf-8' },
+          status: 200,
+        },
+      ),
+    );
+
+    const response = await proxyChatCompletions(
+      makeNextRequest('http://localhost/v1/chat/completions', {
+        method: 'POST',
+      }),
+      { messages: [{ role: 'user', content: 'hello' }] },
+    );
+    expect(response.status).toBe(200);
+
+    const sent = JSON.parse(
+      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+    ) as { messages: unknown[] };
+    expect(sent.messages[0]).toEqual({
+      content: DEFAULT_CHANNEL_SYSTEM_PROMPT,
+      role: 'system',
+    });
+    expect(sent.messages[1]).toEqual({ role: 'user', content: 'hello' });
+    process.env.CODEBUDDY_INJECT_SYSTEM_PROMPT = '0';
   });
 
   it('masks sensitive debug headers and body fields', () => {
