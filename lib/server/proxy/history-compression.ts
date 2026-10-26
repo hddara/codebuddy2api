@@ -80,14 +80,20 @@ const TOOL_RESULT_TAIL_CHARS = 500;
 /**
  * Smallest win that justifies replacing a whole message with a stub.
  *
- * A stub only helps when the message it removes outweighs the stub left behind,
- * and the difference has to be worth the change in request shape. Production
- * spent the entire `system` prompt — identity, instructions, tool policy — to
- * reclaim 3,796 bytes out of a 1.2 MB request, which did not bring the call
- * under budget and did make it look like it came from an unofficial client.
- * Below this threshold the stub is noise, not relief.
+ * One byte: keep the stage while any saving at all is real. There used to be a
+ * 32 KiB floor here, and it disabled the stage completely — measured against
+ * production, a 6,354-message session compressed to 4 MB with
+ * `replacedCount: 2`, because stages 2 and 3 had already cut every tool result
+ * down to `TOOL_RESULT_HEAD_CHARS`, leaving each remaining group worth a few
+ * kilobytes. No group ever cleared the floor, so nothing was stubbed and the
+ * body stayed megabytes over budget.
+ *
+ * The floor was defended as "a stub that reclaims a few hundred bytes only buys
+ * a changed request shape" — true when the conversation is nearly in budget,
+ * and irrelevant when it is 20 MB. The stage already stops the moment the body
+ * fits, so it now takes whatever is on offer instead of refusing to shrink.
  */
-const MIN_STUB_RECLAIM_BYTES = 32 * 1024;
+const MIN_STUB_RECLAIM_BYTES = 1;
 
 /**
  * Roles whose content is instructions rather than conversation.
@@ -735,14 +741,13 @@ export const compressMessages = <T extends CompressibleMessage>(
   // as half of one: an `assistant` turn carrying `tool_calls` with its results
   // missing is a hard 400 from the upstream.
   //
-  // Two guards keep this stage from doing damage beyond its mandate. A group
-  // holding a `system` or `developer` message is skipped outright — those carry
-  // the caller identity and the standing instructions, and replacing one with a
-  // placeholder is what turned a size problem into `code: 11128` ("illegal API
-  // invocation from an unapproved channel"). And a group is only stubbed when
-  // the *net* saving clears `MIN_STUB_RECLAIM_BYTES`, because a stub that
-  // reclaims a few hundred bytes can never bring a multi-megabyte request under
-  // budget and only buys a changed request shape.
+  // A group holding a `system` or `developer` message is skipped outright:
+  // those carry the caller identity and the standing instructions, and
+  // replacing one with a placeholder is what turned a size problem into
+  // `code: 11128` ("illegal API invocation from an unapproved channel"). The
+  // identity, the instructions and the newest user turn are the three things
+  // this stage must never touch; everything else is fair game once the cheaper
+  // stages have run out.
   let replacedCount = 0;
   const stubbed = new Set<number>();
   // Snapshot taken after stages 1–3: undoing a stub must restore the message as

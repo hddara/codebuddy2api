@@ -1429,6 +1429,15 @@ const fetchUpstreamWithRotation = async ({
  * normal traffic quiet while making a slow period diagnosable without raising
  * the log level to DEBUG.
  */
+/**
+ * Lower bound on the conversation budget handed to `compressMessages`.
+ *
+ * Half the dispatch target. See the comment where it is used: without a floor,
+ * a body whose tool definitions alone exceed the target leaves a budget of zero
+ * and the history is never touched.
+ */
+const MIN_MESSAGE_BUDGET_BYTES = 512 * 1024;
+
 const SLOW_UPSTREAM_HEADER_MS = 5_000;
 
 const logUpstreamSuccess = ({
@@ -2024,7 +2033,21 @@ const applySizeControls = (upstreamBody: ChatRequestBody): void => {
       0,
       measureBodyBytes(upstreamBody) - messagesBytes,
     );
-    const budgetBytes = Math.max(0, targetBytes - overheadBytes);
+    // The conversation's own allowance. It is the target minus whatever the
+    // envelope already spends — but never zero: a session whose tool
+    // definitions alone exceed the target (131 tools against a 1 MiB target is
+    // 1.3 MB of definitions) would otherwise hand `compressMessages` a budget
+    // of nothing, and a budget of nothing is not "compress as hard as you can",
+    // it is "do not bother" once the pinned tail is bigger than zero.
+    //
+    // The floor is half the target. It does not guarantee the body fits — when
+    // the tools alone are over budget nothing in the history can fix that — but
+    // it keeps the history from being left untouched while the session is
+    // twenty megabytes of scrollback.
+    const budgetBytes = Math.max(
+      MIN_MESSAGE_BUDGET_BYTES,
+      targetBytes - overheadBytes,
+    );
 
     const compressed = compressMessages(upstreamBody.messages, {
       budgetBytes,

@@ -149,9 +149,12 @@ describe('compressMessages', () => {
     expect(result.messages[0]?.content).toBe('D'.repeat(60_000));
   });
 
-  it('leaves a turn alone when stubbing it would reclaim almost nothing', () => {
-    // The 32 KB floor exists because a stub that saves a few hundred bytes
-    // changes the request shape for no size benefit at all.
+  it('stubs a small turn rather than leaving the body over budget', () => {
+    // There used to be a 32 KiB floor on what a stub had to reclaim, and it
+    // disabled the stage outright in production: stages 2 and 3 already cut
+    // every tool result to two kilobytes, so no group ever cleared the floor and
+    // a 6,354-message session came out 4 MB wide with `replacedCount: 2`.
+    // Keeping the floor means keeping bodies over budget, so the floor is gone.
     const messages = [
       message('user', 'U'.repeat(4_000)),
       message('user', 'latest'),
@@ -159,8 +162,10 @@ describe('compressMessages', () => {
 
     const result = compressMessages(messages, { budgetBytes: 100 });
 
-    expect(result.replacedCount).toBe(0);
-    expect(result.unchanged).toBe(true);
+    expect(result.replacedCount).toBe(1);
+    expect(result.unchanged).toBe(false);
+    expect(result.bytesAfter).toBeLessThan(result.bytesBefore);
+    expect(result.messages.at(-1)).toEqual(messages.at(-1));
   });
 
   it('never removes the last user turn even when it alone exceeds the budget', () => {
@@ -434,5 +439,58 @@ describe('compressMessages', () => {
 
     expect(result.messages[0]?.content).toContain('omitted');
     expect(result.messages.at(-1)).toEqual(messages.at(-1));
+  });
+
+  it('stubs a long run of tool groups instead of stopping short', () => {
+    // The production shape: thousands of small tool groups. Every group is
+    // worth only a few kilobytes after elision, which the old 32 KiB floor
+    // refused — so the request stayed megabytes wide and the upstream answered
+    // `code: 11128`. Stubbing is the only stage left that can shrink it.
+    const messages = [message('system', 'instructions'), message('user', 'go')];
+
+    for (let index = 0; index < 400; index += 1) {
+      messages.push({
+        content: 'thinking',
+        role: 'assistant',
+        tool_calls: [
+          {
+            function: { arguments: '{"path":"a.ts"}', name: 'read_file' },
+            id: `call-${index}`,
+            type: 'function',
+          },
+        ],
+      });
+      messages.push({
+        content: 'x'.repeat(30_000),
+        role: 'tool',
+        tool_call_id: `call-${index}`,
+      });
+    }
+
+    messages.push(message('user', 'latest'));
+
+    const result = compressMessages(messages, { budgetBytes: 512 * 1024 });
+
+    expect(result.replacedCount).toBeGreaterThan(0);
+    expect(result.bytesAfter).toBeLessThan(512 * 1024);
+    expect(result.messages[0]).toEqual(message('system', 'instructions'));
+    expect(result.messages.at(-1)).toEqual(message('user', 'latest'));
+  });
+
+  it('shrinks a conversation even when the budget is zero', () => {
+    // `applySizeControls` used to compute the budget as `target - overhead` and
+    // clamp it at zero. With 131 tool definitions the overhead exceeds the whole
+    // target, so the budget was zero and the history was never touched. A zero
+    // budget means "nothing fits", not "do not try".
+    const messages = [
+      message('user', 'E'.repeat(20_000)),
+      message('user', 'latest'),
+    ];
+
+    const result = compressMessages(messages, { budgetBytes: 0 });
+
+    expect(result.bytesAfter).toBeLessThan(result.bytesBefore);
+    expect(result.replacedCount).toBe(1);
+    expect(result.messages.at(-1)).toEqual(message('user', 'latest'));
   });
 });
