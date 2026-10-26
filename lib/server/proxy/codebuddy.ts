@@ -110,6 +110,20 @@ const TOOL_LEAK_SCAN_CHARS = 20_000;
  * eligible credentials; this constant only guards against an unbounded loop.
  */
 const MAX_UPSTREAM_ATTEMPTS = 16;
+
+/**
+ * How many times a request may be re-sent after the socket closed before the
+ * upstream answered at all.
+ *
+ * Not a throttle: no request is ever refused or delayed to make room. This only
+ * covers the case where nothing reached the model, so a repeat cannot double an
+ * answer — it turns one transient socket close into a served request instead of
+ * a 500 the caller has to retry by hand.
+ */
+const MAX_CONNECTION_RETRIES = 2;
+
+/** Backoff unit; the wait grows linearly with each connection retry. */
+const CONNECTION_RETRY_DELAY_MS = 400;
 const CODEBUDDY_CLI_VERSION = '2.137.1';
 const CODEBUDDY_USER_AGENT = `CLI/${CODEBUDDY_CLI_VERSION} CodeBuddy/${CODEBUDDY_CLI_VERSION}`;
 
@@ -1013,6 +1027,39 @@ const getUpstreamResponseTimeoutMs = (): number => {
 const isUpstreamTimeout = (error: unknown): boolean =>
   error instanceof Error && error.name === 'AbortError';
 
+/**
+ * True when the upstream closed the connection before sending a response.
+ *
+ * Node surfaces this as a `TypeError` from `fetch` with a `code` on the cause,
+ * and the message text is the only thing stable across the bundled runtimes, so
+ * both are checked.
+ */
+const isConnectionReset = (error: unknown): boolean => {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const code = (error as { code?: unknown }).code;
+
+  if (typeof code === 'string' && code === 'ECONNRESET') {
+    return true;
+  }
+
+  const cause = (error as { cause?: { code?: unknown } }).cause;
+
+  if (
+    cause &&
+    typeof cause === 'object' &&
+    (cause as { code?: unknown }).code === 'ECONNRESET'
+  ) {
+    return true;
+  }
+
+  return /ECONNRESET|socket connection was closed|other side closed/i.test(
+    error.message,
+  );
+};
+
 const buildUpstreamTimeoutResponse = (
   timeoutMs: number,
   attempts = 1,
@@ -1219,6 +1266,7 @@ const fetchUpstreamWithRotation = async ({
   let context = initialContext;
   let attempts = 0;
   let channelRetries = 0;
+  let connectionRetries = 0;
 
   for (;;) {
     attempts += 1;
@@ -1266,8 +1314,45 @@ const fetchUpstreamWithRotation = async ({
       );
     } catch (error) {
       if (!isUpstreamTimeout(error)) {
-        // Connection errors keep their historical behaviour: surface them as an
-        // unexpected upstream failure instead of silently rotating away.
+        // A connection that closed before any response header arrived is worth
+        // one more send: the upstream never started generating, so a retry
+        // cannot duplicate work, and the alternative is handing the caller a 500
+        // for a socket that lived for three milliseconds. Observed three times
+        // in a day on requests that sit right at the dispatch target with a
+        // multi-megabyte image, which is the shape a load balancer sheds first.
+        if (
+          isConnectionReset(error) &&
+          connectionRetries < MAX_CONNECTION_RETRIES &&
+          attempts < maxAttempts
+        ) {
+          connectionRetries += 1;
+
+          void logEvent({
+            level: 'WARN',
+            message: 'Retrying after the upstream connection reset',
+            payload: {
+              attempt: attempts,
+              connectionRetries,
+              credentialFilename: context.credentialFilename,
+              error: error instanceof Error ? error.message : error,
+              model,
+              payloadBytes,
+              route,
+              stream,
+              url: plan.url,
+            },
+          });
+
+          await new Promise((resolve) =>
+            setTimeout(resolve, CONNECTION_RETRY_DELAY_MS * connectionRetries),
+          );
+
+          continue;
+        }
+
+        // Connection errors keep their historical behaviour after the retries
+        // are spent: surface them as an unexpected upstream failure instead of
+        // silently rotating away.
         throw error;
       }
 
@@ -2209,7 +2294,7 @@ const buildUpstreamBody = async (
   // the identity-shaped sentences in the system prompt. Snippets only, so the
   // log says which spelling was sent without storing the prompt itself.
   void logEvent({
-    level: 'DEBUG',
+    level: 'INFO',
     message: 'Sampled identity claims in the system prompt',
     payload: {
       claims: collectIdentityClaims(upstreamBody),
