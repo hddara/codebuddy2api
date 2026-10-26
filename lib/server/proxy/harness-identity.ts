@@ -139,3 +139,73 @@ export const isHarnessIdentityRewriteEnabled = (): boolean =>
   ['1', 'true', 'yes', 'on'].includes(
     (process.env.CODEBUDDY_REWRITE_HARNESS_IDENTITY ?? '').trim().toLowerCase(),
   );
+
+/**
+ * Phrases that look like an identity statement rather than instructions.
+ *
+ * The upstream refuses a request whose `system` text names a rival harness, and
+ * the only way to learn which spelling it objects to is to look at what callers
+ * actually send. Matching on a shape — "a product name, followed by a role" —
+ * finds those sentences without storing the prompt.
+ */
+const IDENTITY_CLAIM_PATTERN =
+  /(?:you are|i am|powered by|built on|built with|running on|made by|created by|developed by|produced by|a product of)\s+[A-Z][\w.'-]*(?:\s+[A-Z][\w.'-]*){0,3}/gi;
+
+/** Longest snippet worth keeping; an identity sentence is short. */
+const MAX_IDENTITY_SNIPPET_CHARS = 120;
+
+/**
+ * Every identity-shaped claim in a body's `system` messages, deduplicated.
+ *
+ * Returns snippets only, never the prompt itself, so the caller can log what the
+ * upstream is likely reading without persisting a user's source code.
+ */
+export const collectIdentityClaims = (body: {
+  messages?: unknown;
+}): string[] => {
+  if (!Array.isArray(body.messages)) {
+    return [];
+  }
+
+  const claims = new Set<string>();
+
+  for (const message of body.messages) {
+    if (
+      !message ||
+      typeof message !== 'object' ||
+      (message as { role?: unknown }).role !== 'system'
+    ) {
+      continue;
+    }
+
+    const content = (message as { content?: unknown }).content;
+    const texts: string[] = [];
+
+    if (typeof content === 'string') {
+      texts.push(content);
+    } else if (Array.isArray(content)) {
+      for (const part of content) {
+        if (
+          part &&
+          typeof part === 'object' &&
+          (part as { type?: unknown }).type === 'text' &&
+          typeof (part as { text?: unknown }).text === 'string'
+        ) {
+          texts.push((part as { text: string }).text);
+        }
+      }
+    }
+
+    for (const text of texts) {
+      for (const match of text.matchAll(IDENTITY_CLAIM_PATTERN)) {
+        claims.add(match[0].slice(0, MAX_IDENTITY_SNIPPET_CHARS));
+
+        if (claims.size >= 40) {
+          return [...claims];
+        }
+      }
+    }
+  }
+
+  return [...claims];
+};

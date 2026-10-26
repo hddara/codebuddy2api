@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { resolveRequestAccessKey } from './auth';
 import {
   HARNESS_IDENTITY_PLACEHOLDER,
+  collectIdentityClaims,
   isHarnessIdentityRewriteEnabled,
   rewriteHarnessIdentity,
 } from './harness-identity';
@@ -2203,6 +2204,25 @@ const buildUpstreamBody = async (
   };
 
   applySizeControls(upstreamBody);
+
+  // What the upstream's channel check reads, whether or not the rewrite runs:
+  // the identity-shaped sentences in the system prompt. Snippets only, so the
+  // log says which spelling was sent without storing the prompt itself.
+  void logEvent({
+    level: 'DEBUG',
+    message: 'Sampled identity claims in the system prompt',
+    payload: {
+      claims: collectIdentityClaims(upstreamBody),
+      identityRewrite: isHarnessIdentityRewriteEnabled(),
+      model,
+      systemCount: Array.isArray(upstreamBody.messages)
+        ? upstreamBody.messages.filter(
+            (message) =>
+              (message as { role?: unknown } | null)?.role === 'system',
+          ).length
+        : 0,
+    },
+  });
 
   if (!isHarnessIdentityRewriteEnabled()) {
     return upstreamBody;

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   HARNESS_IDENTITY_PLACEHOLDER,
+  collectIdentityClaims,
   hasBlockedHarnessIdentity,
   isHarnessIdentityRewriteEnabled,
   rewriteHarnessIdentity,
@@ -111,5 +112,52 @@ describe('isHarnessIdentityRewriteEnabled', () => {
     process.env.CODEBUDDY_REWRITE_HARNESS_IDENTITY = 'false';
 
     expect(isHarnessIdentityRewriteEnabled()).toBe(false);
+  });
+});
+
+describe('collectIdentityClaims', () => {
+  it('finds an identity sentence and ignores ordinary instructions', () => {
+    const claims = collectIdentityClaims({
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are DeepSeek Harness, a coding agent. Follow the repository rules.',
+        },
+        { role: 'user', content: 'Please explain the build script.' },
+      ],
+    });
+
+    expect(claims).toContain('You are DeepSeek Harness');
+    expect(claims.join('|')).not.toContain('repository rules');
+    expect(claims.join('|')).not.toContain('build script');
+  });
+
+  it('reads text parts as well as plain content', () => {
+    const claims = collectIdentityClaims({
+      messages: [
+        {
+          role: 'system',
+          content: [
+            {
+              text: 'You are CodeBuddy. This service is running on Vercel.',
+              type: 'text',
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(claims.join('|')).toContain('You are CodeBuddy');
+    expect(claims.join('|')).toContain('running on Vercel');
+  });
+
+  it('returns nothing when there is no system message', () => {
+    expect(
+      collectIdentityClaims({
+        messages: [{ role: 'user', content: 'You are a' }],
+      }),
+    ).toEqual([]);
+    expect(collectIdentityClaims({})).toEqual([]);
   });
 });
