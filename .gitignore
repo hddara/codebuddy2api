@@ -63,3 +63,7 @@ HDdaraAi/**/dcloud-android/
 
 # 会话级工作记忆：按日期滚动的临时记录，正式结论已归档进 .brv/context-tree
 .workbuddy/
+
+# Local package-manager cache and ad-hoc capture output.
+.pnpm-store/
+.tmp-capture/

@@ -22,3 +22,7 @@ HDdaraAi
 # next scheduled regeneration.
 openwiki
 .github/workflows/openwiki-update.yml
+
+# Local package-manager cache (content-addressed; formatting it would corrupt it).
+.pnpm-store
+.tmp-capture
