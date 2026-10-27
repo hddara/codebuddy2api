@@ -11,7 +11,7 @@
 
 ## 发版约定（release.yml）
 
-- ⚠️ **实际发版路径（2026-10-13 起）已改为手动 date-tag，不再等 release.yml**：GitHub Actions 自 2026-10-13T10:32 之后**没有任何新 run**（`/actions/runs` 最新仍是该次），自动链路目前是停的。现在用 **`scripts/release.sh`**：算 tag `YYYYMMDD.TNN` → buildx 构建 `linux/amd64` 推 ACR → 改三个清单（`deploy/swarm-stack.yml`、`docker-compose.yml`、`k8s/codebuddy2api.yaml`）→ 提交推送 → 打印服务器 `docker stack deploy` 命令。约定写在 `AGENTS.md` 的 `## Release` 段，**不要再问用户怎么发版**。
+- ⚠️ **实际发版路径（2026-10-13 起）已改为手动 date-tag，不再等 release.yml**：GitHub Actions 自 2026-10-13T10:32 之后**没有任何新 run**（`/actions/runs` 最新仍是该次），自动链路目前是停的。现在用 **`scripts/release.sh`**：算 tag `YYYYMMDD.TNN` → buildx 构建 `linux/amd64` 推 ACR → 改三个清单（`deploy/swarm-stack.yml`、`docker-compose.yml`、`k8s/codebuddy2api.yaml`）→ 提交推送 → 部署。**部署用 `node scripts/deploy-swarm.mjs <tag>`**（`scripts/release.sh --deploy` 一条龙）：它读 gitignored 的 `.mcp.json` 里 `mcpServers["docker-swarm"]`（HTTP MCP，可 `list_services`/`update_service{confirm:true}`，本机走 JSON-RPC POST 即可），轮询到 `updateState=completed`；`--check <tag>` 只校验。约 60s 生效。**服务才是线上 tag 的真相**：2026-10-27 部署前服务跑 `20261026.T06` 而清单写 `20261023.T01`。回滚 = 部署上一个 tag。约定写在 `AGENTS.md` 的 `## Release` 段，**不要再问用户怎么发版**。
   - 手动 buildx 必须带 `--provenance=false --sbom=false`（ACR 拒 attestation）；本机 sandbox 下还需 `BUILDX_CONFIG=$PWD/.tmp-buildx`。
   - **推了镜像 ≠ 已发版**：线上 Swarm 只有在服务器上跑 `docker stack deploy` 才会换 tag；本机不是 swarm manager、`~/.ssh` 被拦，这一步只能由用户/服务器完成。
 - 以下为原 CI 语义化版本通道（保留备查）：

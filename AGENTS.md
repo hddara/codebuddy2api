@@ -37,10 +37,16 @@ or the deploy steps, and do not ask the maintainer how releasing works.
 - `--provenance=false --sbom=false` is mandatory: ACR refuses the attestation
   manifest buildx attaches by default, and the push fails with an unknown
   manifest class error naming `application/vnd.oci.empty.v1+json`.
-- A published image is not a release. The Swarm service only moves when
-  `docker stack deploy -c deploy/swarm-stack.yml codebuddy2api` runs on the swarm
-  manager, which is reachable only from the server; say "image published, server
-  still on the old tag" instead of reporting the release as done.
+- Deploying is `node scripts/deploy-swarm.mjs <tag>`. It talks to the project's
+  Docker Swarm MCP endpoint declared in the gitignored `.mcp.json`
+  (`mcpServers["docker-swarm"]`) and polls `updateState` until the task runs the
+  new tag. There is no ssh access from this machine, so the MCP is the only path
+  to the swarm manager — do not report a release as done until
+  `scripts/deploy-swarm.mjs --check <tag>` prints the new image.
+- `scripts/release.sh --deploy` runs the whole loop: build, push, bump the
+  manifests, commit, deploy, verify.
+- The deployed tag and the tag in `deploy/swarm-stack.yml` drift easily; the
+  service is the source of truth, read it with `scripts/deploy-swarm.mjs --check`.
 - Rollback is the previous tag in the same manifests plus a redeploy.
 
 ## Verification Before PR

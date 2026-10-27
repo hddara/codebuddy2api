@@ -19,6 +19,7 @@ MANIFESTS=(
 
 TAG=''
 COMMIT=1
+DEPLOY=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -28,6 +29,10 @@ while [ $# -gt 0 ]; do
       ;;
     --no-commit)
       COMMIT=0
+      shift
+      ;;
+    --deploy)
+      DEPLOY=1
       shift
       ;;
     *)
@@ -86,20 +91,23 @@ if [ "$COMMIT" = '1' ]; then
   git push origin HEAD
 fi
 
-cat <<EOF
+echo "==> image published: $IMAGE:$TAG"
 
-==> image published: $IMAGE:$TAG
+if [ "$DEPLOY" = '1' ]; then
+  echo "==> deploying"
+  node scripts/deploy-swarm.mjs "$TAG"
+else
+  cat <<EOF
 
-The Swarm service still runs the previous tag until the server is updated.
-Run this where the swarm manager lives (docker stack deploy has no env_file
-support, so every variable has to be exported in that shell first):
+The Swarm service still runs the previous tag. Deploy it with:
 
-  cd <server repo path> && git pull
-  export CODEBUDDY_STORAGE_BACKEND=pg DATABASE_URL='...' \\
-         CODEBUDDY_STORAGE_ENCRYPTION_KEY='...' CODEBUDDY_PASSWORD='...' \\
-         CODEBUDDY_GATEWAY_AUTH=password
-  docker stack deploy -c deploy/swarm-stack.yml codebuddy2api
-  docker service ps codebuddy2api_app
+  node scripts/deploy-swarm.mjs $TAG
 
-Rollback: set the manifests back to the previous tag and redeploy.
+(That drives the docker-swarm MCP in .mcp.json; this machine has no ssh path to
+the swarm manager. The manual alternative, on the server itself, is
+\`git pull && docker stack deploy -c deploy/swarm-stack.yml codebuddy2api\`
+after exporting every variable by hand, because stack deploy has no env_file.)
+
+Rollback: deploy the previous tag again, e.g. \`node scripts/deploy-swarm.mjs <previous>\`.
 EOF
+fi
