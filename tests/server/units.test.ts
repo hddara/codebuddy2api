@@ -1361,18 +1361,33 @@ describe('server units', () => {
     const upstreamHeaders = (fetchMock.mock.calls[2]?.[1] as RequestInit)
       .headers as Headers;
     expect(upstreamHeaders.get('X-Conversation-ID')).toBe('conv-1');
-    expect(upstreamHeaders.get('X-Originator')).toBe('codex');
-    expect(upstreamHeaders.get('X-Session-ID')).toBe('session-1');
+    expect(upstreamHeaders.get('X-Originator')).toBeNull();
+    expect(upstreamHeaders.get('X-Session-ID')).toBeNull();
+    expect(upstreamHeaders.get('X-Agent-Purpose')).toBe('conversation');
+    expect(upstreamHeaders.get('X-Agent-Runtime')).toBe('other');
+    expect(upstreamHeaders.get('X-Agent-Type')).toBe('main');
+    expect(upstreamHeaders.get('X-CodeBuddy-Request')).toBe('1');
+    expect(upstreamHeaders.get('X-Private-Data')).toBe('false');
+    expect(upstreamHeaders.get('X-Root-Request-Id')).toBe(
+      upstreamHeaders.get('X-Conversation-Request-ID'),
+    );
+    expect(upstreamHeaders.get('X-Domain')).toBe('www.codebuddy.cn');
+    expect(upstreamHeaders.get('x-stainless-package-version')).toBe('6.25.0');
+    expect(upstreamHeaders.get('baggage')).toBe(
+      `codebuddy.session_id=${upstreamHeaders.get('X-Conversation-ID')},codebuddy.conversation_request_id=${upstreamHeaders.get('X-Conversation-Request-ID')}`,
+    );
     expect(upstreamHeaders.get('traceparent')).toBe(
       '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01',
     );
     expect(upstreamHeaders.get('tracestate')).toBe('vendor=value');
     expect(upstreamHeaders.get('Authorization')).toBe('Bearer token-a');
     expect(upstreamHeaders.get('User-Agent')).toBe(
-      'CLI/2.137.1 CodeBuddy/2.137.1',
+      'CLI/2.176.0 CodeBuddy/2.176.0',
     );
-    expect(upstreamHeaders.get('X-IDE-Version')).toBe('2.137.1');
-    expect(upstreamHeaders.get('X-Product-Version')).toBe('2.137.1');
+    expect(upstreamHeaders.get('X-IDE-Version')).toBe('2.176.0');
+    expect(upstreamHeaders.get('X-Product-Version')).toBeNull();
+    expect(upstreamHeaders.get('X-Client-Platform')).toBeNull();
+    expect(upstreamHeaders.get('Origin')).toBeNull();
     expect(
       JSON.parse(String((fetchMock.mock.calls[2]?.[1] as RequestInit).body))
         .max_tokens,
@@ -1478,10 +1493,10 @@ describe('server units', () => {
       (fetchMock.mock.calls[0]?.[1] as RequestInit).headers,
     );
     expect(upstreamHeaders.get('User-Agent')).toBe(
-      'CLI/2.137.1 CodeBuddy/2.137.1',
+      'CLI/2.176.0 CodeBuddy/2.176.0',
     );
     expect(upstreamHeaders.get('X-IDE-Name')).toBe('CLI');
-    expect(upstreamHeaders.get('X-IDE-Version')).toBe('2.137.1');
+    expect(upstreamHeaders.get('X-IDE-Version')).toBe('2.176.0');
     expect(
       JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body)),
     ).toMatchObject({

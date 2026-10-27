@@ -125,20 +125,35 @@ const MAX_CONNECTION_RETRIES = 2;
 
 /** Backoff unit; the wait grows linearly with each connection retry. */
 const CONNECTION_RETRY_DELAY_MS = 400;
-const CODEBUDDY_CLI_VERSION = '2.137.1';
+/**
+ * Version the client claims, copied from the official CLI this gateway speaks as.
+ *
+ * Read off `codebuddy --version` and off the `x-ide-version` / `user-agent` pair
+ * of a real captured `/v2/chat/completions` call, so the identity matches a build
+ * the upstream actually ships rather than an arbitrary one.
+ */
+const CODEBUDDY_CLI_VERSION = '2.176.0';
 const CODEBUDDY_USER_AGENT = `CLI/${CODEBUDDY_CLI_VERSION} CodeBuddy/${CODEBUDDY_CLI_VERSION}`;
 
 /**
- * What the client claims to be running on, next to the CLI identity above.
+ * Release of the HTTP SDK that rides in `x-stainless-package-version`.
  *
- * Configurable because it is the one field in the identity set whose correct
- * value is guesswork: the plugin sends no equivalent header, so `cli` is an
- * inference from the rest of the set rather than something observed on the
- * wire. A wrong guess is then one environment variable away from being undone
- * without a rebuild.
+ * Not the CLI version, and not derived from anything at runtime: the official
+ * request carries the SDK's own release number, because that header describes the
+ * client library rather than the application built on it. Reusing the CLI version
+ * here made every request look like a hand-rolled imitation of the SDK.
  */
-const CODEBUDDY_CLIENT_PLATFORM =
-  (process.env.CODEBUDDY_CLIENT_PLATFORM ?? '').trim() || 'cli';
+const CODEBUDDY_SDK_VERSION = '6.25.0';
+
+/**
+ * Site domain the official client announces in `x-domain`.
+ *
+ * The captured value is `www.codebuddy.cn` even though the request goes to
+ * `copilot.tencent.com`: the header names the product site the account signed in
+ * through, not the API host. Credentials recorded against the global site keep
+ * their own domain, so this only fills the gap when a credential carries none.
+ */
+const CODEBUDDY_DEFAULT_SITE_DOMAIN = 'www.codebuddy.cn';
 
 export interface ChatRequestBody {
   model?: string;
@@ -1929,6 +1944,71 @@ const getCredentialValue = (
   return null;
 };
 
+/**
+ * Spells the runtime platform the way the SDK does in `x-stainless-os`.
+ *
+ * `process.platform` yields `darwin`, which no official request ever contains;
+ * the SDK normalises to `MacOS`, `Linux` or `Windows` before it sets the header.
+ */
+const getStainlessOs = (): string => {
+  switch (process.platform) {
+    case 'darwin':
+      return 'MacOS';
+    case 'win32':
+      return 'Windows';
+    default:
+      return 'Linux';
+  }
+};
+
+/**
+ * Trace context the official client attaches to every completion call.
+ *
+ * Two propagation formats are sent at once — W3C (`traceparent`, `baggage`) and
+ * B3 — because the captured request carries both. A trace id supplied by the
+ * caller is reused so the gateway's own spans and the upstream's stay attached to
+ * one trace instead of two unrelated ones.
+ */
+const buildTraceHeaders = ({
+  conversationId,
+  conversationRequestId,
+  incoming,
+}: {
+  conversationId: string;
+  conversationRequestId: string;
+  incoming: Record<string, string>;
+}): Record<string, string> => {
+  const traceId =
+    incoming.traceparent?.split('-')[1] ??
+    incoming['x-b3-traceid'] ??
+    incoming['x-trace-id'] ??
+    crypto.randomUUID().replaceAll('-', '');
+  const parentSpanId =
+    incoming.traceparent?.split('-')[2] ??
+    incoming['x-b3-spanid'] ??
+    crypto.randomUUID().replaceAll('-', '').slice(0, 16);
+  const spanId = crypto.randomUUID().replaceAll('-', '').slice(0, 16);
+
+  const headers: Record<string, string> = {
+    baggage: `codebuddy.session_id=${conversationId},codebuddy.conversation_request_id=${conversationRequestId}`,
+    b3: `${traceId}-${spanId}-1-${parentSpanId}`,
+    'x-b3-parentspanid': parentSpanId,
+    'x-b3-sampled': '1',
+    'x-b3-spanid': spanId,
+    'x-b3-traceid': traceId,
+    'x-trace-id': traceId,
+  };
+
+  // A caller that already opened a trace keeps its own `traceparent` verbatim;
+  // replacing it here would detach the gateway's span from the trace the caller
+  // is watching.
+  if (!incoming.traceparent) {
+    headers.traceparent = `00-${traceId}-${spanId}-01`;
+  }
+
+  return headers;
+};
+
 const buildUpstreamHeaders = async (
   request: NextRequest,
   auth: ResolvedAuth,
@@ -1945,38 +2025,58 @@ const buildUpstreamHeaders = async (
     incoming['x-conversation-message-id'] ??
     crypto.randomUUID().replaceAll('-', '');
   const headers = new Headers(incoming);
+
+  // Session bookkeeping is ours, not the upstream's: the official client carries
+  // the session id in `baggage` and never sends these two as plain headers.
+  headers.delete('x-session-id');
+  headers.delete('x-originator');
+
   headers.set('Accept', 'application/json');
+  // The SDK compresses the body itself and tells the server not to bother with a
+  // response encoding in return; matching it keeps the transport shape identical.
+  headers.set('Accept-Encoding', 'identity');
   headers.set('Authorization', `Bearer ${auth.bearerToken}`);
   headers.set('Content-Type', 'application/json');
   headers.set('Host', baseUrl.host);
   headers.set('User-Agent', CODEBUDDY_USER_AGENT);
   headers.set('X-Agent-Intent', 'craft');
+  // The three agent headers describe which loop is calling: an interactive
+  // conversation, run by the CLI's current runtime, as the main agent rather than
+  // a subagent. They are present on every captured call and are exactly the sort
+  // of field a check for "was this sent by an official client" would look for.
+  headers.set('X-Agent-Purpose', 'conversation');
+  headers.set('X-Agent-Runtime', 'other');
+  headers.set('X-Agent-Type', 'main');
+  headers.set('X-CodeBuddy-Request', '1');
   headers.set('X-Conversation-ID', conversationId);
   headers.set('X-Conversation-Message-ID', conversationMessageId);
   headers.set('X-Conversation-Request-ID', conversationRequestId);
   headers.set('X-IDE-Name', 'CLI');
   headers.set('X-IDE-Type', 'CLI');
   headers.set('X-IDE-Version', CODEBUDDY_CLI_VERSION);
-  // `cli`, not `web`: the identity above claims a CLI client, and a header set
-  // that says "the CLI, running on the web platform" is the one shape the
-  // upstream's channel check has any reason to treat as inconsistent. The IDE
-  // plugin sends no such header at all; the CLI is the only client that would,
-  // and it would say `cli`.
-  headers.set('X-Client-Platform', CODEBUDDY_CLIENT_PLATFORM);
+  headers.set('X-Private-Data', 'false');
   headers.set('X-Product', 'SaaS');
-  headers.set('X-Product-Version', CODEBUDDY_CLI_VERSION);
   headers.set('X-Request-ID', requestId);
   headers.set('X-Requested-With', 'XMLHttpRequest');
+  headers.set('X-Root-Request-Id', conversationRequestId);
   headers.set('X-User-Id', auth.userId);
   headers.set('x-stainless-arch', process.arch);
   headers.set('x-stainless-lang', 'js');
-  headers.set('x-stainless-os', process.platform);
-  headers.set('x-stainless-package-version', CODEBUDDY_CLI_VERSION);
+  headers.set('x-stainless-os', getStainlessOs());
+  headers.set('x-stainless-package-version', CODEBUDDY_SDK_VERSION);
   headers.set('x-stainless-retry-count', '0');
   headers.set('x-stainless-runtime', 'node');
   headers.set('x-stainless-runtime-version', process.version);
 
-  const domain = getCredentialValue(auth.credentialData, ['domain']);
+  for (const [name, value] of Object.entries(
+    buildTraceHeaders({ conversationId, conversationRequestId, incoming }),
+  )) {
+    headers.set(name, value);
+  }
+
+  const domain = String(
+    getCredentialValue(auth.credentialData, ['domain']) ?? '',
+  ).toLowerCase();
   const enterpriseId = getCredentialValue(auth.credentialData, [
     'enterprise_id',
     'enterpriseId',
@@ -1985,9 +2085,13 @@ const buildUpstreamHeaders = async (
     getCredentialValue(auth.credentialData, ['tenant_id', 'tenantId']) ??
     enterpriseId;
 
-  if (domain) {
-    headers.set('X-Domain', String(domain));
-  }
+  // A credential that recorded the API host as its domain would announce the
+  // wrong site; only a real product domain is worth forwarding.
+  const siteDomain =
+    domain && domain !== baseUrl.host && !domain.endsWith('tencent.com')
+      ? domain
+      : CODEBUDDY_DEFAULT_SITE_DOMAIN;
+  headers.set('X-Domain', siteDomain);
 
   if (enterpriseId) {
     headers.set('X-Enterprise-Id', String(enterpriseId));
@@ -1996,14 +2100,6 @@ const buildUpstreamHeaders = async (
   if (tenantId) {
     headers.set('X-Tenant-Id', String(tenantId));
   }
-
-  const origin = String(domain ?? '')
-    .toLowerCase()
-    .endsWith('workbuddy.ai')
-    ? 'https://www.workbuddy.ai'
-    : 'https://www.codebuddy.cn';
-  headers.set('Origin', origin);
-  headers.set('Referer', `${origin}/`);
 
   return headers;
 };
@@ -2021,19 +2117,25 @@ const describeChannelHeaders = (
   const record = new Headers(headers);
   const names = [
     'user-agent',
+    'x-agent-intent',
+    'x-agent-purpose',
+    'x-agent-runtime',
+    'x-agent-type',
+    'x-codebuddy-request',
+    'x-conversation-request-id',
+    'x-domain',
     'x-ide-name',
     'x-ide-type',
     'x-ide-version',
-    'x-client-platform',
+    'x-private-data',
     'x-product',
-    'x-product-version',
-    'x-agent-intent',
-    'origin',
-    'referer',
     'x-requested-with',
+    'x-root-request-id',
+    'x-stainless-arch',
     'x-stainless-lang',
-    'x-stainless-runtime',
+    'x-stainless-os',
     'x-stainless-package-version',
+    'x-stainless-runtime',
   ];
 
   return Object.fromEntries(

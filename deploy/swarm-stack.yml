@@ -64,10 +64,6 @@ services:
       # the caller, who only sees a 400 that looks like bad input. Set to 0 to
       # forward the prompt verbatim.
       - CODEBUDDY_REWRITE_HARNESS_IDENTITY=${CODEBUDDY_REWRITE_HARNESS_IDENTITY:-true}
-      # Platform claimed next to the CLI identity. The upstream's check compares
-      # the identity set for internal consistency; `cli` matches the CLI client
-      # the headers already claim, where the old hard-coded `web` contradicted it.
-      - CODEBUDDY_CLIENT_PLATFORM=${CODEBUDDY_CLIENT_PLATFORM:-cli}
       # Largest body dispatched upstream *after* compression, in bytes. Was a
       # 400000-character budget, which measured a different quantity from the
       # byte cap and was roughly 5% of it, so the two never agreed.
