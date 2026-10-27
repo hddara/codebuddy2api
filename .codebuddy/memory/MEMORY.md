@@ -11,6 +11,11 @@
 
 ## 发版约定（release.yml）
 
+- ⚠️ **实际发版路径（2026-10-13 起）已改为手动 date-tag，不再等 release.yml**：GitHub Actions 自 2026-10-13T10:32 之后**没有任何新 run**（`/actions/runs` 最新仍是该次），自动链路目前是停的。现在用 **`scripts/release.sh`**：算 tag `YYYYMMDD.TNN` → buildx 构建 `linux/amd64` 推 ACR → 改三个清单（`deploy/swarm-stack.yml`、`docker-compose.yml`、`k8s/codebuddy2api.yaml`）→ 提交推送 → 打印服务器 `docker stack deploy` 命令。约定写在 `AGENTS.md` 的 `## Release` 段，**不要再问用户怎么发版**。
+  - 手动 buildx 必须带 `--provenance=false --sbom=false`（ACR 拒 attestation）；本机 sandbox 下还需 `BUILDX_CONFIG=$PWD/.tmp-buildx`。
+  - **推了镜像 ≠ 已发版**：线上 Swarm 只有在服务器上跑 `docker stack deploy` 才会换 tag；本机不是 swarm manager、`~/.ssh` 被拦，这一步只能由用户/服务器完成。
+- 以下为原 CI 语义化版本通道（保留备查）：
+
 - 语义化版本（`1.2.x`），由 `.github/workflows/release.yml` 自动发布：合并回 `main` 的发版 PR 触发。
 - 该 PR 必须满足三个条件才会被 `detect-release` 命中：`base=main`、标题以 `chore: prepare release v` 开头、head 分支以 `release/v` 开头。
 - 一次发版产出：git tag `vX.Y.Z`、GitHub Release、ghcr 镜像 `X.Y.Z` + `X.Y.Z-{amd64,arm64}` + `latest`（多架构 manifest）。
@@ -41,6 +46,8 @@
 - `ci-main` / `ci-pr` 失败于 Codecov 上传（fork 未配 `CODECOV_TOKEN` 且 `fail_ci_if_error: true`）。`release.yml` 不涉 Codecov，发版不受影响。
 
 ## 进行中 / 待办
+
+- **服务器待执行部署（2026-10-27）**：镜像 `hucx/codebuddy2api:20261027.T01` 已推 ACR、三个清单已指向它，但线上服务仍是 `20261023.T01`，需在服务器 `docker stack deploy -c deploy/swarm-stack.yml codebuddy2api`。详见 [2026-10-27](2026-10-27.md)。
 
 - **Peekaboo 兼容（分支 `fix/sse-strict-compat`，已部署验证）**：`--type openai` 走 `/v1/chat/completions` 报 `finish reason 'other'`，**字段清洗（`cb11cfd`，`sanitizeStreamDelta` + `CODEBUDDY_SSE_STRICT_COMPAT` 开关）部署后实测仍未解决**，且用本地代理试 5 种改写变体全部失败 → 疑为 Tachikoma SDK 的 OpenAI 流式 `finish_reason` 映射缺陷，与网关输出无关。**可用方案：改用 Anthropic 协议**——`peekaboo config provider add <id> --type anthropic --base-url https://code.apimesh.cn`，实测 `success: True`、任务完整执行。详见 [2026-10-13](2026-10-13.md) 与项目根目录 `HANDOFF-sse-strict-compat.md`。
 - **凭证限流识别与自动换号（未实施）**：方案见 brv `projects/codebuddy2api/plans/2026-09-29-rate-limit-detection.md`。现状是「候选只过滤 token 过期、上游 429 只透传、亲和把会话钉死」；4 项待拍板 + 3 项待取证（真实限流报文、限流窗口粒度、是否全体同时受限）。

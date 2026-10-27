@@ -26,3 +26,5 @@ openwiki
 # Local package-manager cache (content-addressed; formatting it would corrupt it).
 .pnpm-store
 .tmp-capture
+.tmp-buildx
+.dsh

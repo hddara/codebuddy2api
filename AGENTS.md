@@ -25,6 +25,24 @@
 - Run `bun run test:coverage` and confirm the reported coverage stays at or above 90%.
 - Run `bun run build`.
 
+## Release
+
+Publishing is `scripts/release.sh`. Do not reinvent the tag, the build command,
+or the deploy steps, and do not ask the maintainer how releasing works.
+
+- Image: `registry.cn-hangzhou.aliyuncs.com/hucx/codebuddy2api`, tag scheme `YYYYMMDD.TNN`.
+- `scripts/release.sh` builds `linux/amd64`, pushes to ACR, rewrites the tag in all
+  three deployment manifests (`deploy/swarm-stack.yml`, `deploy/docker-compose.yml`,
+  `deploy/k8s/codebuddy2api.yaml`), commits, and prints the server command.
+- `--provenance=false --sbom=false` is mandatory: ACR refuses the attestation
+  manifest buildx attaches by default, and the push fails with an unknown
+  manifest class error naming `application/vnd.oci.empty.v1+json`.
+- A published image is not a release. The Swarm service only moves when
+  `docker stack deploy -c deploy/swarm-stack.yml codebuddy2api` runs on the swarm
+  manager, which is reachable only from the server; say "image published, server
+  still on the old tag" instead of reporting the release as done.
+- Rollback is the previous tag in the same manifests plus a redeploy.
+
 ## Verification Before PR
 
 - Run `bun run test:ci` to generate `coverage/lcov.info` and `test-report.junit.xml`.
@@ -41,3 +59,20 @@ This version has breaking changes — APIs, conventions, and file structure may 
 This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
 
 <!-- END:nextjs-agent-rules -->
+
+<!-- OPENWIKI:START -->
+
+## OpenWiki
+
+This repository has a generated `openwiki/` evidence index. It is optional just-in-time context, not required startup reading.
+
+- Do not enumerate, preload, or search wikis at task start. Use retrieval when the user asks for it, when unfamiliar architecture or dependency behavior materially affects the task, or when source inspection leaves an important uncertainty. Stop once the question is grounded.
+- When those conditions apply and OpenWiki retrieval tools are available, use `openwiki_search` for just-in-time context and `openwiki_read` for the relevant complete sections. If search returns `workspace_required`, ask which listed workspace to use and retry with its ID.
+- Use `openwiki_list_workspaces` or `openwiki_list_wikis` when workspace membership itself needs to be discovered.
+- If the retrieval tools are unavailable, read `openwiki/quickstart.md` and follow its links to the relevant pages.
+- Treat source code and tests as authoritative. A brief's unknowns and review items are verification gaps, not automatic requirements.
+- Prefer the narrowest quiet validation that proves the changed behavior. Preserve complete failure output.
+
+The scheduled OpenWiki GitHub Actions workflow refreshes the repository wiki. Do not hand-edit generated OpenWiki pages unless explicitly asked; prefer updating source code/docs and letting OpenWiki regenerate.
+
+<!-- OPENWIKI:END -->

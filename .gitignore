@@ -67,3 +67,5 @@ HDdaraAi/**/dcloud-android/
 # Local package-manager cache and ad-hoc capture output.
 .pnpm-store/
 .tmp-capture/
+.tmp-buildx/
+.dsh/
