@@ -104,18 +104,18 @@ describe('rewriteHarnessIdentity', () => {
 });
 
 describe('isHarnessIdentityRewriteEnabled', () => {
-  it('is off unless the flag is set to a truthy value', () => {
-    expect(isHarnessIdentityRewriteEnabled()).toBe(false);
+  it('is on by default and only a falsy value turns it off', () => {
+    expect(isHarnessIdentityRewriteEnabled()).toBe(true);
 
-    for (const value of ['true', '1', 'YES', ' on ']) {
+    for (const value of ['false', '0', 'NO', ' off ']) {
       process.env.CODEBUDDY_REWRITE_HARNESS_IDENTITY = value;
 
-      expect(isHarnessIdentityRewriteEnabled()).toBe(true);
+      expect(isHarnessIdentityRewriteEnabled()).toBe(false);
     }
 
-    process.env.CODEBUDDY_REWRITE_HARNESS_IDENTITY = 'false';
+    process.env.CODEBUDDY_REWRITE_HARNESS_IDENTITY = 'true';
 
-    expect(isHarnessIdentityRewriteEnabled()).toBe(false);
+    expect(isHarnessIdentityRewriteEnabled()).toBe(true);
   });
 });
 

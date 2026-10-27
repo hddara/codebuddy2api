@@ -112,6 +112,30 @@ describe('upstream channel rejection (code 11128)', () => {
     expect(bearerOf(fetchMock, 0)).not.toBe(bearerOf(fetchMock, 1));
   });
 
+  it('retries the same credential when the pool holds no other account', async () => {
+    // A single-account deployment has nothing to rotate to. The refusal is a
+    // property of the draw, not of the credential, so re-sending on the same
+    // account is the only retry available and it must not be skipped.
+    await addCredential(
+      { bearer_token: 'token-a', user_id: 'a@example.com' },
+      'a',
+    );
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(rejectionResponse())
+      .mockResolvedValueOnce(okResponse());
+
+    const response = await proxyChatCompletions(makeNextRequest(), body);
+
+    expect(response.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(bearerOf(fetchMock, 0)).toBe(bearerOf(fetchMock, 1));
+    expect(console.warn).toHaveBeenCalledWith(
+      '[CodeBuddy2API][WARN] Retrying the same credential after a channel rejection',
+      expect.objectContaining({ channelRetries: 1 }),
+    );
+  });
+
   it('does not mark the credential as rate limited', async () => {
     // A channel rejection says nothing about quota, so the account must stay
     // available to the very next request.

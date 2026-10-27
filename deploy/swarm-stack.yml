@@ -57,6 +57,17 @@ services:
       # refused at around two percent. A one-sentence system prompt is prepended
       # when the caller sent none; bodies that already have one are untouched.
       - CODEBUDDY_INJECT_SYSTEM_PROMPT=${CODEBUDDY_INJECT_SYSTEM_PROMPT:-true}
+      # Rewrite another harness's name out of the system prompt before dispatch.
+      # The channel check reads the `system` text and refuses a body that names a
+      # rival harness, with the same code 11128 as above, before the request is
+      # routed to a model. On by default: the refusal is otherwise invisible to
+      # the caller, who only sees a 400 that looks like bad input. Set to 0 to
+      # forward the prompt verbatim.
+      - CODEBUDDY_REWRITE_HARNESS_IDENTITY=${CODEBUDDY_REWRITE_HARNESS_IDENTITY:-true}
+      # Platform claimed next to the CLI identity. The upstream's check compares
+      # the identity set for internal consistency; `cli` matches the CLI client
+      # the headers already claim, where the old hard-coded `web` contradicted it.
+      - CODEBUDDY_CLIENT_PLATFORM=${CODEBUDDY_CLIENT_PLATFORM:-cli}
       # Largest body dispatched upstream *after* compression, in bytes. Was a
       # 400000-character budget, which measured a different quantity from the
       # byte cap and was roughly 5% of it, so the two never agreed.

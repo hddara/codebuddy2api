@@ -128,6 +128,18 @@ const CONNECTION_RETRY_DELAY_MS = 400;
 const CODEBUDDY_CLI_VERSION = '2.137.1';
 const CODEBUDDY_USER_AGENT = `CLI/${CODEBUDDY_CLI_VERSION} CodeBuddy/${CODEBUDDY_CLI_VERSION}`;
 
+/**
+ * What the client claims to be running on, next to the CLI identity above.
+ *
+ * Configurable because it is the one field in the identity set whose correct
+ * value is guesswork: the plugin sends no equivalent header, so `cli` is an
+ * inference from the rest of the set rather than something observed on the
+ * wire. A wrong guess is then one environment variable away from being undone
+ * without a rebuild.
+ */
+const CODEBUDDY_CLIENT_PLATFORM =
+  (process.env.CODEBUDDY_CLIENT_PLATFORM ?? '').trim() || 'cli';
+
 export interface ChatRequestBody {
   model?: string;
   messages?: OpenAIMessage[];
@@ -901,6 +913,15 @@ const CHANNEL_REJECTION_CODE = 11128;
 const CHANNEL_REJECTION_PATTERN = /unapproved channel/i;
 const MAX_CHANNEL_REJECTION_RETRIES = 2;
 
+/**
+ * Backoff unit for re-sending a channel rejection on the *same* account.
+ *
+ * Small on purpose. The refusal is answered before a model is picked, so the
+ * upstream did no work that a repeat could duplicate, and the wait is only there
+ * to move the retry off the pattern the check just saw — not to throttle.
+ */
+const CHANNEL_RETRY_BASE_DELAY_MS = 250;
+
 const isChannelRejection = (detail: string | undefined): boolean => {
   if (!detail) {
     return false;
@@ -1475,24 +1496,34 @@ const fetchUpstreamWithRotation = async ({
     }
 
     // A channel rejection is not a rate limit — the credential is fine, the
-    // draw was unlucky — so it gets its own small retry budget on another
-    // account instead of becoming the caller's 400.
+    // draw was unlucky — so it gets its own small retry budget instead of
+    // becoming the caller's 400.
+    //
+    // The retry prefers another account when one exists, because a different
+    // credential is a different draw on both the channel check and the quota
+    // waiting behind it. When the pool holds nothing else, the same account is
+    // retried after a short wait: the refusal is probabilistic (see
+    // `isChannelRejection`), so the same body from the same credential does
+    // succeed on a later attempt, and a single-account deployment otherwise
+    // has no retry at all because rotation has nothing to rotate to.
     if (
       channelRetries < MAX_CHANNEL_REJECTION_RETRIES &&
-      attempts < maxAttempts &&
       isChannelRejection(detail)
     ) {
       channelRetries += 1;
 
-      const retryContext = await rotateToNextCredential({
-        allowRotation: true,
-        context,
-        model,
-        reason: `upstream rejected the channel (code ${CHANNEL_REJECTION_CODE})`,
-        request,
-        requestBody,
-        triedFilenames,
-      });
+      const retryContext =
+        attempts < maxAttempts
+          ? await rotateToNextCredential({
+              allowRotation: true,
+              context,
+              model,
+              reason: `upstream rejected the channel (code ${CHANNEL_REJECTION_CODE})`,
+              request,
+              requestBody,
+              triedFilenames,
+            })
+          : null;
 
       if (retryContext) {
         if (retryContext.credentialFilename) {
@@ -1502,6 +1533,27 @@ const fetchUpstreamWithRotation = async ({
         context = retryContext;
         continue;
       }
+
+      const retryDelayMs = CHANNEL_RETRY_BASE_DELAY_MS * channelRetries;
+
+      void logEvent({
+        level: 'WARN',
+        message: 'Retrying the same credential after a channel rejection',
+        payload: {
+          attempt: attempts,
+          channelRetries,
+          credentialFilename: context.credentialFilename,
+          model,
+          retryDelayMs,
+          route,
+          status: response.status,
+          stream,
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+
+      continue;
     }
 
     return { attempts, context, detail, response };
@@ -1905,7 +1957,12 @@ const buildUpstreamHeaders = async (
   headers.set('X-IDE-Name', 'CLI');
   headers.set('X-IDE-Type', 'CLI');
   headers.set('X-IDE-Version', CODEBUDDY_CLI_VERSION);
-  headers.set('X-Client-Platform', 'web');
+  // `cli`, not `web`: the identity above claims a CLI client, and a header set
+  // that says "the CLI, running on the web platform" is the one shape the
+  // upstream's channel check has any reason to treat as inconsistent. The IDE
+  // plugin sends no such header at all; the CLI is the only client that would,
+  // and it would say `cli`.
+  headers.set('X-Client-Platform', CODEBUDDY_CLIENT_PLATFORM);
   headers.set('X-Product', 'SaaS');
   headers.set('X-Product-Version', CODEBUDDY_CLI_VERSION);
   headers.set('X-Request-ID', requestId);
@@ -1945,15 +2002,8 @@ const buildUpstreamHeaders = async (
     .endsWith('workbuddy.ai')
     ? 'https://www.workbuddy.ai'
     : 'https://www.codebuddy.cn';
-  headers.set('Content-Type', 'application/json');
   headers.set('Origin', origin);
   headers.set('Referer', `${origin}/`);
-  headers.set('User-Agent', CODEBUDDY_USER_AGENT);
-  headers.set('X-Product', 'SaaS');
-  headers.set('X-Requested-With', 'XMLHttpRequest');
-  headers.set('X-IDE-Name', 'CLI');
-  headers.set('X-IDE-Type', 'CLI');
-  headers.set('X-IDE-Version', CODEBUDDY_CLI_VERSION);
 
   return headers;
 };

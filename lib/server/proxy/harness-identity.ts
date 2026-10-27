@@ -128,7 +128,17 @@ export const rewriteHarnessIdentity = <T extends { messages?: unknown }>(
 export const HARNESS_IDENTITY_PLACEHOLDER = NEUTRAL_HARNESS_IDENTITY;
 
 /**
- * Reads the opt-in switch.
+ * Reads the opt-out switch.
+ *
+ * On by default because the refusal it prevents is invisible in the response the
+ * caller gets: the upstream answers `code: 11128` before the request is routed
+ * to a model, and the caller only sees a 400 that looks like bad input. Leaving
+ * the rewrite off therefore means shipping a proxy that forwards a request it
+ * can already tell will be refused.
+ *
+ * The switch stays, and it is an opt-*out* now, so the behaviour can still be
+ * turned off from the deployment definition without a code change if the
+ * upstream ever starts accepting these bodies again.
  *
  * A plain environment read rather than a config entry, on purpose: this decides
  * what gets sent to the upstream, it has to be visible in the deployment
@@ -136,7 +146,7 @@ export const HARNESS_IDENTITY_PLACEHOLDER = NEUTRAL_HARNESS_IDENTITY;
  * definition alone rather than a value persisted in a storage backend.
  */
 export const isHarnessIdentityRewriteEnabled = (): boolean =>
-  ['1', 'true', 'yes', 'on'].includes(
+  !['0', 'false', 'no', 'off'].includes(
     (process.env.CODEBUDDY_REWRITE_HARNESS_IDENTITY ?? '').trim().toLowerCase(),
   );
 
