@@ -1,3 +1,6 @@
+import { gzip } from 'node:zlib';
+import { promisify } from 'node:util';
+
 import type { NextRequest } from 'next/server';
 
 import { resolveRequestAccessKey } from './auth';
@@ -132,8 +135,28 @@ const CONNECTION_RETRY_DELAY_MS = 400;
  * of a real captured `/v2/chat/completions` call, so the identity matches a build
  * the upstream actually ships rather than an arbitrary one.
  */
-const CODEBUDDY_CLI_VERSION = '2.176.0';
+const CODEBUDDY_CLI_VERSION = '2.177.1';
 const CODEBUDDY_USER_AGENT = `CLI/${CODEBUDDY_CLI_VERSION} CodeBuddy/${CODEBUDDY_CLI_VERSION}`;
+
+/**
+ * Bodies above this size are sent gzipped, as the official client does.
+ *
+ * Small bodies are left alone: a request that is a few hundred bytes does not
+ * gain from compression, and `content-encoding: gzip` on something the size of a
+ * single message is itself an unusual shape.
+ */
+const UPSTREAM_COMPRESSION_MIN_BYTES = 1_024;
+
+/**
+ * Whether request bodies are gzipped on the way out. Off only when explicitly
+ * disabled, matching how the other client-shaped behaviours are switched.
+ */
+const isUpstreamBodyCompressionEnabled = (): boolean =>
+  !['0', 'false', 'no', 'off'].includes(
+    (process.env.CODEBUDDY_COMPRESS_UPSTREAM_BODY ?? '').trim().toLowerCase(),
+  );
+
+const gzipAsync = promisify(gzip);
 
 /**
  * Release of the HTTP SDK that rides in `x-stainless-package-version`.
@@ -158,8 +181,9 @@ const CODEBUDDY_DEFAULT_SITE_DOMAIN = 'www.codebuddy.cn';
 /**
  * The `extra_vars` value the official client attaches to every completion call.
  *
- * Captured from a real request:
- * `{"harnessMetadata":"{\"schemaVersion\":1,\"harnessVersion\":\"2.176.0\",\"stepIndex\":0,\"agent\":{\"depth\":0}}","initiator":"user"}`.
+ * Captured from a real request (2.176.0):
+ * `{"harnessMetadata":"{\"schemaVersion\":1,\"harnessVersion\":\"2.176.0\",\"stepIndex\":0,\"agent\":{\"depth\":0}}","initiator":"user"}`;
+ * 2.177.1 adds a `contextWindowId`, which is minted here the same way.
  * The harness names itself in the body here, not only in a header, and the
  * upstream's own refusal says the call was "not sent from an official client".
  * A body without this field is therefore the shape a hand-written client has,
@@ -168,6 +192,7 @@ const CODEBUDDY_DEFAULT_SITE_DOMAIN = 'www.codebuddy.cn';
 const buildHarnessExtraVars = (): Record<string, unknown> => ({
   harnessMetadata: JSON.stringify({
     agent: { depth: 0 },
+    contextWindowId: uuidV7(),
     harnessVersion: CODEBUDDY_CLI_VERSION,
     schemaVersion: 1,
     stepIndex: 0,
@@ -195,6 +220,9 @@ export interface ChatRequestBody {
   parallel_tool_calls?: boolean;
   thinking?: Record<string, unknown>;
   reasoning_effort?: string;
+  verbosity?: string;
+  cache_retention?: string;
+  reasoning_summary?: string;
   extra_vars?: Record<string, unknown>;
 }
 
@@ -1350,6 +1378,17 @@ const fetchUpstreamWithRotation = async ({
     // "the body is under the limit but the socket disagrees" confusion that
     // cost a day of debugging CJK traffic.
     const payloadBytes = Buffer.byteLength(payloadText, 'utf8');
+    // The official client compresses everything it sends, so an uncompressed
+    // body of tens of kilobytes was itself a difference worth removing.
+    const compressed =
+      isUpstreamBodyCompressionEnabled() &&
+      payloadBytes >= UPSTREAM_COMPRESSION_MIN_BYTES
+        ? await gzipAsync(payloadText)
+        : null;
+    const requestHeaders = new Headers(plan.headers);
+    if (compressed) {
+      requestHeaders.set('content-encoding', 'gzip');
+    }
 
     void logEvent({
       level: 'DEBUG',
@@ -1362,6 +1401,7 @@ const fetchUpstreamWithRotation = async ({
         // The one measurement taken after every size stage has run, so this is
         // the number that can be compared against the cap that would refuse it.
         payloadBytes,
+        wireBytes: compressed?.byteLength ?? payloadBytes,
         route,
         stream,
         targetBytes: getEffectiveTargetBytes(),
@@ -1374,9 +1414,9 @@ const fetchUpstreamWithRotation = async ({
       response = enqueueUpstreamResponseSnapshot(
         debugTrace,
         await fetch(plan.url, {
-          body: payloadText,
+          body: compressed ?? payloadText,
           cache: 'no-store',
-          headers: plan.headers,
+          headers: requestHeaders,
           method: 'POST',
           signal: controller.signal,
         }),
@@ -2609,12 +2649,21 @@ const buildUpstreamBody = async (
     frequency_penalty: body.frequency_penalty,
     presence_penalty: body.presence_penalty,
     stop: body.stop,
-    stream_options: body.stream_options,
+    // The official client always asks for usage in the stream, and a body that
+    // omits it is another difference a channel check can count.
+    stream_options: body.stream_options ?? { include_usage: true },
     tools: body.tools,
     tool_choice: body.tool_choice,
     parallel_tool_calls: body.parallel_tool_calls,
     thinking: body.thinking,
     reasoning_effort: body.reasoning_effort,
+    verbosity: body.verbosity,
+    // Present on every captured official call. Neither changes what the model
+    // answers — one is server-side cache policy, the other how reasoning is
+    // summarised — so filling them in costs nothing and removes two more fields
+    // by which a bare hand-written client stands out.
+    cache_retention: body.cache_retention ?? 'long',
+    reasoning_summary: body.reasoning_summary ?? 'auto',
     extra_vars: body.extra_vars ?? buildHarnessExtraVars(),
   };
 

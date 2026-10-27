@@ -6,6 +6,7 @@ import { NextRequest } from 'next/server';
 import { handleMessagesRequest } from '@/lib/server/proxy/anthropic';
 import { createAccessKey } from '@/lib/server/domain/access-keys';
 import { addCredential } from '@/lib/server/domain/credentials';
+import { readUpstreamBody } from './upstream-body';
 
 const repoRoot = process.cwd();
 const tempRootDir = path.join(repoRoot, '.tmp-test-config-anthropic-root');
@@ -135,7 +136,7 @@ describe('anthropic messages api', () => {
       type: 'message',
     });
     expect(
-      JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body)),
+      JSON.parse(readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit)),
     ).toMatchObject({
       input: [
         {
@@ -306,7 +307,7 @@ describe('anthropic messages api', () => {
     expect(usage.cache_creation_input_tokens).toBe(2);
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as Record<string, unknown>;
 
     expect(upstreamBody.messages).toEqual([
@@ -344,7 +345,7 @@ describe('anthropic messages api', () => {
     expect(response.status).toBe(200);
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { messages: Array<Record<string, unknown>> };
 
     // The hint is dropped, and because it was the last turn the placeholder
@@ -383,7 +384,7 @@ describe('anthropic messages api', () => {
     expect(response.status).toBe(200);
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { messages: Array<Record<string, unknown>> };
 
     expect(upstreamBody.messages).toEqual([
@@ -414,7 +415,7 @@ describe('anthropic messages api', () => {
     expect(response.status).toBe(200);
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { messages: Array<Record<string, unknown>> };
 
     // Only a numeric "N tokens left" payload is a hint; a prompt quoting the
@@ -452,7 +453,7 @@ describe('anthropic messages api', () => {
     expect(response.status).toBe(200);
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as Record<string, unknown>;
 
     expect(upstreamBody.messages).toEqual([
@@ -494,7 +495,7 @@ describe('anthropic messages api', () => {
     expect(response.status).toBe(200);
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { messages: Array<{ content: unknown; role: string }> };
 
     expect(upstreamBody.messages[0]).toEqual({
@@ -533,7 +534,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { messages: Array<{ content: unknown; role: string }> };
 
     expect(upstreamBody.messages[0]).toEqual({
@@ -577,7 +578,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { messages: Array<{ content: unknown; role: string }> };
 
     expect(upstreamBody.messages[0]).toEqual({
@@ -748,7 +749,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as {
       messages: Array<{
         role: string;
@@ -806,7 +807,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { tools: Array<Record<string, unknown>> };
 
     expect(upstreamBody.tools).toHaveLength(1);
@@ -845,7 +846,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { tool_choice: Record<string, unknown> };
 
     expect(upstreamBody.tool_choice).toEqual({
@@ -1068,7 +1069,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { messages: Array<{ role: string; content: string }> };
 
     expect(upstreamBody.messages[0].role).toBe('system');
@@ -1095,7 +1096,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { tool_choice: unknown };
 
     expect(upstreamBody.tool_choice).toBe('auto');
@@ -1254,7 +1255,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { tool_choice: unknown };
 
     expect(upstreamBody.tool_choice).toBe('required');
@@ -1278,7 +1279,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { stop: unknown };
 
     expect(upstreamBody.stop).toEqual(['END', 'STOP']);
@@ -1302,7 +1303,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { tool_choice: unknown };
 
     expect(upstreamBody.tool_choice).toBe('none');
@@ -1461,7 +1462,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { messages: Array<{ role: string; content: string }> };
 
     const userMsg = upstreamBody.messages.find((m) => m.role === 'user');
@@ -1493,7 +1494,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { messages: Array<{ role: string; content: string }> };
 
     const userMsg = upstreamBody.messages.find((m) => m.role === 'user');
@@ -1527,7 +1528,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { messages: Array<{ role: string; content: string | null }> };
 
     const contents = upstreamBody.messages.map((m) => m.content);
@@ -1584,7 +1585,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { messages: Array<{ role: string; content: string }> };
 
     const contents = upstreamBody.messages.map((m) => m.content);
@@ -1662,7 +1663,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { messages: Array<{ role: string; content: string }> };
 
     expect(upstreamBody.messages[0].role).toBe('system');
@@ -1689,7 +1690,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { messages: Array<{ role: string; content: string }> };
 
     const userMessages = upstreamBody.messages.filter((m) => m.role === 'user');
@@ -1714,7 +1715,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { thinking: Record<string, unknown> };
 
     expect(upstreamBody.thinking).toEqual({
@@ -1741,7 +1742,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { tool_choice: unknown };
 
     expect(upstreamBody.tool_choice).toBe('auto');
@@ -1886,7 +1887,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as {
       messages: Array<{
         role: string;
@@ -1960,7 +1961,7 @@ describe('anthropic messages api', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as {
       messages: Array<{
         role: string;

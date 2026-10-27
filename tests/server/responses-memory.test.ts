@@ -105,6 +105,7 @@ import {
   handleResponsesRequest,
   resetResponseSessions,
 } from '@/lib/server/proxy/responses';
+import { readUpstreamBody } from './upstream-body';
 
 const repoRoot = process.cwd();
 const tempRootDir = path.join(repoRoot, '.tmp-test-responses-memory');
@@ -320,7 +321,7 @@ describe('Responses memory bounds', () => {
     });
     expect(response.status).toBe(200);
     const requestBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { messages: Array<{ role: string }> };
     expect(requestBody.messages[0]?.role).toBe('user');
   });
@@ -364,8 +365,8 @@ describe('Responses memory bounds', () => {
 
     // The turn carrying the image still sends it upstream verbatim: the model
     // was asked about the screenshot, so it has to receive it.
-    const upstreamBody = String(
-      (fetchMock.mock.calls[0]?.[1] as RequestInit).body,
+    const upstreamBody = readUpstreamBody(
+      fetchMock.mock.calls[0]?.[1] as RequestInit,
     );
     expect(upstreamBody).toContain('data:image/png;base64,AAAA');
 

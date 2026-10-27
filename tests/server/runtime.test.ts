@@ -36,6 +36,7 @@ import { resetResponseSessions } from '@/lib/server/proxy/responses';
 import { resetUsageStats } from '@/lib/server/domain/stats';
 import { recordUsageEvent } from '@/lib/server/domain/usage';
 import { resetStorageRuntime } from '@/lib/server/storage';
+import { readUpstreamBody } from './upstream-body';
 
 const repoRoot = process.cwd();
 const tempRootDir = path.join(repoRoot, '.tmp-test-runtime-root');
@@ -699,11 +700,11 @@ describe('server runtime', () => {
         .messages[1].tool_calls,
     ).toBeUndefined();
     expect(
-      JSON.parse(String((fetchMock.mock.calls[2]?.[1] as RequestInit).body))
+      JSON.parse(readUpstreamBody(fetchMock.mock.calls[2]?.[1] as RequestInit))
         .messages[0].content,
     ).toBe('Keep replies brief');
     expect(
-      JSON.parse(String((fetchMock.mock.calls[2]?.[1] as RequestInit).body))
+      JSON.parse(readUpstreamBody(fetchMock.mock.calls[2]?.[1] as RequestInit))
         .messages[1].tool_calls,
     ).toBeUndefined();
 

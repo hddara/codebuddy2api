@@ -84,6 +84,7 @@ import {
   recordUsageEvent,
 } from '@/lib/server/domain/usage';
 import { resetStorageRuntime } from '@/lib/server/storage';
+import { readUpstreamBody } from './upstream-body';
 
 const repoRoot = process.cwd();
 const tempRootDir = path.join(repoRoot, '.tmp-test-config-units-root');
@@ -182,7 +183,7 @@ describe('server units', () => {
     expect(response.status).toBe(200);
 
     const sent = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { messages: unknown[] };
     expect(sent.messages[0]).toEqual({
       content: DEFAULT_CHANNEL_SYSTEM_PROMPT,
@@ -1396,22 +1397,22 @@ describe('server units', () => {
     expect(upstreamHeaders.get('tracestate')).toBe('vendor=value');
     expect(upstreamHeaders.get('Authorization')).toBe('Bearer token-a');
     expect(upstreamHeaders.get('User-Agent')).toBe(
-      'CLI/2.176.0 CodeBuddy/2.176.0',
+      'CLI/2.177.1 CodeBuddy/2.177.1',
     );
-    expect(upstreamHeaders.get('X-IDE-Version')).toBe('2.176.0');
+    expect(upstreamHeaders.get('X-IDE-Version')).toBe('2.177.1');
     expect(upstreamHeaders.get('X-Product-Version')).toBeNull();
     expect(upstreamHeaders.get('X-Client-Platform')).toBeNull();
     expect(upstreamHeaders.get('Origin')).toBeNull();
     expect(
-      JSON.parse(String((fetchMock.mock.calls[2]?.[1] as RequestInit).body))
+      JSON.parse(readUpstreamBody(fetchMock.mock.calls[2]?.[1] as RequestInit))
         .max_tokens,
     ).toBe(12);
     expect(
-      JSON.parse(String((fetchMock.mock.calls[2]?.[1] as RequestInit).body))
+      JSON.parse(readUpstreamBody(fetchMock.mock.calls[2]?.[1] as RequestInit))
         .max_completion_tokens,
     ).toBe(12);
     expect(
-      JSON.parse(String((fetchMock.mock.calls[2]?.[1] as RequestInit).body))
+      JSON.parse(readUpstreamBody(fetchMock.mock.calls[2]?.[1] as RequestInit))
         .response_format,
     ).toBeUndefined();
   });
@@ -1507,12 +1508,12 @@ describe('server units', () => {
       (fetchMock.mock.calls[0]?.[1] as RequestInit).headers,
     );
     expect(upstreamHeaders.get('User-Agent')).toBe(
-      'CLI/2.176.0 CodeBuddy/2.176.0',
+      'CLI/2.177.1 CodeBuddy/2.177.1',
     );
     expect(upstreamHeaders.get('X-IDE-Name')).toBe('CLI');
-    expect(upstreamHeaders.get('X-IDE-Version')).toBe('2.176.0');
+    expect(upstreamHeaders.get('X-IDE-Version')).toBe('2.177.1');
     expect(
-      JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body)),
+      JSON.parse(readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit)),
     ).toMatchObject({
       input: [
         {
@@ -1779,7 +1780,7 @@ describe('server units', () => {
     await response.text();
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { messages: Array<Record<string, unknown>> };
 
     expect(
@@ -1971,7 +1972,7 @@ describe('server units', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(5);
     const firstBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as Record<string, unknown>;
     expect(firstBody).toMatchObject({
       reasoning: { effort: 'none' },
@@ -2117,7 +2118,7 @@ describe('server units', () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(
-      JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body)),
+      JSON.parse(readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit)),
     ).not.toHaveProperty('stop');
   });
 
@@ -2176,7 +2177,7 @@ describe('server units', () => {
       ],
     });
     expect(
-      JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body)),
+      JSON.parse(readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit)),
     ).toMatchObject({ reasoning: { summary: 'auto' } });
 
     const failedResponse = await proxyChatCompletions(
@@ -2795,16 +2796,16 @@ describe('server units', () => {
     );
 
     const firstBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { messages: Array<{ content: unknown }> };
     const secondBody = JSON.parse(
-      String((fetchMock.mock.calls[1]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[1]?.[1] as RequestInit),
     ) as { messages: Array<{ content: unknown }> };
     const thirdBody = JSON.parse(
-      String((fetchMock.mock.calls[2]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[2]?.[1] as RequestInit),
     ) as { messages: Array<{ content: unknown }> };
     const fourthBody = JSON.parse(
-      String((fetchMock.mock.calls[3]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[3]?.[1] as RequestInit),
     ) as { messages: Array<{ content: unknown }> };
 
     expect(firstBody.messages.map((message) => message.content)).toEqual([
@@ -2880,7 +2881,7 @@ describe('server units', () => {
     expect(response.status).toBe(200);
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as {
       messages: Array<{
         content: string;
@@ -2976,7 +2977,7 @@ describe('server units', () => {
     expect(thirdResponse.status).toBe(200);
 
     const firstBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as {
       messages: Array<{
         content: string;
@@ -2984,7 +2985,7 @@ describe('server units', () => {
       }>;
     };
     const secondBody = JSON.parse(
-      String((fetchMock.mock.calls[1]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[1]?.[1] as RequestInit),
     ) as {
       messages: Array<{
         content: string;
@@ -2992,7 +2993,7 @@ describe('server units', () => {
       }>;
     };
     const thirdBody = JSON.parse(
-      String((fetchMock.mock.calls[2]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[2]?.[1] as RequestInit),
     ) as {
       messages: Array<{
         content: string;
@@ -3114,7 +3115,7 @@ describe('server units', () => {
     );
     const aggregatedPayload = await aggregated.json();
     const forwardedBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as {
       response_format?: {
         type?: string;
@@ -3264,7 +3265,7 @@ describe('server units', () => {
     );
 
     const followUpBody = JSON.parse(
-      String((fetchMock.mock.calls[2]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[2]?.[1] as RequestInit),
     ) as {
       messages: Array<{
         role: string;
@@ -3464,7 +3465,7 @@ describe('server units', () => {
     );
 
     const followUpBody = JSON.parse(
-      String((fetchMock.mock.calls[1]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[1]?.[1] as RequestInit),
     ) as {
       messages: Array<{
         role: string;
@@ -3538,7 +3539,7 @@ describe('server units', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as {
       messages: Array<{
         role: string;
@@ -3636,7 +3637,7 @@ describe('server units', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as {
       messages: Array<{ role: string; content: string }>;
       tool_choice: unknown;
@@ -3693,7 +3694,7 @@ describe('server units', () => {
     );
 
     const emptyFollowUpBody = JSON.parse(
-      String((fetchMock.mock.calls[3]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[3]?.[1] as RequestInit),
     ) as {
       messages: Array<{
         role: string;
@@ -3770,7 +3771,7 @@ describe('server units', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(
-      JSON.parse(String((fetchMock.mock.calls[2]?.[1] as RequestInit).body)),
+      JSON.parse(readUpstreamBody(fetchMock.mock.calls[2]?.[1] as RequestInit)),
     ).toMatchObject({
       input: [
         {
@@ -3997,7 +3998,7 @@ describe('server units', () => {
 
     expect(response.status).toBe(200);
     expect(
-      JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body)),
+      JSON.parse(readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit)),
     ).toMatchObject({
       input: 'hello',
       model: 'glm-credential-scoped',
@@ -4116,7 +4117,7 @@ describe('server units', () => {
     expect(response.status).toBe(200);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(
-      JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))
+      JSON.parse(readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit))
         .previous_response_id,
     ).toBe('resp_from_upstream');
   });
@@ -4190,7 +4191,7 @@ describe('server units', () => {
       'https://copilot.tencent.com/responses',
     );
     expect(
-      JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body)),
+      JSON.parse(readUpstreamBody(fetchMock.mock.calls[1]?.[1] as RequestInit)),
     ).toMatchObject({ model: 'hy3' });
   });
 
@@ -4241,7 +4242,7 @@ describe('server units', () => {
       'https://copilot.tencent.com/v2/chat/completions',
     );
     expect(
-      JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body)),
+      JSON.parse(readUpstreamBody(fetchMock.mock.calls[1]?.[1] as RequestInit)),
     ).toMatchObject({
       messages: [
         { content: 'first question', role: 'user' },
@@ -4754,7 +4755,7 @@ describe('server units', () => {
     );
 
     const followUpBody = JSON.parse(
-      String((fetchMock.mock.calls[1]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[1]?.[1] as RequestInit),
     ) as {
       messages: Array<{
         role: string;
@@ -5046,7 +5047,7 @@ describe('server units', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { tools: Array<Record<string, unknown>> };
 
     expect(upstreamBody.tools).toHaveLength(1);
@@ -5096,7 +5097,7 @@ describe('server units', () => {
     );
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as {
       messages: Array<{ content: string; role: string }>;
       tools: Array<{ function: { name: string } }>;
@@ -5169,7 +5170,7 @@ describe('server units', () => {
     });
 
     const upstreamBody = JSON.parse(
-      String((fetchMock.mock.calls[1]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[1]?.[1] as RequestInit),
     ) as { tools: Array<{ function: { name: string } }> };
 
     expect(upstreamBody.tools.map((tool) => tool.function.name)).toEqual([
@@ -5473,16 +5474,16 @@ describe('server units', () => {
     );
 
     const firstUpstream = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as { tool_choice: unknown };
     const secondUpstream = JSON.parse(
-      String((fetchMock.mock.calls[1]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[1]?.[1] as RequestInit),
     ) as { tool_choice: unknown; tools: Array<Record<string, unknown>> };
     const thirdUpstream = JSON.parse(
-      String((fetchMock.mock.calls[2]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[2]?.[1] as RequestInit),
     ) as { tool_choice: unknown };
     const fourthUpstream = JSON.parse(
-      String((fetchMock.mock.calls[3]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[3]?.[1] as RequestInit),
     ) as { tool_choice: unknown };
 
     expect(firstUpstream.tool_choice).toEqual({
@@ -5630,7 +5631,7 @@ describe('server units', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
     const mcpOutputBody = JSON.parse(
-      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[0]?.[1] as RequestInit),
     ) as {
       messages: Array<{
         role: string;
@@ -5639,7 +5640,7 @@ describe('server units', () => {
       }>;
     };
     const mcpApprovalBody = JSON.parse(
-      String((fetchMock.mock.calls[1]?.[1] as RequestInit).body),
+      readUpstreamBody(fetchMock.mock.calls[1]?.[1] as RequestInit),
     ) as {
       messages: Array<{
         role: string;
