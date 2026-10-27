@@ -155,6 +155,26 @@ const CODEBUDDY_SDK_VERSION = '6.25.0';
  */
 const CODEBUDDY_DEFAULT_SITE_DOMAIN = 'www.codebuddy.cn';
 
+/**
+ * The `extra_vars` value the official client attaches to every completion call.
+ *
+ * Captured from a real request:
+ * `{"harnessMetadata":"{\"schemaVersion\":1,\"harnessVersion\":\"2.176.0\",\"stepIndex\":0,\"agent\":{\"depth\":0}}","initiator":"user"}`.
+ * The harness names itself in the body here, not only in a header, and the
+ * upstream's own refusal says the call was "not sent from an official client".
+ * A body without this field is therefore the shape a hand-written client has,
+ * which is why the gateway fills it in the same way it fills in the headers.
+ */
+const buildHarnessExtraVars = (): Record<string, unknown> => ({
+  harnessMetadata: JSON.stringify({
+    agent: { depth: 0 },
+    harnessVersion: CODEBUDDY_CLI_VERSION,
+    schemaVersion: 1,
+    stepIndex: 0,
+  }),
+  initiator: 'user',
+});
+
 export interface ChatRequestBody {
   model?: string;
   messages?: OpenAIMessage[];
@@ -175,6 +195,7 @@ export interface ChatRequestBody {
   parallel_tool_calls?: boolean;
   thinking?: Record<string, unknown>;
   reasoning_effort?: string;
+  extra_vars?: Record<string, unknown>;
 }
 
 interface ChatStreamDelta {
@@ -1038,6 +1059,13 @@ interface UpstreamPlan {
 
 interface UpstreamCallResult {
   attempts: number;
+  /**
+   * What the client claimed to be, attached only when the failure was a channel
+   * rejection. The check is probabilistic and leaves no other trace, so the
+   * evidence has to travel with the response: otherwise the only way to see what
+   * was sent is the server's log, on a machine the operator may not have.
+   */
+  channelDiagnostics?: Record<string, unknown>;
   context: ProxyContext;
   detail?: string;
   response: Response;
@@ -1209,10 +1237,12 @@ const instrumentStreamResponse = (
  */
 const buildUpstreamErrorResponse = async ({
   attempts,
+  channelDiagnostics,
   detail,
   response,
 }: {
   attempts: number;
+  channelDiagnostics?: Record<string, unknown>;
   detail?: string;
   response: Response;
 }): Promise<Response> => {
@@ -1220,7 +1250,9 @@ const buildUpstreamErrorResponse = async ({
     return createErrorResponse(
       response.status,
       'Upstream CodeBuddy request failed',
-      detail,
+      channelDiagnostics
+        ? `${detail ?? ''}\nchannel-diagnostics: ${JSON.stringify(channelDiagnostics)}`
+        : detail,
     );
   }
 
@@ -1571,7 +1603,38 @@ const fetchUpstreamWithRotation = async ({
       continue;
     }
 
-    return { attempts, context, detail, response };
+    if (isChannelRejection(detail)) {
+      return {
+        attempts,
+        channelDiagnostics: describeChannelDiagnostics({
+          attempts,
+          channelRetries,
+          context,
+          headers: plan.headers,
+          model,
+        }),
+        context,
+        detail,
+        response,
+      };
+    }
+
+    // A channel rejection is the one failure the caller cannot diagnose from
+    // the status alone, and the gateway has no log access from the outside, so
+    // the evidence travels with the error instead: the headers this request was
+    // shaped with, the account that sent it, and whatever the token itself says
+    // about which client it was issued to.
+    const channelDiagnostics = isChannelRejection(detail)
+      ? describeChannelDiagnostics({
+          attempts,
+          channelRetries,
+          context,
+          headers: plan.headers,
+          model,
+        })
+      : undefined;
+
+    return { attempts, channelDiagnostics, context, detail, response };
   }
 };
 
@@ -1962,6 +2025,31 @@ const getStainlessOs = (): string => {
 };
 
 /**
+ * Generates a version 7 UUID, the identifier shape the official client uses.
+ *
+ * Captured requests carry ids such as `01a17e2e-5932-7af5-bc5c-0e4481aef11a`
+ * and `01a17e2e5ab376c09d1f6a49687fa903`; decoded as UUIDs they are all version
+ * 7, and the first 48 bits read back as the millisecond the call was made. A
+ * v4 uuid — what `crypto.randomUUID()` returns — has random leading bits instead,
+ * so it decodes to a timestamp nowhere near now and is trivially distinguishable
+ * from a client that stamps its requests in time order. A check asking "was this
+ * sent by an official client" then has an easy answer, which is the reason this
+ * generator exists rather than a plain random uuid.
+ */
+const uuidV7 = (): string => {
+  const timestamp = Date.now().toString(16).padStart(12, '0').slice(-12);
+  const tail = crypto.randomUUID().replaceAll('-', '').slice(12);
+  const hex = [...`${timestamp}${tail}`];
+
+  hex[12] = '7';
+  hex[16] = '89ab'[Number.parseInt(hex[16] ?? '0', 16) % 4] ?? '8';
+
+  const value = hex.join('');
+
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+};
+
+/**
  * Trace context the official client attaches to every completion call.
  *
  * Two propagation formats are sent at once — W3C (`traceparent`, `baggage`) and
@@ -2015,15 +2103,12 @@ const buildUpstreamHeaders = async (
 ): Promise<HeadersInit> => {
   const baseUrl = new URL(await getCodeBuddyApiEndpoint());
   const incoming = getRequestHeaderMap(request.headers);
-  const requestId =
-    incoming['x-request-id'] ?? crypto.randomUUID().replaceAll('-', '');
-  const conversationId = incoming['x-conversation-id'] ?? crypto.randomUUID();
+  const requestId = incoming['x-request-id'] ?? uuidV7().replaceAll('-', '');
+  const conversationId = incoming['x-conversation-id'] ?? uuidV7();
   const conversationRequestId =
-    incoming['x-conversation-request-id'] ??
-    crypto.randomUUID().replaceAll('-', '');
+    incoming['x-conversation-request-id'] ?? uuidV7().replaceAll('-', '');
   const conversationMessageId =
-    incoming['x-conversation-message-id'] ??
-    crypto.randomUUID().replaceAll('-', '');
+    incoming['x-conversation-message-id'] ?? uuidV7().replaceAll('-', '');
   const headers = new Headers(incoming);
 
   // Session bookkeeping is ours, not the upstream's: the official client carries
@@ -2147,6 +2232,89 @@ const describeChannelHeaders = (
 
 const headersToRecord = (headers: HeadersInit): Record<string, string> => {
   return Object.fromEntries(new Headers(headers).entries());
+};
+
+/**
+ * The evidence a channel rejection has to carry, because nothing else records it.
+ *
+ * The refusal is probabilistic and happens upstream, the operator may have no log
+ * access to this process, and the only artifact of the call is what was sent. So
+ * the shaped headers, the account, and the token's own claims travel back on the
+ * error: the next rejection explains itself instead of starting another round of
+ * guessing which header the upstream disliked.
+ */
+const describeChannelDiagnostics = ({
+  attempts,
+  channelRetries,
+  context,
+  headers,
+  model,
+}: {
+  attempts: number;
+  channelRetries: number;
+  context: ProxyContext;
+  headers: HeadersInit;
+  model?: string;
+}): Record<string, unknown> => ({
+  attempts,
+  channelRetries,
+  channelHeaders: describeChannelHeaders(headers),
+  credentialFilename: context.credentialFilename ?? null,
+  model: model ?? null,
+  tokenClaims: describeTokenClaims(headers),
+});
+
+/**
+ * The non-secret claims of the bearer token that was sent, when it is a JWT.
+ *
+ * A channel rejection can mean the token was issued to a different kind of client
+ * than the headers claim, and the only place that distinction is recorded is the
+ * token itself. Only a fixed list of claim names is echoed back — never the token,
+ * never its signature — because this ends up in an error body.
+ */
+const describeTokenClaims = (
+  headers: HeadersInit,
+): Record<string, unknown> | null => {
+  const authorization = new Headers(headers).get('authorization') ?? '';
+  const payload = authorization.replace(/^Bearer\s+/i, '').split('.')[1];
+
+  if (!payload) {
+    return null;
+  }
+
+  try {
+    const normalized = payload.replaceAll('-', '+').replaceAll('_', '/');
+    const claims = JSON.parse(
+      Buffer.from(
+        normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '='),
+        'base64',
+      ).toString('utf8'),
+    ) as Record<string, unknown>;
+    const names = [
+      'iss',
+      'aud',
+      'sub',
+      'iat',
+      'exp',
+      'channel',
+      'client_id',
+      'clientId',
+      'app_id',
+      'appId',
+      'scope',
+      'domain',
+      'enterprise_id',
+      'tenant_id',
+    ];
+
+    return Object.fromEntries(
+      names
+        .filter((name) => claims[name] !== undefined)
+        .map((name) => [name, claims[name]]),
+    );
+  } catch {
+    return null;
+  }
 };
 
 /**
@@ -2447,6 +2615,7 @@ const buildUpstreamBody = async (
     parallel_tool_calls: body.parallel_tool_calls,
     thinking: body.thinking,
     reasoning_effort: body.reasoning_effort,
+    extra_vars: body.extra_vars ?? buildHarnessExtraVars(),
   };
 
   // Before sizing, so the injected prompt is part of what the budget measures
@@ -4705,6 +4874,7 @@ const proxyChatCompletionsInScope = async (
         setDebugTraceError(debugTrace, upstreamCall.detail);
         return buildUpstreamErrorResponse({
           attempts: upstreamCall.attempts,
+          channelDiagnostics: upstreamCall.channelDiagnostics,
           detail: upstreamCall.detail,
           response: upstreamResponse,
         });
@@ -4799,6 +4969,7 @@ const proxyChatCompletionsInScope = async (
       setDebugTraceError(debugTrace, upstreamCall.detail);
       return buildUpstreamErrorResponse({
         attempts: upstreamCall.attempts,
+        channelDiagnostics: upstreamCall.channelDiagnostics,
         detail: upstreamCall.detail,
         response: upstreamResponse,
       });
@@ -4957,6 +5128,7 @@ export const proxyResponsesUpstream = async (
       setDebugTraceError(debugTrace, upstreamCall.detail);
       return buildUpstreamErrorResponse({
         attempts: upstreamCall.attempts,
+        channelDiagnostics: upstreamCall.channelDiagnostics,
         detail: upstreamCall.detail,
         response: upstreamResponse,
       });

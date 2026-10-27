@@ -69,3 +69,7 @@ HDdaraAi/**/dcloud-android/
 .tmp-capture/
 .tmp-buildx/
 .dsh/
+.tmp-test-*/
+.tmp-explicit-creds/
+openwiki/
+pnpm-lock.yaml

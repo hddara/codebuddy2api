@@ -28,3 +28,6 @@ openwiki
 .tmp-capture
 .tmp-buildx
 .dsh
+# Test scratch directories: fixtures written by a suite while it runs.
+.tmp-test-*
+.tmp-explicit-creds

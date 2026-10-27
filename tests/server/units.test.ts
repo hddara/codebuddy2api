@@ -1371,6 +1371,20 @@ describe('server units', () => {
     expect(upstreamHeaders.get('X-Root-Request-Id')).toBe(
       upstreamHeaders.get('X-Conversation-Request-ID'),
     );
+    // Ids the gateway mints itself must look like the ones an official client
+    // sends: version 7 uuids, whose leading 48 bits read back as the current
+    // millisecond. A version 4 uuid decodes to a random instant instead, which
+    // is exactly the difference a channel check can look at.
+    const mintedRequestId = upstreamHeaders.get('X-Request-ID') ?? '';
+    expect(mintedRequestId).toMatch(
+      /^[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$/,
+    );
+    expect(
+      Math.abs(Number.parseInt(mintedRequestId.slice(0, 12), 16) - Date.now()),
+    ).toBeLessThan(5_000);
+    expect(upstreamHeaders.get('X-Conversation-Request-ID')).toMatch(
+      /^[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$/,
+    );
     expect(upstreamHeaders.get('X-Domain')).toBe('www.codebuddy.cn');
     expect(upstreamHeaders.get('x-stainless-package-version')).toBe('6.25.0');
     expect(upstreamHeaders.get('baggage')).toBe(

@@ -82,6 +82,11 @@ describe('upstream channel rejection (code 11128)', () => {
     vi.spyOn(process, 'cwd').mockReturnValue(tempRootDir);
     delete process.env.CODEBUDDY_STORAGE_BACKEND;
     delete process.env.CODEBUDDY_STORAGE_FILE_DIR;
+    // `path.resolve('.')` reads the real working directory, so mocking
+    // `process.cwd` does not redirect the credential store: without this the
+    // pool under test is whatever `.codebuddy_creds` happens to hold, and a
+    // second account left there by another test defeats the single-account case.
+    process.env.CODEBUDDY_CREDENTIALS_DIR = path.join(tempRootDir, 'creds');
     process.env.CODEBUDDY_AUTH_MODE = 'auto';
   });
 
@@ -192,5 +197,27 @@ describe('upstream channel rejection (code 11128)', () => {
     // Two retries, so three attempts at most; the point is that it terminates
     // rather than exhausting every credential in the pool.
     expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(3);
+
+    // The refusal is the one failure that cannot be diagnosed from outside, so
+    // the response carries what the gateway actually sent: the headers it shaped
+    // the call with, and the claims of the token it used.
+    const payload = (await response.json()) as { error?: { detail?: string } };
+    const detail = payload.error?.detail ?? '';
+
+    expect(detail).toContain('channel-diagnostics: ');
+    const diagnostics = JSON.parse(
+      detail.slice(detail.indexOf('channel-diagnostics: ') + 21),
+    ) as {
+      attempts: number;
+      channelHeaders: Record<string, string>;
+      tokenClaims: unknown;
+    };
+
+    expect(diagnostics.attempts).toBeGreaterThanOrEqual(2);
+    expect(diagnostics.channelHeaders['x-ide-type']).toBe('CLI');
+    expect(diagnostics.channelHeaders['x-codebuddy-request']).toBe('1');
+    expect(diagnostics.channelHeaders['x-domain']).toBe('www.codebuddy.cn');
+    // `token-a` is not a JWT, so there is nothing to decode and nothing to leak.
+    expect(diagnostics.tokenClaims).toBeNull();
   });
 });
