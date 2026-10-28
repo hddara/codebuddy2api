@@ -7,6 +7,7 @@ import { NextRequest } from 'next/server';
 import {
   addCredential,
   listCredentialLimits,
+  markCredentialLimited,
   resetCredentialRuntimeState,
 } from '@/lib/server/domain/credentials';
 import { proxyChatCompletions } from '@/lib/server/proxy/codebuddy';
@@ -95,7 +96,7 @@ describe('upstream channel rejection (code 11128)', () => {
     cleanup();
   });
 
-  it('retries on another credential instead of returning the 400 to the caller', async () => {
+  it('retries on the same credential instead of walking the pool', async () => {
     await addCredential(
       { bearer_token: 'token-a', user_id: 'a@example.com' },
       'a',
@@ -113,9 +114,14 @@ describe('upstream channel rejection (code 11128)', () => {
 
     expect(response.status).toBe(200);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    // The retry must leave on a different account: the refusal is a property of
-    // the draw, and sending it back to the same credential would just repeat it.
-    expect(bearerOf(fetchMock, 0)).not.toBe(bearerOf(fetchMock, 1));
+    // The retry has to stay on the account that was refused. Rotating spends a
+    // second account on the same refusal, and a refusal copied across the pool
+    // is what turned one bad draw into a cooldown for every credential.
+    expect(bearerOf(fetchMock, 0)).toBe(bearerOf(fetchMock, 1));
+    expect(console.warn).toHaveBeenCalledWith(
+      '[CodeBuddy2API][WARN] Retrying the same credential after a channel rejection',
+      expect.objectContaining({ channelRetries: 1 }),
+    );
   });
 
   it('retries the same credential when the pool holds no other account', async () => {
@@ -162,9 +168,9 @@ describe('upstream channel rejection (code 11128)', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(console.warn).toHaveBeenCalledWith(
-      '[CodeBuddy2API][WARN] Retrying upstream request with another credential',
+      '[CodeBuddy2API][WARN] Retrying the same credential after a channel rejection',
       expect.objectContaining({
-        reason: expect.stringContaining('rejected the channel'),
+        credentialFilename: expect.stringContaining('a.json'),
       }),
     );
     expect(console.warn).not.toHaveBeenCalledWith(
@@ -235,8 +241,61 @@ describe('upstream channel rejection (code 11128)', () => {
     expect(channelLimited[0]?.resumeAt).toBeGreaterThan(Date.now());
   });
 
+  it('does not replay the request in probe shapes unless asked', async () => {
+    // Probes are extra draws at the same gate. Left on, one refused request
+    // becomes thirteen upstream calls, which is how a refusal could spread into
+    // a pool-wide cooldown.
+    process.env.CODEBUDDY_CHANNEL_PROBES = '0';
+    await addCredential(
+      { bearer_token: 'token-a', user_id: 'a@example.com' },
+      'a',
+    );
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async () => rejectionResponse());
+
+    const response = await proxyChatCompletions(makeNextRequest(), body);
+
+    expect(response.status).toBe(400);
+    // One attempt plus the four channel retries, and nothing else.
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
+  it('answers 503 with Retry-After when every credential is channel-cooled', async () => {
+    await addCredential(
+      { bearer_token: 'token-a', user_id: 'a@example.com' },
+      'a',
+    );
+    await markCredentialLimited({
+      code: 11128,
+      filename: 'a.json',
+      kind: 'channel',
+      reason: 'Illegal API invocation from an unapproved channel',
+      resumeAt: Date.now() + 600_000,
+      status: 400,
+    });
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('upstream must not be called'));
+
+    const response = await proxyChatCompletions(makeNextRequest(), body);
+
+    // A cooldown is a temporary condition on our side, not the caller's mistake:
+    // 400 would invite a resend that cannot succeed while the mark lasts.
+    expect(response.status).toBe(503);
+    expect(Number(response.headers.get('retry-after'))).toBeGreaterThan(590);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const payload = (await response.json()) as {
+      error?: { code?: string; detail?: Record<string, unknown> };
+    };
+
+    expect(payload.error?.code).toBe('channel_cooldown');
+    expect(payload.error?.detail?.credentials_in_cooldown).toBe(1);
+  });
+
   it('answers with the variant the upstream accepts instead of a 400', async () => {
-    delete process.env.CODEBUDDY_CHANNEL_PROBES;
+    process.env.CODEBUDDY_CHANNEL_PROBES = '1';
     await addCredential(
       { bearer_token: 'token-a', user_id: 'a@example.com' },
       'a',
@@ -265,7 +324,7 @@ describe('upstream channel rejection (code 11128)', () => {
   });
 
   it('reports every probe when no variant is accepted', async () => {
-    delete process.env.CODEBUDDY_CHANNEL_PROBES;
+    process.env.CODEBUDDY_CHANNEL_PROBES = '1';
     await addCredential(
       { bearer_token: 'token-a', user_id: 'a@example.com' },
       'a',

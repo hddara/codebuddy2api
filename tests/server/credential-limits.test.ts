@@ -6,6 +6,7 @@ import { NextRequest } from 'next/server';
 
 import {
   addCredential,
+  ChannelCooldownError,
   clearCredentialLimits,
   deleteCredentialByIndex,
   flushCredentialRuntimeState,
@@ -155,6 +156,65 @@ describe('credential rate limit tracking', () => {
         limitedCandidates: 2,
         selectedCredentialFilename: 'b.json',
       }),
+    );
+  });
+
+  it('prefers a quota cooldown over a channel cooldown in the fallback', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-30T09:00:00.000Z'));
+    await addCredential({ bearer_token: 'a' }, 'a');
+    await addCredential({ bearer_token: 'b' }, 'b');
+    await markCredentialLimited({
+      code: 11128,
+      filename: 'a.json',
+      kind: 'channel',
+      resumeAt: Date.now() + 60_000,
+      status: 400,
+    });
+    await markCredentialLimited({
+      code: 6004,
+      filename: 'b.json',
+      kind: 'quota',
+      resumeAt: Date.now() + 600_000,
+      status: 429,
+    });
+
+    // `a` recovers sooner, but only the quota-limited account can still answer,
+    // so the fallback must not hand the request to the channel-refused one.
+    expect((await resolveCredentialForRequest())?.filename).toBe('b.json');
+  });
+
+  it('refuses to dispatch when every credential is channel-cooled', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-30T09:00:00.000Z'));
+    await addCredential({ bearer_token: 'a' }, 'a');
+    await addCredential({ bearer_token: 'b' }, 'b');
+    await markCredentialLimited({
+      code: 11128,
+      filename: 'a.json',
+      kind: 'channel',
+      resumeAt: Date.now() + 600_000,
+      status: 400,
+    });
+    await markCredentialLimited({
+      code: 11128,
+      filename: 'b.json',
+      kind: 'channel',
+      resumeAt: Date.now() + 60_000,
+      status: 400,
+    });
+
+    const attempt = resolveCredentialForRequest();
+
+    await expect(attempt).rejects.toBeInstanceOf(ChannelCooldownError);
+    // The caller waits for the soonest recovery, not the last one to expire.
+    await expect(attempt).rejects.toMatchObject({
+      credentialsInCooldown: 2,
+      resumeAt: Date.now() + 60_000,
+    });
+    expect(console.warn).toHaveBeenCalledWith(
+      '[CodeBuddy2API][WARN] Every credential is cooling down after a channel rejection',
+      expect.objectContaining({ credentialsInCooldown: 2 }),
     );
   });
 

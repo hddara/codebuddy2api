@@ -46,9 +46,23 @@ describe('rewriteHarnessIdentity', () => {
     expect(rewritten.messages[1]).toEqual({ role: 'user', content: 'hi' });
   });
 
-  it('leaves a user message untouched, because the check only reads system', () => {
+  it('rewrites a user message too, because demotion moves the prompt there', () => {
     const body = {
       messages: [{ role: 'user', content: 'DeepSeek Harness is a product' }],
+    };
+
+    expect(rewriteHarnessIdentity(body).messages[0]).toEqual({
+      role: 'user',
+      content: `${HARNESS_IDENTITY_PLACEHOLDER} is a product`,
+    });
+  });
+
+  it('leaves assistant and tool messages untouched', () => {
+    const body = {
+      messages: [
+        { role: 'assistant', content: 'DeepSeek Harness is a product' },
+        { role: 'tool', content: 'DeepSeek Harness is a product' },
+      ],
     };
 
     expect(rewriteHarnessIdentity(body)).toBe(body);

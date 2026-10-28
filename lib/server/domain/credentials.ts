@@ -912,6 +912,27 @@ export const toggleAutoRotation = (): {
   };
 };
 
+/**
+ * Raised when no credential can be tried because each one is cooling down after
+ * a channel rejection.
+ *
+ * This is not "the pool is empty" and not "everything is out of quota": it is
+ * one upstream condition that makes every dispatch fail the same way for the
+ * length of the cooldown. Callers answer it with 503 + `Retry-After`, which lets
+ * the client wait instead of re-sending a body the upstream will refuse again.
+ */
+export class ChannelCooldownError extends Error {
+  readonly credentialsInCooldown: number;
+  readonly resumeAt: number;
+
+  constructor(resumeAt: number, credentialsInCooldown: number) {
+    super('Every credential is cooling down after a channel rejection');
+    this.name = 'ChannelCooldownError';
+    this.credentialsInCooldown = credentialsInCooldown;
+    this.resumeAt = resumeAt;
+  }
+}
+
 export const resolveCredentialForRequest = async ({
   accessKeyId,
   affinityKey,
@@ -991,15 +1012,58 @@ export const resolveCredentialForRequest = async ({
     (record) => !limitedCredentials[record.filename],
   );
   const limitedCandidates = rotatableRecords.length - availableRecords.length;
-  // Every otherwise eligible credential is cooling down: reuse the one that
-  // recovers first instead of failing the request outright.
+  // Every otherwise eligible credential is cooling down.
+  //
+  // A channel cooldown is different from a quota cooldown: the upstream refused
+  // the account itself, not the quota behind it, so sending the same request to
+  // another cooled-down account cannot succeed — it only earns another 11128 and
+  // extends the outage. A quota cooldown still gets the "reuse the one that
+  // recovers first" fallback, because the gate may let a request through before
+  // the window closes.
   const allLimited = availableRecords.length === 0;
-  const selectionPool = allLimited
-    ? [...rotatableRecords].sort(
-        (left, right) =>
-          (limitedCredentials[left.filename]?.resumeAt ?? 0) -
-          (limitedCredentials[right.filename]?.resumeAt ?? 0),
+  const channelCooling = allLimited
+    ? rotatableRecords.every(
+        (record) => limitedCredentials[record.filename]?.kind === 'channel',
       )
+    : false;
+
+  if (channelCooling) {
+    const resumeAt = Math.min(
+      ...rotatableRecords.map(
+        (record) => limitedCredentials[record.filename]?.resumeAt ?? Date.now(),
+      ),
+    );
+
+    void logEvent({
+      level: 'WARN',
+      message: 'Every credential is cooling down after a channel rejection',
+      payload: {
+        accessKeyId: accessKeyId ?? null,
+        affinityKey: affinityKey ?? null,
+        credentialsInCooldown: rotatableRecords.length,
+        earliestResumeAt: new Date(resumeAt).toISOString(),
+        limitedCandidates,
+        model: requestedModel ?? null,
+      },
+    });
+
+    throw new ChannelCooldownError(resumeAt, rotatableRecords.length);
+  }
+
+  // Some pool is still cooling down but not all of it on the channel mark: an
+  // account waiting on quota is a better fallback than one the channel check
+  // just refused, because only the former can answer before its window closes.
+  const selectionPool = allLimited
+    ? [...rotatableRecords].sort((left, right) => {
+        const rank = (filename: string): number =>
+          limitedCredentials[filename]?.kind === 'channel' ? 1 : 0;
+
+        return (
+          rank(left.filename) - rank(right.filename) ||
+          (limitedCredentials[left.filename]?.resumeAt ?? 0) -
+            (limitedCredentials[right.filename]?.resumeAt ?? 0)
+        );
+      })
     : availableRecords;
 
   if (allLimited) {

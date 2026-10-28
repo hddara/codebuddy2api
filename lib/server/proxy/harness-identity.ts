@@ -12,8 +12,11 @@
  * which is the operator's call, not a default this gateway should make.
  *
  * Scope is deliberately narrow:
- *  - only `role: 'system'` messages are scanned, since the upstream ignores the
- *    marker anywhere else;
+ *  - only `system` and `user` messages are scanned. `system` is what the
+ *    upstream reads, and `user` is where a caller's system text ends up once
+ *    `demoteSystemPrompt` has moved it out of the classified slot — rewriting
+ *    only `system` would leave the marker in the message the caller's prompt
+ *    actually travels in;
  *  - only the exact identity phrase is replaced, leaving the surrounding
  *    instructions intact;
  *  - a body without the phrase is returned untouched, byte for byte.
@@ -88,8 +91,15 @@ const rewriteContent = (content: unknown): unknown => {
   return changed ? parts : content;
 };
 
+/** Roles whose text can carry the caller's identity marker. */
+const REWRITTEN_ROLES = new Set(['system', 'user']);
+
 /**
- * Rewrites the identity phrase in every `system` message of a chat body.
+ * Rewrites the identity phrase in every `system` and `user` message.
+ *
+ * `user` is included because demotion moves the caller's system text into the
+ * first user turn: the marker has to follow the text, or the rewrite would
+ * report success while leaving the phrase exactly where the caller put it.
  *
  * Returns the original object when nothing matched, so an untouched request
  * does not allocate a copy of a body that may be several megabytes.
@@ -106,7 +116,7 @@ export const rewriteHarnessIdentity = <T extends { messages?: unknown }>(
     if (
       !message ||
       typeof message !== 'object' ||
-      (message as { role?: unknown }).role !== 'system'
+      !REWRITTEN_ROLES.has(String((message as { role?: unknown }).role))
     ) {
       return message;
     }

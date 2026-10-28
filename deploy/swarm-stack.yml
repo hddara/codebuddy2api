@@ -70,6 +70,11 @@ services:
       # in the slot, which is the only shape an official client sends. Set to 0
       # to keep a caller's system message where it is.
       - CODEBUDDY_DEMOTE_SYSTEM_PROMPT=${CODEBUDDY_DEMOTE_SYSTEM_PROMPT:-true}
+      # Replay a rejected request in eight shapes to find the one the upstream
+      # accepts. Off by default: the probes are extra draws at the same gate, so
+      # they extend the outage they were meant to explain. Set to 1 only while
+      # isolating a shape; the error already carries the headers and body shape.
+      - CODEBUDDY_CHANNEL_PROBES=${CODEBUDDY_CHANNEL_PROBES:-false}
       # Largest body dispatched upstream *after* compression, in bytes. Was a
       # 400000-character budget, which measured a different quantity from the
       # byte cap and was roughly 5% of it, so the two never agreed.

@@ -28,6 +28,7 @@ import {
   getDefaultModel,
 } from '../domain/config';
 import {
+  ChannelCooldownError,
   type CredentialData,
   type CredentialRecord,
   findEligibleCredentialRecordByFilename,
@@ -975,8 +976,10 @@ const rotateToNextCredential = async ({
  * The refusal is not a rate limit, but it is not random across the pool either:
  * production logs showed one account rejected on 45% of its requests while the
  * rest of the pool sat at 0.6%. So a credential that burns the whole retry
- * budget is put on a cooldown instead of being tried again on the next request —
- * the retry only helps if the next request draws a different account.
+ * budget is put on a cooldown instead of being tried again on the next request.
+ * The cooldown is what moves a bad account out of the way; the retry itself
+ * stays on the same account (see the retry branch below), because rotating on a
+ * refusal spreads the failure across the whole pool instead of containing it.
  *
  * Four draws, not two: with the request shape fixed, what is left is the
  * upstream's own sampling, which refuses single-digit percentages per attempt.
@@ -1017,12 +1020,16 @@ const CHANNEL_PROBE_TIMEOUT_MS = 12_000;
  * Whether a rejected request is replayed in a handful of shapes to find out
  * which part of it the upstream objects to.
  *
- * On by default: a channel rejection is otherwise a dead end for the operator,
- * because the evidence is on the far side of a request they cannot watch. Each
- * probe is a call the upstream refuses, so it costs nothing in quota.
+ * Off by default. Each probe is another call the upstream refuses, and the
+ * measurements that mattered are already in the logs (`channel-diagnostics`
+ * carries the headers, the body shape and the account's claims on every
+ * exhausted rejection). Eight extra calls per failed request do not just delay
+ * the caller's error — they add draws that the channel check can refuse, which
+ * is how one refusal used to become a pool-wide cooldown. Turn it on
+ * (`CODEBUDDY_CHANNEL_PROBES=1`) when a shape has to be isolated on purpose.
  */
 const isChannelProbeEnabled = (): boolean =>
-  !['0', 'false', 'no', 'off'].includes(
+  ['1', 'true', 'yes', 'on'].includes(
     (process.env.CODEBUDDY_CHANNEL_PROBES ?? '').trim().toLowerCase(),
   );
 
@@ -1622,44 +1629,22 @@ const fetchUpstreamWithRotation = async ({
       continue;
     }
 
-    // A channel rejection is not a rate limit — the credential is fine, the
+    // A channel rejection is not a rate limit — the credential may be fine, the
     // draw was unlucky — so it gets its own small retry budget instead of
     // becoming the caller's 400.
     //
-    // The retry prefers another account when one exists, because a different
-    // credential is a different draw on both the channel check and the quota
-    // waiting behind it. When the pool holds nothing else, the same account is
-    // retried after a short wait: the refusal is probabilistic (see
-    // `isChannelRejection`), so the same body from the same credential does
-    // succeed on a later attempt, and a single-account deployment otherwise
-    // has no retry at all because rotation has nothing to rotate to.
+    // The retry stays on the *same* account on purpose. Rotating on a channel
+    // rejection costs the whole pool: every attempt is another draw the upstream
+    // can refuse, so a single refused request used to walk the entire rotation
+    // and leave four accounts marked as channel-cooled at once — the outage that
+    // followed had nothing to send with. Re-sending to one account keeps a bad
+    // draw local; if the account really is flagged, the cooldown below retires
+    // it and the next request draws a different one.
     if (
       channelRetries < MAX_CHANNEL_REJECTION_RETRIES &&
       isChannelRejection(detail)
     ) {
       channelRetries += 1;
-
-      const retryContext =
-        attempts < maxAttempts
-          ? await rotateToNextCredential({
-              allowRotation: true,
-              context,
-              model,
-              reason: `upstream rejected the channel (code ${CHANNEL_REJECTION_CODE})`,
-              request,
-              requestBody,
-              triedFilenames,
-            })
-          : null;
-
-      if (retryContext) {
-        if (retryContext.credentialFilename) {
-          triedFilenames.push(retryContext.credentialFilename);
-        }
-
-        context = retryContext;
-        continue;
-      }
 
       const retryDelayMs = CHANNEL_RETRY_BASE_DELAY_MS * channelRetries;
 
@@ -3008,13 +2993,14 @@ const buildUpstreamBody = async (
 
   // Applied to the normalized messages, not the raw body: that is the form the
   // upstream actually receives, including whatever `normalizeMessages` moved
-  // into a `system` message.
+  // into a `system` message and whatever `demoteSystemPrompt` moved into a
+  // `user` one.
   const rewritten = rewriteHarnessIdentity(upstreamBody);
 
   if (rewritten !== upstreamBody) {
     void logEvent({
       level: 'INFO',
-      message: 'Rewrote the client identity marker in system messages',
+      message: 'Rewrote the client identity marker in the request messages',
       payload: { model, replacement: HARNESS_IDENTITY_PLACEHOLDER },
     });
   }
@@ -5162,6 +5148,38 @@ export const proxyChatCompletions = async (
     );
   });
 
+/**
+ * Answers a pool-wide channel cooldown with 503 + `Retry-After`.
+ *
+ * The status matters as much as the body: a 400 says "your request was wrong"
+ * and invites the client to resend it, which is the one thing that cannot work
+ * while the cooldown lasts. `Retry-After` names the instant the pool is expected
+ * to recover, so a well-behaved client waits instead of burning its own retry
+ * budget on a refusal that is already known.
+ */
+const channelCooldownResponse = (error: ChannelCooldownError): Response => {
+  const resumeAt = new Date(error.resumeAt).toISOString();
+  const retryAfterSeconds = Math.max(
+    1,
+    Math.ceil((error.resumeAt - Date.now()) / 1_000),
+  );
+
+  return createErrorResponse(
+    503,
+    `Every credential is cooling down after a channel rejection. Retry after ${resumeAt}.`,
+    {
+      credentials_in_cooldown: error.credentialsInCooldown,
+      resume_at: resumeAt,
+      retry_after_seconds: retryAfterSeconds,
+    },
+    {
+      code: 'channel_cooldown',
+      headers: { 'Retry-After': String(retryAfterSeconds) },
+      type: 'service_unavailable',
+    },
+  );
+};
+
 const proxyChatCompletionsInScope = async (
   request: NextRequest,
   body: ChatRequestBody,
@@ -5391,6 +5409,13 @@ const proxyChatCompletionsInScope = async (
   } catch (error) {
     setDebugTraceError(debugTrace, error);
 
+    // A pool-wide channel cooldown is a temporary condition on our side of the
+    // wire, not the caller's mistake: answer 503 with the recovery instant
+    // instead of letting it fall through to the generic 500.
+    if (error instanceof ChannelCooldownError) {
+      return channelCooldownResponse(error);
+    }
+
     // The dispatch ceiling is the caller's problem, not an upstream fault, so
     // it must not be logged as one or answered with a 500.
     if (error instanceof DispatchCeilingExceededError) {
@@ -5547,6 +5572,11 @@ export const proxyResponsesUpstream = async (
     });
   } catch (error) {
     setDebugTraceError(debugTrace, error);
+
+    if (error instanceof ChannelCooldownError) {
+      return channelCooldownResponse(error);
+    }
+
     logUpstreamFailure({
       error,
       route: '/v1/responses',

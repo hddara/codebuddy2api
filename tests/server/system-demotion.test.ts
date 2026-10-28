@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   DEFAULT_CHANNEL_SYSTEM_PROMPT,
+  HARNESS_IDENTITY_PLACEHOLDER,
   demoteSystemPrompt,
   isSystemPromptDemotionEnabled,
+  rewriteHarnessIdentity,
 } from '@/lib/server/proxy/harness-identity';
 
 afterEach(() => {
@@ -100,5 +102,28 @@ describe('demoteSystemPrompt', () => {
 
     expect(demoteSystemPrompt(body, false)).toBe(body);
     expect(demoteSystemPrompt({} as { messages?: unknown }, true)).toEqual({});
+  });
+
+  it('leaves the demoted prompt where the identity rewrite can reach it', () => {
+    // The demotion moves the caller's text out of `system`, so a rewrite that
+    // only scanned `system` would report nothing to do while the caller's
+    // identity marker travelled in the user turn untouched.
+    const demoted = demoteSystemPrompt(
+      {
+        messages: [
+          { role: 'system', content: 'You are DeepSeek Harness.' },
+          { role: 'user', content: 'hi' },
+        ],
+      },
+      true,
+    );
+
+    const rewritten = rewriteHarnessIdentity(demoted);
+
+    expect(rewritten).not.toBe(demoted);
+    expect(rewritten.messages[1]).toEqual({
+      role: 'user',
+      content: `You are ${HARNESS_IDENTITY_PLACEHOLDER}.\n\nhi`,
+    });
   });
 });
