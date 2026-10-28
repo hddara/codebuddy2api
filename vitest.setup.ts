@@ -16,6 +16,11 @@ vi.stubGlobal('ResizeObserver', ResizeObserverMock);
 // directly and proxy tests opt in where it matters.
 process.env.CODEBUDDY_INJECT_SYSTEM_PROMPT = '0';
 
+// The proxy also demotes a caller's system message into the first user turn,
+// because the upstream only classifies the `system` slot. Same reasoning:
+// suites that assert the exact upstream body opt in explicitly.
+process.env.CODEBUDDY_DEMOTE_SYSTEM_PROMPT = '0';
+
 vi.stubGlobal(
   'fetch',
   vi.fn(async (input: RequestInfo | URL) => {

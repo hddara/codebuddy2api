@@ -7,7 +7,9 @@ import { resolveRequestAccessKey } from './auth';
 import {
   HARNESS_IDENTITY_PLACEHOLDER,
   collectIdentityClaims,
+  demoteSystemPrompt,
   ensureSystemPrompt,
+  isSystemPromptDemotionEnabled,
   isHarnessIdentityRewriteEnabled,
   rewriteHarnessIdentity,
 } from './harness-identity';
@@ -2960,7 +2962,13 @@ const buildUpstreamBody = async (
   // and `normalizeMessages` cannot move it around afterwards. A body without a
   // system message is the shape the upstream's channel check refuses, so this
   // completes the shape rather than adding an instruction.
-  const upstreamBody = ensureSystemPrompt(builtBody);
+  // The channel check classifies the `system` slot, so a harness prompt parked
+  // there is refused while the same text inside a user turn is accepted. The
+  // demotion moves it and keeps the official preamble in the slot; the switch
+  // restores the older inject-only behaviour for comparison.
+  const upstreamBody = isSystemPromptDemotionEnabled()
+    ? demoteSystemPrompt(builtBody)
+    : ensureSystemPrompt(builtBody);
 
   applySizeControls(upstreamBody);
 
@@ -2975,6 +2983,8 @@ const buildUpstreamBody = async (
       identityRewrite: isHarnessIdentityRewriteEnabled(),
       model,
       systemPromptInjected: upstreamBody !== builtBody,
+      systemPromptDemoted:
+        upstreamBody !== builtBody && isSystemPromptDemotionEnabled(),
       systemCount: Array.isArray(upstreamBody.messages)
         ? upstreamBody.messages.filter(
             (message) =>

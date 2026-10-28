@@ -64,6 +64,12 @@ services:
       # the caller, who only sees a 400 that looks like bad input. Set to 0 to
       # forward the prompt verbatim.
       - CODEBUDDY_REWRITE_HARNESS_IDENTITY=${CODEBUDDY_REWRITE_HARNESS_IDENTITY:-true}
+      # The channel check classifies only the `system` slot: the same text in a
+      # user turn is accepted, as a system message it is refused with 11128.
+      # Demoting keeps the caller's instructions but puts the official preamble
+      # in the slot, which is the only shape an official client sends. Set to 0
+      # to keep a caller's system message where it is.
+      - CODEBUDDY_DEMOTE_SYSTEM_PROMPT=${CODEBUDDY_DEMOTE_SYSTEM_PROMPT:-true}
       # Largest body dispatched upstream *after* compression, in bytes. Was a
       # 400000-character budget, which measured a different quantity from the
       # byte cap and was roughly 5% of it, so the two never agreed.

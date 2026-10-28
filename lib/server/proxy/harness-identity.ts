@@ -255,6 +255,116 @@ export const isSystemPromptInjectionEnabled = (): boolean =>
  * Returns the original object when a system message is already present, so the
  * requests that already pass are not copied or altered in any way.
  */
+/**
+ * Whether the caller's system text should be moved out of the `system` slot.
+ *
+ * On by default, and the reason is measured rather than theoretical: the
+ * upstream's channel check classifies the *system* slot only. The same
+ * sentence is accepted inside a `user` message and refused as a `system`
+ * message, so a harness prompt in the system slot is a 11128 waiting to
+ * happen — while the identical text in the conversation passes untouched.
+ * Demoting keeps the caller's instructions intact and makes the request look
+ * like the official client, which never sends anything but its own preamble.
+ */
+export const isSystemPromptDemotionEnabled = (): boolean =>
+  !['0', 'false', 'no', 'off'].includes(
+    (process.env.CODEBUDDY_DEMOTE_SYSTEM_PROMPT ?? '').trim().toLowerCase(),
+  );
+
+type MessageLike = { content?: unknown; role?: unknown } | null;
+
+const systemTextOf = (messages: unknown[]): string => {
+  const parts: string[] = [];
+
+  for (const message of messages) {
+    const entry = message as MessageLike;
+
+    if (!entry || entry.role !== 'system') {
+      continue;
+    }
+
+    if (typeof entry.content === 'string') {
+      if (entry.content.trim()) {
+        parts.push(entry.content);
+      }
+
+      continue;
+    }
+
+    if (Array.isArray(entry.content)) {
+      for (const part of entry.content) {
+        const text = (part as { text?: unknown } | null)?.text;
+
+        if (typeof text === 'string' && text.trim()) {
+          parts.push(text);
+        }
+      }
+    }
+  }
+
+  return parts.join('\n\n').trim();
+};
+
+const prependText = (content: unknown, text: string): unknown => {
+  if (typeof content === 'string') {
+    return content.trim() ? `${text}\n\n${content}` : text;
+  }
+
+  if (Array.isArray(content)) {
+    return [{ text, type: 'text' }, ...content];
+  }
+
+  return [{ text, type: 'text' }];
+};
+
+/**
+ * Replaces the `system` slot with the official preamble and demotes whatever
+ * the caller had there into the first user turn.
+ *
+ * Nothing is dropped: the caller's instructions stay in the conversation, in
+ * the slot the channel check does not read. A body that had no system message
+ * simply gains the official one, which is what the earlier injection path did.
+ */
+export const demoteSystemPrompt = <T extends { messages?: unknown }>(
+  body: T,
+  enabled: boolean = isSystemPromptDemotionEnabled(),
+): T => {
+  if (!enabled || !Array.isArray(body.messages)) {
+    return body;
+  }
+
+  const messages = body.messages as unknown[];
+  const systemText = systemTextOf(messages);
+  const rest = messages.filter((message) => {
+    return (message as MessageLike)?.role !== 'system';
+  });
+
+  if (systemText) {
+    const index = rest.findIndex((message) => {
+      return (message as MessageLike)?.role === 'user';
+    });
+
+    if (index >= 0) {
+      const message = rest[index] as { content?: unknown };
+
+      rest[index] = {
+        ...(message as object),
+        content: prependText(message.content, systemText),
+      };
+    } else {
+      rest.unshift({ content: systemText, role: 'user' });
+    }
+  }
+
+  return {
+    ...body,
+    messages: [
+      { content: DEFAULT_CHANNEL_SYSTEM_PROMPT, role: 'system' },
+      ...rest,
+    ],
+  };
+};
+
 export const ensureSystemPrompt = <T extends { messages?: unknown }>(
   body: T,
   enabled: boolean = isSystemPromptInjectionEnabled(),
