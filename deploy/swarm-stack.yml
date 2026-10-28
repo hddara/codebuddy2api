@@ -64,6 +64,11 @@ services:
       # the caller, who only sees a 400 that looks like bad input. Set to 0 to
       # forward the prompt verbatim.
       - CODEBUDDY_REWRITE_HARNESS_IDENTITY=${CODEBUDDY_REWRITE_HARNESS_IDENTITY:-true}
+      # Temporary diagnostic: attach a bounded excerpt of the refused body to a
+      # channel-rejection error so the difference can be read from the log
+      # instead of guessed. Carries caller content — set back to 0 (or remove)
+      # once the cause is known.
+      - CODEBUDDY_CHANNEL_BODY_PREVIEW=${CODEBUDDY_CHANNEL_BODY_PREVIEW:-1}
       # Largest body dispatched upstream *after* compression, in bytes. Was a
       # 400000-character budget, which measured a different quantity from the
       # byte cap and was roughly 5% of it, so the two never agreed.

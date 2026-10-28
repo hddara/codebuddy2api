@@ -2520,6 +2520,18 @@ const probeChannelVariants = async (
   return { results, winner: null };
 };
 
+/**
+ * Whether a channel rejection should carry a slice of the refused body.
+ *
+ * Deliberately opt-in and temporary: the excerpt is caller content, so it is
+ * only collected while a specific difference is being chased.
+ */
+const isChannelBodyPreviewEnabled = (): boolean => {
+  return ['1', 'true', 'yes', 'on'].includes(
+    (process.env.CODEBUDDY_CHANNEL_BODY_PREVIEW ?? '').trim().toLowerCase(),
+  );
+};
+
 const describeChannelDiagnostics = ({
   attempts,
   body,
@@ -2562,6 +2574,12 @@ const describeChannelDiagnostics = ({
     },
     channelRetries,
     channelHeaders: describeChannelHeaders(headers),
+    // Temporary: the upstream refuses a body this gateway cannot otherwise see,
+    // so a bounded excerpt of it travels with the error while the difference is
+    // being narrowed down. Off unless explicitly switched on.
+    ...(isChannelBodyPreviewEnabled()
+      ? { bodyPreview: JSON.stringify(body ?? null).slice(0, 4_000) }
+      : {}),
     credentialFilename: context.credentialFilename ?? null,
     model: model ?? null,
     tokenClaims: describeTokenClaims(headers),
