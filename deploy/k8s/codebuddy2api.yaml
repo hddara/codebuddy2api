@@ -50,7 +50,7 @@ spec:
     spec:
       containers:
         - name: codebuddy2api
-          image: registry.cn-hangzhou.aliyuncs.com/hucx/codebuddy2api:20261028.T03
+          image: registry.cn-hangzhou.aliyuncs.com/hucx/codebuddy2api:20261028.T04
           imagePullPolicy: Always
           ports:
             - containerPort: 8001
