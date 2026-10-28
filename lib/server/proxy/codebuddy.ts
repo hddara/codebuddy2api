@@ -1689,6 +1689,36 @@ const fetchUpstreamWithRotation = async ({
         });
       }
 
+      const probes = await probeChannelVariants(
+        plan.url,
+        plan.body as Record<string, unknown>,
+        plan.headers,
+      );
+
+      // A variant that the upstream accepts is not a diagnosis, it is the
+      // request this caller should have sent: hand its response back as the
+      // answer instead of a 400 the caller cannot act on.
+      if (probes.winner) {
+        void logEvent({
+          level: 'WARN',
+          message: 'Recovered a channel rejection with a probe variant',
+          payload: {
+            attempt: attempts,
+            credentialFilename: context.credentialFilename,
+            model,
+            route,
+            status: response.status,
+            stream,
+            variant: probes.winner.name,
+          },
+        });
+        return {
+          attempts,
+          context,
+          response: probes.winner.response,
+        };
+      }
+
       return {
         attempts,
         channelDiagnostics: {
@@ -1700,11 +1730,7 @@ const fetchUpstreamWithRotation = async ({
             headers: plan.headers,
             model,
           }),
-          probes: await probeChannelVariants(
-            plan.url,
-            plan.body as Record<string, unknown>,
-            plan.headers,
-          ),
+          probes: probes.results,
         },
         context,
         detail,
@@ -2441,45 +2467,57 @@ const buildChannelProbeVariants = (
 };
 
 /** Runs the probe variants in parallel and reports each one's outcome. */
+/**
+ * Replays the rejected request in its variants until one is accepted.
+ *
+ * Sequential with an early exit, not parallel: every attempt spends the same
+ * account's quota, and the first accepted variant is also the answer to "what
+ * was wrong", so there is nothing to learn from the rest.
+ */
 const probeChannelVariants = async (
   url: string,
   body: Record<string, unknown>,
   headers: HeadersInit,
-): Promise<Record<string, string>> => {
+): Promise<{
+  results: Record<string, string>;
+  winner: { name: string; response: Response } | null;
+}> => {
   if (!isChannelProbeEnabled()) {
-    return {};
+    return { results: {}, winner: null };
   }
 
-  const results = await Promise.all(
-    buildChannelProbeVariants(body, headers).map(async (variant) => {
-      try {
-        const response = await fetch(url, {
-          body: JSON.stringify(variant.body),
-          cache: 'no-store',
-          headers: variant.headers,
-          method: 'POST',
-          signal: AbortSignal.timeout(CHANNEL_PROBE_TIMEOUT_MS),
-        });
-        const text = await response.text().catch(() => '');
-        const code = (() => {
-          try {
-            return (JSON.parse(text) as { code?: unknown }).code;
-          } catch {
-            return null;
-          }
-        })();
+  const results: Record<string, string> = {};
 
-        return [
-          variant.name,
-          `${response.status}/${String(code ?? '-')}`,
-        ] as const;
-      } catch (error) {
-        return [variant.name, `error:${(error as Error).name}`] as const;
+  for (const variant of buildChannelProbeVariants(body, headers)) {
+    try {
+      const response = await fetch(url, {
+        body: JSON.stringify(variant.body),
+        cache: 'no-store',
+        headers: variant.headers,
+        method: 'POST',
+        signal: AbortSignal.timeout(CHANNEL_PROBE_TIMEOUT_MS),
+      });
+
+      if (response.ok) {
+        results[variant.name] = `${response.status}/-`;
+        return { results, winner: { name: variant.name, response } };
       }
-    }),
-  );
 
-  return Object.fromEntries(results);
+      const text = await response.text().catch(() => '');
+      const code = (() => {
+        try {
+          return (JSON.parse(text) as { code?: unknown }).code;
+        } catch {
+          return null;
+        }
+      })();
+      results[variant.name] = `${response.status}/${String(code ?? '-')}`;
+    } catch (error) {
+      results[variant.name] = `error:${(error as Error).name}`;
+    }
+  }
+
+  return { results, winner: null };
 };
 
 const describeChannelDiagnostics = ({

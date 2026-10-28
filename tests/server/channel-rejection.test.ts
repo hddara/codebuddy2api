@@ -235,7 +235,7 @@ describe('upstream channel rejection (code 11128)', () => {
     expect(channelLimited[0]?.resumeAt).toBeGreaterThan(Date.now());
   });
 
-  it('replays the rejected request in variants so the gate can be identified', async () => {
+  it('answers with the variant the upstream accepts instead of a 400', async () => {
     delete process.env.CODEBUDDY_CHANNEL_PROBES;
     await addCredential(
       { bearer_token: 'token-a', user_id: 'a@example.com' },
@@ -251,6 +251,30 @@ describe('upstream channel rejection (code 11128)', () => {
     );
 
     const response = await proxyChatCompletions(makeNextRequest(), body);
+
+    // The caller asked for an answer, not for a diagnosis: once a variant is
+    // accepted, its response is the answer.
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      choices: [{ message: { content: 'ok' } }],
+    });
+    expect(console.warn).toHaveBeenCalledWith(
+      '[CodeBuddy2API][WARN] Recovered a channel rejection with a probe variant',
+      expect.objectContaining({ variant: 'officialParams' }),
+    );
+  });
+
+  it('reports every probe when no variant is accepted', async () => {
+    delete process.env.CODEBUDDY_CHANNEL_PROBES;
+    await addCredential(
+      { bearer_token: 'token-a', user_id: 'a@example.com' },
+      'a',
+    );
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      rejectionResponse(),
+    );
+
+    const response = await proxyChatCompletions(makeNextRequest(), body);
     const payload = (await response.json()) as { error?: { detail?: string } };
     const detail = payload.error?.detail ?? '';
     const diagnostics = JSON.parse(
@@ -263,7 +287,7 @@ describe('upstream channel rejection (code 11128)', () => {
     expect(response.status).toBe(400);
     expect(diagnostics.bodyShape.messageCount).toBe(1);
     expect(diagnostics.bodyShape.systemMessages).toBe(0);
-    expect(diagnostics.probes.officialParams).toBe('200/-');
+    expect(Object.keys(diagnostics.probes).length).toBe(8);
     expect(diagnostics.probes.plainBody).toBe('400/11128');
     expect(diagnostics.probes.webChannel).toBe('400/11128');
   });
