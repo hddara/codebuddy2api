@@ -199,9 +199,9 @@ describe('upstream channel rejection (code 11128)', () => {
     const response = await proxyChatCompletions(makeNextRequest(), body);
 
     expect(response.status).toBe(400);
-    // Two retries, so three attempts at most; the point is that it terminates
+    // Four retries, so five attempts at most; the point is that it terminates
     // rather than exhausting every credential in the pool.
-    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(3);
+    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(5);
 
     // The refusal is the one failure that cannot be diagnosed from outside, so
     // the response carries what the gateway actually sent: the headers it shaped

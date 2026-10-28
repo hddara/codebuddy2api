@@ -975,18 +975,26 @@ const rotateToNextCredential = async ({
  * The refusal is not a rate limit, but it is not random across the pool either:
  * production logs showed one account rejected on 45% of its requests while the
  * rest of the pool sat at 0.6%. So a credential that burns the whole retry
- * budget is put on a short cooldown instead of being tried again on the next
- * request — the retry only helps if the next request draws a different account.
+ * budget is put on a cooldown instead of being tried again on the next request —
+ * the retry only helps if the next request draws a different account.
+ *
+ * Four draws, not two: with the request shape fixed, what is left is the
+ * upstream's own sampling, which refuses single-digit percentages per attempt.
+ * Two draws still surfaced a user-visible 400 a few times a day; four makes
+ * that rare, and every draw that is refused costs no quota because the answer
+ * is produced before a model is involved.
  */
 const CHANNEL_REJECTION_CODE = 11128;
 const CHANNEL_REJECTION_PATTERN = /unapproved channel/i;
-const MAX_CHANNEL_REJECTION_RETRIES = 2;
+const MAX_CHANNEL_REJECTION_RETRIES = 4;
 /**
  * How long a credential that exhausted its channel retries stays out of the
- * rotation. Short, because the mark is a guess about the account, not a fact
- * reported by the upstream: the account may well pass again in a few minutes.
+ * rotation. The mark is a guess about the account rather than a fact the
+ * upstream reported, so it expires on its own; a quarter of an hour is long
+ * enough to stop a flagged account from eating the next caller's request and
+ * short enough that a healthy account is not locked out for the afternoon.
  */
-const CHANNEL_REJECTION_COOLDOWN_MS = 5 * 60_000;
+const CHANNEL_REJECTION_COOLDOWN_MS = 15 * 60_000;
 
 /**
  * Backoff unit for re-sending a channel rejection on the *same* account.
