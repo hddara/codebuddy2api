@@ -986,6 +986,27 @@ const MAX_CHANNEL_REJECTION_RETRIES = 2;
  */
 const CHANNEL_RETRY_BASE_DELAY_MS = 250;
 
+/**
+ * How long one channel probe may take.
+ *
+ * Probes run only after the gateway has already failed, so a slow one only
+ * delays an error that is going to be returned anyway.
+ */
+const CHANNEL_PROBE_TIMEOUT_MS = 12_000;
+
+/**
+ * Whether a rejected request is replayed in a handful of shapes to find out
+ * which part of it the upstream objects to.
+ *
+ * On by default: a channel rejection is otherwise a dead end for the operator,
+ * because the evidence is on the far side of a request they cannot watch. Each
+ * probe is a call the upstream refuses, so it costs nothing in quota.
+ */
+const isChannelProbeEnabled = (): boolean =>
+  !['0', 'false', 'no', 'off'].includes(
+    (process.env.CODEBUDDY_CHANNEL_PROBES ?? '').trim().toLowerCase(),
+  );
+
 const isChannelRejection = (detail: string | undefined): boolean => {
   if (!detail) {
     return false;
@@ -1646,13 +1667,21 @@ const fetchUpstreamWithRotation = async ({
     if (isChannelRejection(detail)) {
       return {
         attempts,
-        channelDiagnostics: describeChannelDiagnostics({
-          attempts,
-          channelRetries,
-          context,
-          headers: plan.headers,
-          model,
-        }),
+        channelDiagnostics: {
+          ...describeChannelDiagnostics({
+            attempts,
+            body: plan.body,
+            channelRetries,
+            context,
+            headers: plan.headers,
+            model,
+          }),
+          probes: await probeChannelVariants(
+            plan.url,
+            plan.body as Record<string, unknown>,
+            plan.headers,
+          ),
+        },
         context,
         detail,
         response,
@@ -2283,26 +2312,193 @@ const headersToRecord = (headers: HeadersInit): Record<string, string> => {
  * error: the next rejection explains itself instead of starting another round of
  * guessing which header the upstream disliked.
  */
+/**
+ * Shapes of the same request, tried one at a time to isolate the channel check.
+ *
+ * The upstream answers `11128` before routing, so every probe is rejected at the
+ * same gate: whichever shape comes back without that code names the property the
+ * gate is looking for. Nothing here changes what the caller asked for — the
+ * messages and tools are identical in every variant.
+ */
+const buildChannelProbeVariants = (
+  body: Record<string, unknown>,
+  headers: HeadersInit,
+): Array<{
+  body: Record<string, unknown>;
+  headers: Headers;
+  name: string;
+}> => {
+  const base = new Headers(headers);
+  base.delete('content-encoding');
+  base.delete('content-length');
+
+  const variant = (
+    name: string,
+    adjust: (headers: Headers, payload: Record<string, unknown>) => void,
+  ) => {
+    const nextHeaders = new Headers(base);
+    const nextBody = { ...body };
+    adjust(nextHeaders, nextBody);
+    return { body: nextBody, headers: nextHeaders, name };
+  };
+
+  return [
+    // Baseline without compression: separates "the body is compressed" from
+    // everything else.
+    variant('plainBody', () => {}),
+    variant('officialParams', (_headers, payload) => {
+      payload.cache_retention ??= 'long';
+      payload.max_tokens ??= 128_000;
+      payload.reasoning_effort ??= 'high';
+      payload.reasoning_summary ??= 'auto';
+      payload.temperature ??= 1;
+      payload.verbosity ??= 'high';
+    }),
+    variant('ideChannel', (nextHeaders) => {
+      nextHeaders.set('x-ide-name', 'IntelliJ IDEA');
+      nextHeaders.set('x-ide-type', 'JetBrains');
+      nextHeaders.set('x-ide-version', '2025.2');
+    }),
+    variant('macShape', (nextHeaders) => {
+      nextHeaders.set('x-stainless-arch', 'arm64');
+      nextHeaders.set('x-stainless-os', 'MacOS');
+    }),
+    variant('freshIds', (nextHeaders) => {
+      const requestId = uuidV7();
+      nextHeaders.set('x-request-id', requestId);
+      nextHeaders.set('x-conversation-message-id', requestId);
+      nextHeaders.set('x-conversation-id', uuidV7());
+      nextHeaders.set('x-conversation-request-id', requestId);
+      nextHeaders.set('x-root-request-id', requestId);
+    }),
+    variant('noTrace', (nextHeaders) => {
+      for (const name of [
+        'b3',
+        'baggage',
+        'traceparent',
+        'x-b3-parentspanid',
+        'x-b3-sampled',
+        'x-b3-spanid',
+        'x-b3-traceid',
+        'x-trace-id',
+      ]) {
+        nextHeaders.delete(name);
+      }
+    }),
+    // The official client opens every conversation with its own system
+    // preamble, so a gate that checks the request "looks like CodeBuddy Code"
+    // would see a difference here.
+    variant('codebuddyPreamble', (_headers, payload) => {
+      const messages = Array.isArray(payload.messages)
+        ? (payload.messages as unknown[])
+        : [];
+      payload.messages = [
+        { content: 'You are CodeBuddy Code.', role: 'system' },
+        ...messages,
+      ];
+    }),
+    variant('webChannel', (nextHeaders) => {
+      nextHeaders.set('x-ide-name', 'web');
+      nextHeaders.set('x-ide-type', 'web');
+      nextHeaders.set('x-product', 'SaaS');
+      nextHeaders.delete('x-agent-intent');
+      nextHeaders.delete('x-agent-purpose');
+      nextHeaders.delete('x-agent-runtime');
+      nextHeaders.delete('x-agent-type');
+      nextHeaders.delete('x-codebuddy-request');
+    }),
+  ];
+};
+
+/** Runs the probe variants in parallel and reports each one's outcome. */
+const probeChannelVariants = async (
+  url: string,
+  body: Record<string, unknown>,
+  headers: HeadersInit,
+): Promise<Record<string, string>> => {
+  if (!isChannelProbeEnabled()) {
+    return {};
+  }
+
+  const results = await Promise.all(
+    buildChannelProbeVariants(body, headers).map(async (variant) => {
+      try {
+        const response = await fetch(url, {
+          body: JSON.stringify(variant.body),
+          cache: 'no-store',
+          headers: variant.headers,
+          method: 'POST',
+          signal: AbortSignal.timeout(CHANNEL_PROBE_TIMEOUT_MS),
+        });
+        const text = await response.text().catch(() => '');
+        const code = (() => {
+          try {
+            return (JSON.parse(text) as { code?: unknown }).code;
+          } catch {
+            return null;
+          }
+        })();
+
+        return [
+          variant.name,
+          `${response.status}/${String(code ?? '-')}`,
+        ] as const;
+      } catch (error) {
+        return [variant.name, `error:${(error as Error).name}`] as const;
+      }
+    }),
+  );
+
+  return Object.fromEntries(results);
+};
+
 const describeChannelDiagnostics = ({
   attempts,
+  body,
   channelRetries,
   context,
   headers,
   model,
 }: {
   attempts: number;
+  body?: unknown;
   channelRetries: number;
   context: ProxyContext;
   headers: HeadersInit;
   model?: string;
-}): Record<string, unknown> => ({
-  attempts,
-  channelRetries,
-  channelHeaders: describeChannelHeaders(headers),
-  credentialFilename: context.credentialFilename ?? null,
-  model: model ?? null,
-  tokenClaims: describeTokenClaims(headers),
-});
+}): Record<string, unknown> => {
+  const messages = Array.isArray((body as { messages?: unknown })?.messages)
+    ? ((body as { messages: Array<{ content?: unknown; role?: unknown }> })
+        .messages ?? [])
+    : [];
+  const systemText = messages
+    .filter((message) => message?.role === 'system')
+    .map((message) =>
+      typeof message.content === 'string'
+        ? message.content
+        : JSON.stringify(message.content ?? ''),
+    )
+    .join('\n');
+
+  return {
+    attempts,
+    bodyShape: {
+      hasTools: Array.isArray((body as { tools?: unknown })?.tools),
+      messageCount: messages.length,
+      stream: (body as { stream?: unknown })?.stream === true,
+      // The opening of the system prompt is what a channel check reads first, so
+      // it travels with the error instead of being invisible in a log.
+      systemHead: systemText.slice(0, 200),
+      systemMessages: messages.filter((message) => message?.role === 'system')
+        .length,
+    },
+    channelRetries,
+    channelHeaders: describeChannelHeaders(headers),
+    credentialFilename: context.credentialFilename ?? null,
+    model: model ?? null,
+    tokenClaims: describeTokenClaims(headers),
+  };
+};
 
 /**
  * The non-secret claims of the bearer token that was sent, when it is a JWT.

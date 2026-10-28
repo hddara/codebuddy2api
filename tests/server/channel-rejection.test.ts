@@ -173,6 +173,10 @@ describe('upstream channel rejection (code 11128)', () => {
   });
 
   it('gives up after its own budget instead of retrying forever', async () => {
+    // Probes re-send the rejected request, so they are off here: this test is
+    // about how many times the *request* is attempted.
+    process.env.CODEBUDDY_CHANNEL_PROBES = '0';
+
     await addCredential(
       { bearer_token: 'token-a', user_id: 'a@example.com' },
       'a',
@@ -219,5 +223,38 @@ describe('upstream channel rejection (code 11128)', () => {
     expect(diagnostics.channelHeaders['x-domain']).toBe('www.codebuddy.cn');
     // `token-a` is not a JWT, so there is nothing to decode and nothing to leak.
     expect(diagnostics.tokenClaims).toBeNull();
+  });
+
+  it('replays the rejected request in variants so the gate can be identified', async () => {
+    delete process.env.CODEBUDDY_CHANNEL_PROBES;
+    await addCredential(
+      { bearer_token: 'token-a', user_id: 'a@example.com' },
+      'a',
+    );
+    // Every call is refused with the channel code except the probe sent with
+    // official sampling parameters, which is the shape under suspicion.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async (_input, init?: RequestInit) => {
+        const sent = JSON.parse(String(init?.body)) as { verbosity?: string };
+        return sent.verbosity ? okResponse() : rejectionResponse();
+      },
+    );
+
+    const response = await proxyChatCompletions(makeNextRequest(), body);
+    const payload = (await response.json()) as { error?: { detail?: string } };
+    const detail = payload.error?.detail ?? '';
+    const diagnostics = JSON.parse(
+      detail.slice(detail.indexOf('channel-diagnostics: ') + 21),
+    ) as {
+      bodyShape: { messageCount: number; systemMessages: number };
+      probes: Record<string, string>;
+    };
+
+    expect(response.status).toBe(400);
+    expect(diagnostics.bodyShape.messageCount).toBe(1);
+    expect(diagnostics.bodyShape.systemMessages).toBe(0);
+    expect(diagnostics.probes.officialParams).toBe('200/-');
+    expect(diagnostics.probes.plainBody).toBe('400/11128');
+    expect(diagnostics.probes.webChannel).toBe('400/11128');
   });
 });
