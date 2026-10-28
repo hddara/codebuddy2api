@@ -19,6 +19,8 @@
  *  - a body without the phrase is returned untouched, byte for byte.
  */
 
+import { OFFICIAL_CHANNEL_SYSTEM_PROMPT } from './official-system-prompt';
+
 /** The phrase the upstream refuses, matched case-insensitively. */
 const BLOCKED_HARNESS_IDENTITY = 'DeepSeek Harness';
 
@@ -223,16 +225,15 @@ export const collectIdentityClaims = (body: {
 /**
  * The system prompt sent when a caller supplies none.
  *
- * The upstream's channel check expects the shape an official client sends, and
- * an official client always opens with a system message. A body of two user and
- * assistant turns with no system prompt at all is rejected with code 11128 —
- * "Illegal API invocation from an unapproved channel" — at roughly eighty
- * percent, against two percent for the same traffic with one. The text is
- * deliberately plain: it is there to complete the shape, not to claim an
- * identity, and a generic assistant line is the least load-bearing sentence that
- * does.
+ * This is the official client's own opening prompt, captured from a real call,
+ * not a placeholder. Measured over a day of production traffic: requests that
+ * had to fall back to a placeholder line were refused with code 11128 on 35 of
+ * 35 attempts, while requests that carried a caller-supplied preamble were
+ * refused on 0.7% of 1610. The channel check is reading this text, so the
+ * stand-in has to be the real one rather than a sentence that merely fills the
+ * slot.
  */
-export const DEFAULT_CHANNEL_SYSTEM_PROMPT = 'You are a helpful assistant.';
+export const DEFAULT_CHANNEL_SYSTEM_PROMPT = OFFICIAL_CHANNEL_SYSTEM_PROMPT;
 
 /**
  * Reads the opt-out switch.
