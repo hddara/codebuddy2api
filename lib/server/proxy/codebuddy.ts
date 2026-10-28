@@ -2143,6 +2143,17 @@ const uuidV7 = (): string => {
 };
 
 /**
+ * Reuses an inbound correlation id only when it is shaped like an id.
+ *
+ * The header names are the official client's, so the upstream expects the values
+ * to be too; a caller that puts a product name or a sentence in `x-conversation-id`
+ * would otherwise have it forwarded verbatim under an official header.
+ */
+const reusedId = (value: string | undefined, fallback: string): string => {
+  return value && /^[0-9A-Za-z_.-]{2,64}$/.test(value) ? value : fallback;
+};
+
+/**
  * Trace context the official client attaches to every completion call.
  *
  * Two propagation formats are sent at once — W3C (`traceparent`, `baggage`) and
@@ -2153,24 +2164,19 @@ const uuidV7 = (): string => {
 const buildTraceHeaders = ({
   conversationId,
   conversationRequestId,
-  incoming,
 }: {
   conversationId: string;
   conversationRequestId: string;
-  incoming: Record<string, string>;
 }): Record<string, string> => {
-  const traceId =
-    incoming.traceparent?.split('-')[1] ??
-    incoming['x-b3-traceid'] ??
-    incoming['x-trace-id'] ??
-    crypto.randomUUID().replaceAll('-', '');
-  const parentSpanId =
-    incoming.traceparent?.split('-')[2] ??
-    incoming['x-b3-spanid'] ??
-    crypto.randomUUID().replaceAll('-', '').slice(0, 16);
+  // Generated here, never adopted from the caller. A W3C `traceparent` carries
+  // the trace flags and span layout of whoever minted it, and an inbound one is
+  // one more way for the upstream to tell this request apart from the official
+  // client's.
+  const traceId = crypto.randomUUID().replaceAll('-', '');
+  const parentSpanId = crypto.randomUUID().replaceAll('-', '').slice(0, 16);
   const spanId = crypto.randomUUID().replaceAll('-', '').slice(0, 16);
 
-  const headers: Record<string, string> = {
+  return {
     baggage: `codebuddy.session_id=${conversationId},codebuddy.conversation_request_id=${conversationRequestId}`,
     b3: `${traceId}-${spanId}-1-${parentSpanId}`,
     'x-b3-parentspanid': parentSpanId,
@@ -2178,16 +2184,8 @@ const buildTraceHeaders = ({
     'x-b3-spanid': spanId,
     'x-b3-traceid': traceId,
     'x-trace-id': traceId,
+    traceparent: `00-${traceId}-${spanId}-01`,
   };
-
-  // A caller that already opened a trace keeps its own `traceparent` verbatim;
-  // replacing it here would detach the gateway's span from the trace the caller
-  // is watching.
-  if (!incoming.traceparent) {
-    headers.traceparent = `00-${traceId}-${spanId}-01`;
-  }
-
-  return headers;
 };
 
 const buildUpstreamHeaders = async (
@@ -2196,18 +2194,26 @@ const buildUpstreamHeaders = async (
 ): Promise<HeadersInit> => {
   const baseUrl = new URL(await getCodeBuddyApiEndpoint());
   const incoming = getRequestHeaderMap(request.headers);
-  const requestId = incoming['x-request-id'] ?? uuidV7().replaceAll('-', '');
-  const conversationId = incoming['x-conversation-id'] ?? uuidV7();
-  const conversationRequestId =
-    incoming['x-conversation-request-id'] ?? uuidV7().replaceAll('-', '');
-  const conversationMessageId =
-    incoming['x-conversation-message-id'] ?? uuidV7().replaceAll('-', '');
-  const headers = new Headers(incoming);
-
-  // Session bookkeeping is ours, not the upstream's: the official client carries
-  // the session id in `baggage` and never sends these two as plain headers.
-  headers.delete('x-session-id');
-  headers.delete('x-originator');
+  const requestId = reusedId(
+    incoming['x-request-id'],
+    uuidV7().replaceAll('-', ''),
+  );
+  const conversationId = reusedId(incoming['x-conversation-id'], uuidV7());
+  const conversationRequestId = reusedId(
+    incoming['x-conversation-request-id'],
+    uuidV7().replaceAll('-', ''),
+  );
+  const conversationMessageId = reusedId(
+    incoming['x-conversation-message-id'],
+    uuidV7().replaceAll('-', ''),
+  );
+  // Built from nothing rather than from the caller's headers. The upstream's
+  // channel check reads the request as evidence of which client sent it, and a
+  // third-party caller's `origin`, `referer`, `sec-*`, `cookie`, or its own SDK's
+  // `x-*` headers are exactly the fingerprints that make the request look like
+  // not-CodeBuddy. Every header that reaches the upstream is now one this file
+  // puts there deliberately.
+  const headers = new Headers();
 
   headers.set('Accept', 'application/json');
   // The SDK compresses the body itself and tells the server not to bother with a
@@ -2247,7 +2253,7 @@ const buildUpstreamHeaders = async (
   headers.set('x-stainless-runtime-version', process.version);
 
   for (const [name, value] of Object.entries(
-    buildTraceHeaders({ conversationId, conversationRequestId, incoming }),
+    buildTraceHeaders({ conversationId, conversationRequestId }),
   )) {
     headers.set(name, value);
   }
@@ -2884,7 +2890,11 @@ const buildUpstreamBody = async (
     // by which a bare hand-written client stands out.
     cache_retention: body.cache_retention ?? 'long',
     reasoning_summary: body.reasoning_summary ?? 'auto',
-    extra_vars: body.extra_vars ?? buildHarnessExtraVars(),
+    // Always the official shape, never a caller's. `extra_vars` is the free-form
+    // bag the client fills in, so forwarding a third-party caller's copy would
+    // put its bookkeeping — client name, harness, session metadata — straight
+    // into the request whose channel the upstream is checking.
+    extra_vars: buildHarnessExtraVars(),
   };
 
   // Before sizing, so the injected prompt is part of what the budget measures

@@ -267,4 +267,51 @@ describe('upstream channel rejection (code 11128)', () => {
     expect(diagnostics.probes.plainBody).toBe('400/11128');
     expect(diagnostics.probes.webChannel).toBe('400/11128');
   });
+
+  it('sends only the official header set and no caller headers', async () => {
+    await addCredential(
+      { bearer_token: 'token-a', user_id: 'a@example.com' },
+      'a',
+    );
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(okResponse());
+    const request = new NextRequest('http://localhost/v1/chat/completions', {
+      headers: {
+        cookie: 'session=abc',
+        'x-conversation-id': 'DeepSeek Harness',
+        'x-dsh-harness': 'deepseek',
+        origin: 'https://harness.example',
+        referer: 'https://harness.example/app',
+        'user-agent': 'DeepSeekHarness/1.0',
+      },
+      method: 'POST',
+    });
+
+    await proxyChatCompletions(request, body);
+
+    // Read from what was actually handed to `fetch`, not from the builder: the
+    // bug guarded against is a header surviving the trip, not a missing `set`.
+    const sent = new Headers(
+      (fetchMock.mock.calls[0]?.[1] as RequestInit).headers,
+    );
+
+    for (const name of [
+      'cookie',
+      'origin',
+      'referer',
+      'x-dsh-harness',
+      'x-session-id',
+    ]) {
+      expect(sent.get(name)).toBeNull();
+    }
+    expect(sent.get('user-agent')).toBe('CLI/2.177.1 CodeBuddy/2.177.1');
+    expect(sent.get('x-ide-type')).toBe('CLI');
+    expect(sent.get('x-codebuddy-request')).toBe('1');
+    // A caller's text in an official correlation header would be forwarded under
+    // a name the upstream expects to hold an id.
+    expect(sent.get('x-conversation-id')).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+  });
 });

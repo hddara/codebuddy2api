@@ -1391,10 +1391,16 @@ describe('server units', () => {
     expect(upstreamHeaders.get('baggage')).toBe(
       `codebuddy.session_id=${upstreamHeaders.get('X-Conversation-ID')},codebuddy.conversation_request_id=${upstreamHeaders.get('X-Conversation-Request-ID')}`,
     );
-    expect(upstreamHeaders.get('traceparent')).toBe(
+    // The caller's trace is not adopted: a traceparent carries the span layout
+    // and flags of whoever minted it, which is one more way for the upstream to
+    // tell this request apart from the official client's.
+    expect(upstreamHeaders.get('traceparent')).not.toBe(
       '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01',
     );
-    expect(upstreamHeaders.get('tracestate')).toBe('vendor=value');
+    expect(upstreamHeaders.get('traceparent')).toMatch(
+      /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/,
+    );
+    expect(upstreamHeaders.get('tracestate')).toBeNull();
     expect(upstreamHeaders.get('Authorization')).toBe('Bearer token-a');
     expect(upstreamHeaders.get('User-Agent')).toBe(
       'CLI/2.177.1 CodeBuddy/2.177.1',
