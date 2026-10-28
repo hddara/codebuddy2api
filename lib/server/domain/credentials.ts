@@ -160,7 +160,11 @@ const pruneLimitedCredentials = (
         }
 
         const kind: RateLimitKind =
-          record.kind === 'quota' ? 'quota' : 'frequency';
+          record.kind === 'quota'
+            ? 'quota'
+            : record.kind === 'channel'
+              ? 'channel'
+              : 'frequency';
 
         return [
           [

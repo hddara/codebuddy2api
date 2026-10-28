@@ -6,6 +6,7 @@ import { NextRequest } from 'next/server';
 
 import {
   addCredential,
+  listCredentialLimits,
   resetCredentialRuntimeState,
 } from '@/lib/server/domain/credentials';
 import { proxyChatCompletions } from '@/lib/server/proxy/codebuddy';
@@ -223,6 +224,15 @@ describe('upstream channel rejection (code 11128)', () => {
     expect(diagnostics.channelHeaders['x-domain']).toBe('www.codebuddy.cn');
     // `token-a` is not a JWT, so there is nothing to decode and nothing to leak.
     expect(diagnostics.tokenClaims).toBeNull();
+
+    // An account that burns the whole budget is the one the gate keeps refusing,
+    // so it leaves the rotation for a while instead of costing the next caller.
+    const limits = await listCredentialLimits();
+    const channelLimited = limits.filter((entry) => entry.kind === 'channel');
+
+    expect(channelLimited).toHaveLength(1);
+    expect(channelLimited[0]?.code).toBe(11128);
+    expect(channelLimited[0]?.resumeAt).toBeGreaterThan(Date.now());
   });
 
   it('replays the rejected request in variants so the gate can be identified', async () => {

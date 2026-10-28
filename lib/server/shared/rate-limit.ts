@@ -8,7 +8,7 @@ import { truncateLogText } from './log';
  * with HTTP 429. The message carries an explicit reset instant, so the cooldown
  * can follow the quota window instead of guessing a backoff.
  */
-export type RateLimitKind = 'frequency' | 'quota';
+export type RateLimitKind = 'channel' | 'frequency' | 'quota';
 
 export interface RateLimitSignal {
   code: number | null;

@@ -970,12 +970,21 @@ const rotateToNextCredential = async ({
  * draw into a user-visible failure, and the client's own retry then re-sent the
  * whole body — the 43-errors-per-minute bursts in the logs.
  *
- * It is deliberately *not* a rate limit: the credential is healthy, so it is
- * not marked limited, it is only skipped for this one call.
+ * The refusal is not a rate limit, but it is not random across the pool either:
+ * production logs showed one account rejected on 45% of its requests while the
+ * rest of the pool sat at 0.6%. So a credential that burns the whole retry
+ * budget is put on a short cooldown instead of being tried again on the next
+ * request — the retry only helps if the next request draws a different account.
  */
 const CHANNEL_REJECTION_CODE = 11128;
 const CHANNEL_REJECTION_PATTERN = /unapproved channel/i;
 const MAX_CHANNEL_REJECTION_RETRIES = 2;
+/**
+ * How long a credential that exhausted its channel retries stays out of the
+ * rotation. Short, because the mark is a guess about the account, not a fact
+ * reported by the upstream: the account may well pass again in a few minutes.
+ */
+const CHANNEL_REJECTION_COOLDOWN_MS = 5 * 60_000;
 
 /**
  * Backoff unit for re-sending a channel rejection on the *same* account.
@@ -1665,6 +1674,21 @@ const fetchUpstreamWithRotation = async ({
     }
 
     if (isChannelRejection(detail)) {
+      // The retry budget is gone, so this account has now been refused
+      // `MAX_CHANNEL_REJECTION_RETRIES` times in a row: leave it out of the
+      // rotation for a while rather than spending the next caller's request on
+      // it. Marked only on exhaustion, so a single unlucky draw costs nothing.
+      if (context.credentialFilename) {
+        await markCredentialLimited({
+          code: CHANNEL_REJECTION_CODE,
+          filename: context.credentialFilename,
+          kind: 'channel',
+          reason: 'Illegal API invocation from an unapproved channel',
+          resumeAt: Date.now() + CHANNEL_REJECTION_COOLDOWN_MS,
+          status: response.status,
+        });
+      }
+
       return {
         attempts,
         channelDiagnostics: {
