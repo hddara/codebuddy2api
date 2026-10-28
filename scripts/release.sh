@@ -53,14 +53,14 @@ mkdir -p "$BUILDX_CONFIG"
 if [ -z "$TAG" ]; then
   base="$(date +%Y%m%d)"
   seq=1
-  while docker buildx imagetools inspect "$IMAGE:$base.T0$seq" >/dev/null 2>&1; do
+  while docker buildx imagetools inspect "$IMAGE:$(printf '%s.T%02d' "$base" "$seq")" >/dev/null 2>&1; do
     seq=$((seq + 1))
-    if [ "$seq" -gt 9 ]; then
+    if [ "$seq" -gt 99 ]; then
       echo "no free $base.TNN tag" >&2
       exit 1
     fi
   done
-  TAG="$base.T0$seq"
+  TAG="$(printf '%s.T%02d' "$base" "$seq")"
 fi
 
 echo "==> building $IMAGE:$TAG (linux/amd64)"
