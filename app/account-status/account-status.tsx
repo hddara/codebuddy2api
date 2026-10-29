@@ -3,6 +3,7 @@
 import {
   Alert,
   Block,
+  Collapse,
   Empty,
   Flexbox,
   SkeletonButton,
@@ -14,7 +15,7 @@ import {
   Tooltip,
 } from '@lobehub/ui';
 import { Button } from '@lobehub/ui/base-ui';
-import { Check, Copy, Info, RefreshCw } from 'lucide-react';
+import { Check, Copy, Info, Layers3, RefreshCw } from 'lucide-react';
 import { useLocale, useTranslations } from 'next-intl';
 import { useCallback, useMemo, useState } from 'react';
 
@@ -44,6 +45,18 @@ export interface AutoCheckinStatus {
   time: string;
 }
 
+export interface AccountCreditPackage {
+  capacityRemain: number | null;
+  capacitySize: number | null;
+  capacityUsed: number | null;
+  capacityUnit: string | null;
+  cycleEndTime: string | null;
+  cycleStartTime: string | null;
+  isExpired: boolean;
+  packageName: string | null;
+  status: number | null;
+}
+
 export interface AccountStatusSnapshot {
   checkin: { claimed: boolean | null; message: string | null };
   credits: {
@@ -52,6 +65,8 @@ export interface AccountStatusSnapshot {
     remaining: number | null;
     plan: string | null;
     resetAt: string | null;
+    packages?: AccountCreditPackage[];
+    usablePackageCount?: number;
   };
   error: string | null;
   filename: string;
@@ -264,6 +279,125 @@ const AutoCheckinBar = ({
   );
 };
 
+const formatCredits = (value: number | null): string =>
+  value === null ? '—' : String(value);
+
+const packagePercent = (quotaPackage: AccountCreditPackage): number | null => {
+  const { capacityRemain, capacitySize } = quotaPackage;
+  if (capacitySize === null || capacitySize <= 0 || capacityRemain === null)
+    return null;
+  return Math.min(100, Math.max(0, (capacityRemain / capacitySize) * 100));
+};
+
+const packageTone = (quotaPackage: AccountCreditPackage): string => {
+  if (quotaPackage.isExpired) return 'exhausted';
+  const percent = packagePercent(quotaPackage);
+  if (percent === null) return 'unknown';
+  return percent <= 20 ? 'warning' : 'normal';
+};
+
+/**
+ * Per-package breakdown of the account's credits. The progress bar above only
+ * shows the usable totals, so this list is where an operator sees how the
+ * allowance splits across packages, which one runs out first, and what the
+ * expired packages used to hold.
+ */
+const PackageBreakdown = ({
+  packages,
+}: {
+  packages: AccountCreditPackage[];
+}) => {
+  const text = useTranslations('Admin');
+  return (
+    <div className="account-status-packages">
+      <table>
+        <thead>
+          <tr>
+            <th>{text('accountStatus.packageName')}</th>
+            <th>{text('accountStatus.packageRemaining')}</th>
+            <th>{text('accountStatus.packageCycle')}</th>
+            <th>{text('accountStatus.packageStatus')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {packages.map((quotaPackage, index) => {
+            const percent = packagePercent(quotaPackage);
+            return (
+              <tr
+                className={
+                  quotaPackage.isExpired
+                    ? 'account-status-package-expired'
+                    : undefined
+                }
+                key={`${quotaPackage.packageName ?? 'package'}-${index}`}
+              >
+                <td>
+                  <Text strong>
+                    {quotaPackage.packageName ??
+                      text('accountStatus.packageUnnamed')}
+                  </Text>
+                  {quotaPackage.capacityUnit ? (
+                    <Text
+                      className="account-status-package-unit"
+                      type="secondary"
+                    >
+                      {quotaPackage.capacityUnit}
+                    </Text>
+                  ) : null}
+                </td>
+                <td>
+                  <Flexbox direction="vertical" gap={4}>
+                    <span className="account-status-package-values">
+                      {formatCredits(quotaPackage.capacityRemain)} /{' '}
+                      {formatCredits(quotaPackage.capacitySize)}
+                      {percent === null ? '' : ` (${percent.toFixed(0)}%)`}
+                    </span>
+                    <progress
+                      aria-label={text(
+                        'accountStatus.packageRemainingPercent',
+                        {
+                          percent: percent === null ? 0 : Math.round(percent),
+                        },
+                      )}
+                      className={`account-status-progress account-status-progress-${packageTone(quotaPackage)}`}
+                      max={100}
+                      value={percent ?? 0}
+                    />
+                    <Text type="secondary">
+                      {text('accountStatus.packageUsed', {
+                        value: formatCredits(quotaPackage.capacityUsed),
+                      })}
+                    </Text>
+                  </Flexbox>
+                </td>
+                <td>
+                  <Flexbox direction="vertical" gap={2}>
+                    <span>
+                      {text('accountStatus.packageCycleStart')}:{' '}
+                      {quotaPackage.cycleStartTime ?? '—'}
+                    </span>
+                    <span>
+                      {text('accountStatus.packageCycleEnd')}:{' '}
+                      {quotaPackage.cycleEndTime ?? '—'}
+                    </span>
+                  </Flexbox>
+                </td>
+                <td>
+                  <Tag color={quotaPackage.isExpired ? 'red' : 'green'}>
+                    {quotaPackage.isExpired
+                      ? text('accountStatus.packageExpired')
+                      : text('accountStatus.packageActive')}
+                  </Tag>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
 const AccountStatusCard = ({
   credential,
   snapshot,
@@ -338,6 +472,26 @@ const AccountStatusCard = ({
           {text('accountStatus.resetAt')}: {snapshot.credits.resetAt ?? '—'}
         </Text>
       </Flexbox>
+      {snapshot.credits.packages?.length ? (
+        <Collapse
+          className="account-status-package-collapse"
+          items={[
+            {
+              children: (
+                <PackageBreakdown packages={snapshot.credits.packages ?? []} />
+              ),
+              desc: text('accountStatus.packagesSummary', {
+                total: snapshot.credits.packages.length,
+                usable: snapshot.credits.usablePackageCount ?? 0,
+              }),
+              icon: Layers3,
+              key: 'packages',
+              label: text('accountStatus.packages'),
+            },
+          ]}
+          variant="outlined"
+        />
+      ) : null}
       <Flexbox
         align="center"
         className="account-status-card-checkin"

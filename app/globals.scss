@@ -325,6 +325,53 @@ textarea {
   background: var(--lobe-color-fill);
 }
 
+.account-status-packages {
+  overflow-x: auto;
+}
+
+.account-status-packages table {
+  border-collapse: collapse;
+  font-size: 13px;
+  min-width: 560px;
+  width: 100%;
+}
+
+.account-status-packages th,
+.account-status-packages td {
+  border-bottom: 1px solid var(--lobe-color-border-secondary, rgb(0 0 0 / 6%));
+  padding: 8px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.account-status-packages th {
+  color: var(--lobe-color-text-secondary);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.account-status-packages tr:last-child td {
+  border-bottom: none;
+}
+
+.account-status-package-unit {
+  display: block;
+  font-size: 12px;
+}
+
+.account-status-package-values {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.account-status-package-expired {
+  opacity: 0.6;
+}
+
+.account-status-package-expired .account-status-package-values {
+  text-decoration: line-through;
+}
+
 .dashboard-github-link {
   align-items: center;
   align-self: center;

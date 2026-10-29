@@ -20,8 +20,11 @@ export interface AccountStatusSnapshot {
       capacityRemain: number | null;
       capacitySize: number | null;
       capacityUsed: number | null;
+      capacityUnit: string | null;
       cycleEndTime: string | null;
       cycleStartTime: string | null;
+      /** Whether this package counts toward the account totals above. */
+      isExpired: boolean;
       packageName: string | null;
       status: number | null;
     }>;
@@ -261,6 +264,7 @@ interface QuotaPackage {
   capacityRemain: number | null;
   capacitySize: number | null;
   capacityUsed: number | null;
+  capacityUnit: string | null;
   cycleEndTime: string | null;
   cycleStartTime: string | null;
   packageName: string | null;
@@ -271,6 +275,7 @@ const PACKAGE_FIELDS = {
   capacityRemain: ['CycleCapacityRemain', 'CapacityRemain'],
   capacitySize: ['CycleCapacitySize', 'CapacitySize'],
   capacityUsed: ['CycleCapacityUsed', 'CapacityUsed'],
+  capacityUnit: ['CapacityUnit'],
   cycleEndTime: ['CycleEndTime'],
   cycleStartTime: ['CycleStartTime'],
   packageName: ['PackageName'],
@@ -281,7 +286,7 @@ const PACKAGE_FIELDS = {
  * `Status: 3` marks an expired package. Its capacity must never be counted as
  * available, which is exactly what the previous account-level aggregation did.
  */
-const EXPIRED_PACKAGE_STATUS = 3;
+export const EXPIRED_PACKAGE_STATUS = 3;
 
 const toRecordArray = (value: unknown): Array<Record<string, unknown>> =>
   Array.isArray(value)
@@ -308,6 +313,7 @@ const extractQuotaPackages = (payload: unknown): QuotaPackage[] => {
     ),
     capacitySize: toNumber(findOwnValue(record, PACKAGE_FIELDS.capacitySize)),
     capacityUsed: toNumber(findOwnValue(record, PACKAGE_FIELDS.capacityUsed)),
+    capacityUnit: readString(record, PACKAGE_FIELDS.capacityUnit),
     cycleEndTime: readString(record, PACKAGE_FIELDS.cycleEndTime),
     cycleStartTime: readString(record, PACKAGE_FIELDS.cycleStartTime),
     packageName: readString(record, PACKAGE_FIELDS.packageName),
@@ -426,7 +432,10 @@ const loadAccountStatus = async (
           ),
         ].join(' + ') || null,
       resetAt: pickResetAt(usablePackages),
-      packages: quotaPackages,
+      packages: quotaPackages.map((quotaPackage) => ({
+        ...quotaPackage,
+        isExpired: !isUsablePackage(quotaPackage),
+      })),
       usablePackageCount: usablePackages.length,
     },
     error: errors.length ? errors.join('; ') : null,

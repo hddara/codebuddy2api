@@ -61,7 +61,20 @@
       "autoCheckinSucceeded": "前回成功 {succeeded}/{total}",
       "autoCheckinFailed": "前回失敗 {failed}/{total}",
       "autoCheckinIdle": "未実行",
-      "autoCheckinRun": "今すぐ実行"
+      "autoCheckinRun": "今すぐ実行",
+      "packages": "クレジットパッケージ",
+      "packagesSummary": "全 {total} 件、有効 {usable} 件",
+      "packageName": "パッケージ",
+      "packageRemaining": "残り",
+      "packageUsed": "使用済み {value}",
+      "packageCycle": "サイクル",
+      "packageCycleStart": "開始",
+      "packageCycleEnd": "終了",
+      "packageStatus": "状態",
+      "packageActive": "有効",
+      "packageExpired": "期限切れ",
+      "packageUnnamed": "名称未設定のパッケージ",
+      "packageRemainingPercent": "残り {percent}%"
     },
     "dashboard": {
       "welcomeTitle": "トークンをぶん回す準備はできた？",

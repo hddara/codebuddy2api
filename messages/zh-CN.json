@@ -61,7 +61,20 @@
       "autoCheckinSucceeded": "上次成功 {succeeded}/{total}",
       "autoCheckinFailed": "上次失败 {failed}/{total}",
       "autoCheckinIdle": "尚未执行",
-      "autoCheckinRun": "立即执行"
+      "autoCheckinRun": "立即执行",
+      "packages": "积分包",
+      "packagesSummary": "共 {total} 个，{usable} 个可用",
+      "packageName": "积分包",
+      "packageRemaining": "剩余",
+      "packageUsed": "已用 {value}",
+      "packageCycle": "周期",
+      "packageCycleStart": "开始",
+      "packageCycleEnd": "结束",
+      "packageStatus": "状态",
+      "packageActive": "可用",
+      "packageExpired": "已过期",
+      "packageUnnamed": "未命名积分包",
+      "packageRemainingPercent": "剩余 {percent}%"
     },
     "dashboard": {
       "welcomeTitle": "做好蹬的准备了吗？",

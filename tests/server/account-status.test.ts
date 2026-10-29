@@ -146,8 +146,13 @@ describe('account status domain', () => {
     });
     expect(result.credits.packages).toHaveLength(2);
     expect(result.credits.packages[1]).toMatchObject({
+      isExpired: true,
       packageName: 'Expired pack',
       status: 3,
+    });
+    expect(result.credits.packages[0]).toMatchObject({
+      capacityUnit: 'credits',
+      isExpired: false,
     });
   });
 

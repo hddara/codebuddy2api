@@ -61,7 +61,20 @@
       "autoCheckinSucceeded": "last run succeeded {succeeded}/{total}",
       "autoCheckinFailed": "last run failed {failed}/{total}",
       "autoCheckinIdle": "not run yet",
-      "autoCheckinRun": "Run now"
+      "autoCheckinRun": "Run now",
+      "packages": "Credit packages",
+      "packagesSummary": "{total} packages, {usable} active",
+      "packageName": "Package",
+      "packageRemaining": "Remaining",
+      "packageUsed": "Used {value}",
+      "packageCycle": "Cycle",
+      "packageCycleStart": "Start",
+      "packageCycleEnd": "End",
+      "packageStatus": "Status",
+      "packageActive": "Active",
+      "packageExpired": "Expired",
+      "packageUnnamed": "Unnamed package",
+      "packageRemainingPercent": "{percent}% remaining"
     },
     "dashboard": {
       "welcomeTitle": "Ready to crank through some tokens?",
