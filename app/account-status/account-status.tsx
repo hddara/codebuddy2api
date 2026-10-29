@@ -6,6 +6,7 @@ import {
   Collapse,
   Empty,
   Flexbox,
+  Segmented,
   SkeletonButton,
   SkeletonParagraph,
   SkeletonTags,
@@ -54,7 +55,18 @@ export interface AccountCreditPackage {
   cycleStartTime: string | null;
   isExpired: boolean;
   packageName: string | null;
+  packageType: string | null;
   status: number | null;
+}
+
+export interface AccountCreditPackageType {
+  capacityRemain: number | null;
+  capacitySize: number | null;
+  capacityUsed: number | null;
+  cycleEndTime: string | null;
+  isExpired: boolean;
+  packageCount: number;
+  packageType: string | null;
 }
 
 export interface AccountStatusSnapshot {
@@ -66,6 +78,7 @@ export interface AccountStatusSnapshot {
     plan: string | null;
     resetAt: string | null;
     packages?: AccountCreditPackage[];
+    packageTypes?: AccountCreditPackageType[];
     usablePackageCount?: number;
   };
   error: string | null;
@@ -282,32 +295,140 @@ const AutoCheckinBar = ({
 const formatCredits = (value: number | null): string =>
   value === null ? '—' : String(value);
 
-const packagePercent = (quotaPackage: AccountCreditPackage): number | null => {
-  const { capacityRemain, capacitySize } = quotaPackage;
-  if (capacitySize === null || capacitySize <= 0 || capacityRemain === null)
-    return null;
-  return Math.min(100, Math.max(0, (capacityRemain / capacitySize) * 100));
+const percentOf = (
+  remaining: number | null,
+  size: number | null,
+): number | null => {
+  if (size === null || size <= 0 || remaining === null) return null;
+  return Math.min(100, Math.max(0, (remaining / size) * 100));
 };
 
-const packageTone = (quotaPackage: AccountCreditPackage): string => {
-  if (quotaPackage.isExpired) return 'exhausted';
-  const percent = packagePercent(quotaPackage);
+const toneOf = (percent: number | null, isExpired: boolean): string => {
+  if (isExpired) return 'exhausted';
   if (percent === null) return 'unknown';
   return percent <= 20 ? 'warning' : 'normal';
 };
 
-/**
- * Per-package breakdown of the account's credits. The progress bar above only
- * shows the usable totals, so this list is where an operator sees how the
- * allowance splits across packages, which one runs out first, and what the
- * expired packages used to hold.
- */
-const PackageBreakdown = ({
-  packages,
+/** The package list can be scoped to what the operator needs to see. */
+type PackageScope = 'usable' | 'expired' | 'all';
+
+const packageMatchesScope = (
+  isExpired: boolean,
+  scope: PackageScope,
+): boolean =>
+  scope === 'all' ||
+  (scope === 'usable' && !isExpired) ||
+  (scope === 'expired' && isExpired);
+
+const PackageProgress = ({
+  isExpired,
+  remaining,
+  size,
 }: {
-  packages: AccountCreditPackage[];
+  isExpired: boolean;
+  remaining: number | null;
+  size: number | null;
 }) => {
   const text = useTranslations('Admin');
+  const percent = percentOf(remaining, size);
+  return (
+    <Flexbox direction="vertical" gap={4}>
+      <span className="account-status-package-values">
+        {formatCredits(remaining)} / {formatCredits(size)}
+        {percent === null ? '' : ` (${percent.toFixed(0)}%)`}
+      </span>
+      <progress
+        aria-label={text('accountStatus.packageRemainingPercent', {
+          percent: percent === null ? 0 : Math.round(percent),
+        })}
+        className={`account-status-progress account-status-progress-${toneOf(percent, isExpired)}`}
+        max={100}
+        value={percent ?? 0}
+      />
+    </Flexbox>
+  );
+};
+
+/**
+ * Per-type totals. Packages arrive one per grant, so an account that claims the
+ * same daily plan for a month holds dozens of rows that differ only by cycle;
+ * this is the view that answers "how much of each plan is left".
+ */
+const PackageTypeTable = ({ types }: { types: AccountCreditPackageType[] }) => {
+  const text = useTranslations('Admin');
+  return (
+    <div className="account-status-packages">
+      <table>
+        <thead>
+          <tr>
+            <th>{text('accountStatus.packageType')}</th>
+            <th>{text('accountStatus.packageCount')}</th>
+            <th>{text('accountStatus.packageRemaining')}</th>
+            <th>{text('accountStatus.packageUsedShort')}</th>
+            <th>{text('accountStatus.packageCycleEnd')}</th>
+            <th>{text('accountStatus.packageStatus')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {types.map((type, index) => (
+            <tr
+              className={
+                type.isExpired ? 'account-status-package-expired' : undefined
+              }
+              key={`${type.packageType ?? 'type'}-${type.isExpired}-${index}`}
+            >
+              <td>
+                <Text strong>
+                  {type.packageType ?? text('accountStatus.packageUnnamed')}
+                </Text>
+              </td>
+              <td>{type.packageCount}</td>
+              <td>
+                <PackageProgress
+                  isExpired={type.isExpired}
+                  remaining={type.capacityRemain}
+                  size={type.capacitySize}
+                />
+              </td>
+              <td>{formatCredits(type.capacityUsed)}</td>
+              <td>{type.cycleEndTime ?? '—'}</td>
+              <td>
+                <Tag color={type.isExpired ? 'red' : 'green'}>
+                  {type.isExpired
+                    ? text('accountStatus.packageExpired')
+                    : text('accountStatus.packageActive')}
+                </Tag>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
+const PackageBreakdown = ({
+  packages,
+  scope,
+}: {
+  packages: AccountCreditPackage[];
+  scope: PackageScope;
+}) => {
+  const text = useTranslations('Admin');
+  const visible = packages.filter((quotaPackage) =>
+    packageMatchesScope(quotaPackage.isExpired, scope),
+  );
+
+  if (!visible.length) {
+    return (
+      <Text type="secondary">
+        {scope === 'expired'
+          ? text('accountStatus.noExpiredPackages')
+          : text('accountStatus.noPackagesInScope')}
+      </Text>
+    );
+  }
+
   return (
     <div className="account-status-packages">
       <table>
@@ -320,81 +441,88 @@ const PackageBreakdown = ({
           </tr>
         </thead>
         <tbody>
-          {packages.map((quotaPackage, index) => {
-            const percent = packagePercent(quotaPackage);
-            return (
-              <tr
-                className={
-                  quotaPackage.isExpired
-                    ? 'account-status-package-expired'
-                    : undefined
-                }
-                key={`${quotaPackage.packageName ?? 'package'}-${index}`}
-              >
-                <td>
-                  <Text strong>
-                    {quotaPackage.packageName ??
-                      text('accountStatus.packageUnnamed')}
+          {visible.map((quotaPackage, index) => (
+            <tr
+              className={
+                quotaPackage.isExpired
+                  ? 'account-status-package-expired'
+                  : undefined
+              }
+              key={`${quotaPackage.packageName ?? 'package'}-${index}`}
+            >
+              <td>
+                <Text strong>
+                  {quotaPackage.packageName ??
+                    text('accountStatus.packageUnnamed')}
+                </Text>
+                {quotaPackage.capacityUnit ? (
+                  <Text
+                    className="account-status-package-unit"
+                    type="secondary"
+                  >
+                    {quotaPackage.capacityUnit}
                   </Text>
-                  {quotaPackage.capacityUnit ? (
-                    <Text
-                      className="account-status-package-unit"
-                      type="secondary"
-                    >
-                      {quotaPackage.capacityUnit}
-                    </Text>
-                  ) : null}
-                </td>
-                <td>
-                  <Flexbox direction="vertical" gap={4}>
-                    <span className="account-status-package-values">
-                      {formatCredits(quotaPackage.capacityRemain)} /{' '}
-                      {formatCredits(quotaPackage.capacitySize)}
-                      {percent === null ? '' : ` (${percent.toFixed(0)}%)`}
-                    </span>
-                    <progress
-                      aria-label={text(
-                        'accountStatus.packageRemainingPercent',
-                        {
-                          percent: percent === null ? 0 : Math.round(percent),
-                        },
-                      )}
-                      className={`account-status-progress account-status-progress-${packageTone(quotaPackage)}`}
-                      max={100}
-                      value={percent ?? 0}
-                    />
-                    <Text type="secondary">
-                      {text('accountStatus.packageUsed', {
-                        value: formatCredits(quotaPackage.capacityUsed),
-                      })}
-                    </Text>
-                  </Flexbox>
-                </td>
-                <td>
-                  <Flexbox direction="vertical" gap={2}>
-                    <span>
-                      {text('accountStatus.packageCycleStart')}:{' '}
-                      {quotaPackage.cycleStartTime ?? '—'}
-                    </span>
-                    <span>
-                      {text('accountStatus.packageCycleEnd')}:{' '}
-                      {quotaPackage.cycleEndTime ?? '—'}
-                    </span>
-                  </Flexbox>
-                </td>
-                <td>
-                  <Tag color={quotaPackage.isExpired ? 'red' : 'green'}>
-                    {quotaPackage.isExpired
-                      ? text('accountStatus.packageExpired')
-                      : text('accountStatus.packageActive')}
-                  </Tag>
-                </td>
-              </tr>
-            );
-          })}
+                ) : null}
+              </td>
+              <td>
+                <PackageProgress
+                  isExpired={quotaPackage.isExpired}
+                  remaining={quotaPackage.capacityRemain}
+                  size={quotaPackage.capacitySize}
+                />
+                <Text type="secondary">
+                  {text('accountStatus.packageUsed', {
+                    value: formatCredits(quotaPackage.capacityUsed),
+                  })}
+                </Text>
+              </td>
+              <td>
+                <Flexbox direction="vertical" gap={2}>
+                  <span>
+                    {text('accountStatus.packageCycleStart')}:{' '}
+                    {quotaPackage.cycleStartTime ?? '—'}
+                  </span>
+                  <span>
+                    {text('accountStatus.packageCycleEnd')}:{' '}
+                    {quotaPackage.cycleEndTime ?? '—'}
+                  </span>
+                </Flexbox>
+              </td>
+              <td>
+                <Tag color={quotaPackage.isExpired ? 'red' : 'green'}>
+                  {quotaPackage.isExpired
+                    ? text('accountStatus.packageExpired')
+                    : text('accountStatus.packageActive')}
+                </Tag>
+              </td>
+            </tr>
+          ))}
         </tbody>
       </table>
     </div>
+  );
+};
+
+const PackageScopeSwitch = ({
+  onChange,
+  value,
+}: {
+  onChange: (scope: PackageScope) => void;
+  value: PackageScope;
+}) => {
+  const text = useTranslations('Admin');
+  return (
+    <Segmented
+      onChange={(next) => onChange(next as PackageScope)}
+      options={[
+        { label: text('accountStatus.packageScopeUsable'), value: 'usable' },
+        { label: text('accountStatus.packageScopeExpired'), value: 'expired' },
+        { label: text('accountStatus.packageScopeAll'), value: 'all' },
+      ]}
+      size="small"
+      value={value}
+      variant="outlined"
+    />
   );
 };
 
@@ -413,6 +541,16 @@ const AccountStatusCard = ({
 }) => {
   const text = useTranslations('Admin');
   const quotaUnknown = text('accountStatus.quotaUnknown');
+  // The scope starts at "usable" because that is the question the page exists
+  // to answer; seeing expired packages is a deliberate second step.
+  const [packageScope, setPackageScope] = useState<PackageScope>('usable');
+  const types = useMemo(
+    () =>
+      (snapshot.credits.packageTypes ?? []).filter((type) =>
+        packageMatchesScope(type.isExpired, packageScope),
+      ),
+    [packageScope, snapshot.credits.packageTypes],
+  );
   return (
     <Block
       className={
@@ -478,7 +616,33 @@ const AccountStatusCard = ({
           items={[
             {
               children: (
-                <PackageBreakdown packages={snapshot.credits.packages ?? []} />
+                <Flexbox direction="vertical" gap={20}>
+                  {types.length ? (
+                    <Flexbox direction="vertical" gap={8}>
+                      <Text strong>{text('accountStatus.packageTypes')}</Text>
+                      <PackageTypeTable types={types} />
+                    </Flexbox>
+                  ) : null}
+                  <Flexbox direction="vertical" gap={8}>
+                    <Flexbox
+                      align="center"
+                      distribution="space-between"
+                      gap={12}
+                      horizontal
+                      wrap="wrap"
+                    >
+                      <Text strong>{text('accountStatus.packages')}</Text>
+                      <PackageScopeSwitch
+                        onChange={setPackageScope}
+                        value={packageScope}
+                      />
+                    </Flexbox>
+                    <PackageBreakdown
+                      packages={snapshot.credits.packages ?? []}
+                      scope={packageScope}
+                    />
+                  </Flexbox>
+                </Flexbox>
               ),
               desc: text('accountStatus.packagesSummary', {
                 total: snapshot.credits.packages.length,

@@ -26,7 +26,22 @@ export interface AccountStatusSnapshot {
       /** Whether this package counts toward the account totals above. */
       isExpired: boolean;
       packageName: string | null;
+      /** Packages share a name by type, so the name identifies the type. */
+      packageType: string | null;
       status: number | null;
+    }>;
+    /**
+     * Per-type totals over the usable packages. The account totals above answer
+     * "how much is left", this answers "how much is left of each plan".
+     */
+    packageTypes: Array<{
+      capacityRemain: number | null;
+      capacitySize: number | null;
+      capacityUsed: number | null;
+      cycleEndTime: string | null;
+      isExpired: boolean;
+      packageCount: number;
+      packageType: string | null;
     }>;
     /** Packages that are neither expired nor empty; the totals above cover these only. */
     usablePackageCount: number;
@@ -288,6 +303,14 @@ const PACKAGE_FIELDS = {
  */
 export const EXPIRED_PACKAGE_STATUS = 3;
 
+const addNullable = (
+  left: number | null,
+  right: number | null,
+): number | null => {
+  if (right === null) return left;
+  return left === null ? right : left + right;
+};
+
 const toRecordArray = (value: unknown): Array<Record<string, unknown>> =>
   Array.isArray(value)
     ? value.filter((item): item is Record<string, unknown> => !!asRecord(item))
@@ -329,6 +352,68 @@ const extractQuotaPackages = (payload: unknown): QuotaPackage[] => {
  */
 const isUsablePackage = (quotaPackage: QuotaPackage): boolean =>
   quotaPackage.status !== EXPIRED_PACKAGE_STATUS;
+
+/**
+ * A type is the package name: the upstream issues every grant of one plan under
+ * the same name, so grouping by name answers which plans the account holds and
+ * what each still has. Expired packages are grouped apart on purpose so their
+ * capacity can never be mistaken for available allowance.
+ */
+const toPackageType = (quotaPackage: QuotaPackage): string | null =>
+  quotaPackage.packageName
+    ? quotaPackage.packageName
+    : quotaPackage.capacityUnit;
+
+const groupPackageTypes = (
+  quotaPackages: QuotaPackage[],
+): AccountStatusSnapshot['credits']['packageTypes'] => {
+  const groups = new Map<
+    string,
+    AccountStatusSnapshot['credits']['packageTypes'][number]
+  >();
+
+  for (const quotaPackage of quotaPackages) {
+    const isExpired = !isUsablePackage(quotaPackage);
+    const packageType = toPackageType(quotaPackage);
+    const key = `${isExpired ? 'expired' : 'usable'}::${packageType ?? 'unknown'}`;
+    const group = groups.get(key) ?? {
+      capacityRemain: null,
+      capacitySize: null,
+      capacityUsed: null,
+      cycleEndTime: null,
+      isExpired,
+      packageCount: 0,
+      packageType,
+    };
+
+    group.packageCount += 1;
+    group.capacityRemain = addNullable(
+      group.capacityRemain,
+      quotaPackage.capacityRemain,
+    );
+    group.capacitySize = addNullable(
+      group.capacitySize,
+      quotaPackage.capacitySize,
+    );
+    group.capacityUsed = addNullable(
+      group.capacityUsed,
+      quotaPackage.capacityUsed,
+    );
+    // The soonest cycle end is the reset that matters for this type.
+    group.cycleEndTime =
+      quotaPackage.cycleEndTime &&
+      (!group.cycleEndTime || quotaPackage.cycleEndTime < group.cycleEndTime)
+        ? quotaPackage.cycleEndTime
+        : group.cycleEndTime;
+    groups.set(key, group);
+  }
+
+  return [...groups.values()].sort(
+    (left, right) =>
+      Number(left.isExpired) - Number(right.isExpired) ||
+      right.packageCount - left.packageCount,
+  );
+};
 
 /**
  * Packages with the earliest cycle end are consumed first, so the reset that
@@ -435,7 +520,9 @@ const loadAccountStatus = async (
       packages: quotaPackages.map((quotaPackage) => ({
         ...quotaPackage,
         isExpired: !isUsablePackage(quotaPackage),
+        packageType: toPackageType(quotaPackage),
       })),
+      packageTypes: groupPackageTypes(quotaPackages),
       usablePackageCount: usablePackages.length,
     },
     error: errors.length ? errors.join('; ') : null,

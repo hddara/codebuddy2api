@@ -74,7 +74,16 @@
       "packageActive": "可用",
       "packageExpired": "已过期",
       "packageUnnamed": "未命名积分包",
-      "packageRemainingPercent": "剩余 {percent}%"
+      "packageRemainingPercent": "剩余 {percent}%",
+      "packageTypes": "类型汇总",
+      "packageType": "类型",
+      "packageCount": "数量",
+      "packageUsedShort": "已用",
+      "packageScopeUsable": "可用",
+      "packageScopeExpired": "已过期",
+      "packageScopeAll": "全部",
+      "noPackagesInScope": "暂无可用积分包",
+      "noExpiredPackages": "暂无过期积分包"
     },
     "dashboard": {
       "welcomeTitle": "做好蹬的准备了吗？",

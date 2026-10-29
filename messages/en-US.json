@@ -74,7 +74,16 @@
       "packageActive": "Active",
       "packageExpired": "Expired",
       "packageUnnamed": "Unnamed package",
-      "packageRemainingPercent": "{percent}% remaining"
+      "packageRemainingPercent": "{percent}% remaining",
+      "packageTypes": "Types",
+      "packageType": "Type",
+      "packageCount": "Count",
+      "packageUsedShort": "Used",
+      "packageScopeUsable": "Usable",
+      "packageScopeExpired": "Expired",
+      "packageScopeAll": "All",
+      "noPackagesInScope": "No usable packages",
+      "noExpiredPackages": "No expired packages"
     },
     "dashboard": {
       "welcomeTitle": "Ready to crank through some tokens?",

@@ -74,7 +74,16 @@
       "packageActive": "有効",
       "packageExpired": "期限切れ",
       "packageUnnamed": "名称未設定のパッケージ",
-      "packageRemainingPercent": "残り {percent}%"
+      "packageRemainingPercent": "残り {percent}%",
+      "packageTypes": "種類の集計",
+      "packageType": "種類",
+      "packageCount": "件数",
+      "packageUsedShort": "使用済み",
+      "packageScopeUsable": "有効",
+      "packageScopeExpired": "期限切れ",
+      "packageScopeAll": "すべて",
+      "noPackagesInScope": "有効なパッケージはありません",
+      "noExpiredPackages": "期限切れのパッケージはありません"
     },
     "dashboard": {
       "welcomeTitle": "トークンをぶん回す準備はできた？",

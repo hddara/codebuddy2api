@@ -154,6 +154,72 @@ describe('account status domain', () => {
       capacityUnit: 'credits',
       isExpired: false,
     });
+    // Types group per name and keep expired grants in their own row, so the
+    // expired capacity can never be read as available allowance.
+    expect(result.credits.packageTypes).toEqual([
+      {
+        capacityRemain: 750,
+        capacitySize: 1000,
+        capacityUsed: 250,
+        cycleEndTime: '2026-09-30 23:59:59',
+        isExpired: false,
+        packageCount: 1,
+        packageType: 'Pro',
+      },
+      {
+        capacityRemain: 9999,
+        capacitySize: 9999,
+        capacityUsed: 0,
+        cycleEndTime: '2027-06-24 14:25:16',
+        isExpired: true,
+        packageCount: 1,
+        packageType: 'Expired pack',
+      },
+    ]);
+  });
+
+  it('groups packages of the same type and keeps unknown capacity unknown', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        jsonResponse(
+          quotaPayload([
+            quotaPackage({ CycleEndTime: '2026-10-02 00:00:00' }),
+            quotaPackage({
+              CycleCapacityRemain: 500,
+              CycleCapacitySize: 800,
+              CycleCapacityUsed: 300,
+              CycleEndTime: '2026-10-01 00:00:00',
+            }),
+            quotaPackage({
+              CapacityUnit: null,
+              CycleCapacityRemain: 'n/a',
+              CycleCapacitySize: null,
+              PackageName: null,
+            }),
+          ]),
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse({ status: 'CLAIMED' }));
+
+    const [result] = await getAccountStatus();
+    const [pro] = result.credits.packageTypes;
+
+    expect(pro).toEqual({
+      capacityRemain: 1250,
+      capacitySize: 1800,
+      capacityUsed: 550,
+      cycleEndTime: '2026-10-01 00:00:00',
+      isExpired: false,
+      packageCount: 2,
+      packageType: 'Pro',
+    });
+    expect(result.credits.packageTypes[1]).toMatchObject({
+      capacityRemain: null,
+      capacitySize: null,
+      capacityUsed: 250,
+      packageCount: 1,
+      packageType: null,
+    });
   });
 
   it('sums several usable packages and reports the soonest reset', async () => {
