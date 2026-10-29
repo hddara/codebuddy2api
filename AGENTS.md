@@ -49,6 +49,35 @@ or the deploy steps, and do not ask the maintainer how releasing works.
   service is the source of truth, read it with `scripts/deploy-swarm.mjs --check`.
 - Rollback is the previous tag in the same manifests plus a redeploy.
 
+## Project MCP servers
+
+`.mcp.json` (gitignored) holds this project's MCP endpoints — GitHub, Grafana and
+Docker Swarm. Clients disagree about where that config lives, so do not expect
+one file to serve both:
+
+- CodeBuddy reads `.mcp.json` from the project root.
+- DeepSeek Harness does not read it. DSH resolves servers from
+  `~/.dsh/profiles/desktop/cordis.patch.yml`, and `~/.dsh/cordis.patch.yml` is the
+  profile-wide layer — anything written there takes effect in **every** workspace
+  of this profile, not just this project.
+
+A project server therefore belongs in neither global file. Call it from the shell
+instead, with the config the project already has:
+
+```bash
+node scripts/mcp-call.mjs list
+node scripts/mcp-call.mjs docker-swarm tools
+node scripts/mcp-call.mjs docker-swarm call list_services '{"stack":"codebuddy2api"}'
+node scripts/mcp-call.mjs grafana call query_loki_logs \
+  '{"datasourceUid":"afzpeeod8d6v4a","logql":"{swarm_service=\"codebuddy2api_app\"}","limit":20,"startRfc3339":"2026-10-29T00:00:00Z","endRfc3339":"2026-10-29T01:00:00Z"}'
+```
+
+The script speaks JSON-RPC to the same URLs and commands the CodeBuddy client
+uses, over HTTP or stdio, and keeps no credential of its own. `--config <path>`
+points it at another file; `--args-file <path>` passes large arguments without
+shell quoting. The deprecated `.dsh/mcp.json` copy was removed: DSH never read it
+and it duplicated the tokens.
+
 ## Verification Before PR
 
 - Run `bun run test:ci` to generate `coverage/lcov.info` and `test-report.junit.xml`.
