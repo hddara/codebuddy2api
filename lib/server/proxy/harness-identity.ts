@@ -91,15 +91,33 @@ const rewriteContent = (content: unknown): unknown => {
   return changed ? parts : content;
 };
 
+/**
+ * Roles that carry instructions rather than conversation.
+ *
+ * `developer` is OpenAI's newer alias for `system`, and a harness that uses it
+ * sends its whole preamble under that name. The official CodeBuddy client never
+ * sends it — its opening turn is always `system` — so the upstream sees a role
+ * its own client does not produce, and the identity marker inside it is not in
+ * the slot the earlier rewrite covered. Treating both roles as one instruction
+ * channel is what keeps a `developer` prompt from bypassing demotion and the
+ * identity rewrite simply by choosing the other spelling.
+ */
+const INSTRUCTION_ROLES = new Set(['developer', 'system']);
+
+const isInstructionRole = (role: unknown): boolean =>
+  INSTRUCTION_ROLES.has(String(role));
+
 /** Roles whose text can carry the caller's identity marker. */
-const REWRITTEN_ROLES = new Set(['system', 'user']);
+const REWRITTEN_ROLES = new Set(['developer', 'system', 'user']);
 
 /**
- * Rewrites the identity phrase in every `system` and `user` message.
+ * Rewrites the identity phrase in every instruction and `user` message.
  *
  * `user` is included because demotion moves the caller's system text into the
  * first user turn: the marker has to follow the text, or the rewrite would
  * report success while leaving the phrase exactly where the caller put it.
+ * `developer` is included because that is the other spelling of the same slot,
+ * and a caller using it would otherwise carry the marker past the rewrite.
  *
  * Returns the original object when nothing matched, so an untouched request
  * does not allocate a copy of a body that may be several megabytes.
@@ -195,7 +213,7 @@ export const collectIdentityClaims = (body: {
     if (
       !message ||
       typeof message !== 'object' ||
-      (message as { role?: unknown }).role !== 'system'
+      !isInstructionRole((message as { role?: unknown }).role)
     ) {
       continue;
     }
@@ -289,7 +307,7 @@ const systemTextOf = (messages: unknown[]): string => {
   for (const message of messages) {
     const entry = message as MessageLike;
 
-    if (!entry || entry.role !== 'system') {
+    if (!entry || !isInstructionRole(entry.role)) {
       continue;
     }
 
@@ -331,6 +349,11 @@ const prependText = (content: unknown, text: string): unknown => {
  * Replaces the `system` slot with the official preamble and demotes whatever
  * the caller had there into the first user turn.
  *
+ * `developer` counts as the same slot: it is OpenAI's alias for `system`, the
+ * official client never sends it, and leaving it in place forwarded both a role
+ * the upstream's own client does not produce and the caller's identity marker
+ * inside it.
+ *
  * Nothing is dropped: the caller's instructions stay in the conversation, in
  * the slot the channel check does not read. A body that had no system message
  * simply gains the official one, which is what the earlier injection path did.
@@ -346,7 +369,7 @@ export const demoteSystemPrompt = <T extends { messages?: unknown }>(
   const messages = body.messages as unknown[];
   const systemText = systemTextOf(messages);
   const rest = messages.filter((message) => {
-    return (message as MessageLike)?.role !== 'system';
+    return !isInstructionRole((message as MessageLike)?.role);
   });
 
   if (systemText) {

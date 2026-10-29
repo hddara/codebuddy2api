@@ -57,6 +57,17 @@ describe('rewriteHarnessIdentity', () => {
     });
   });
 
+  it('rewrites a developer message, the other name for the system slot', () => {
+    const body = {
+      messages: [{ role: 'developer', content: 'You are DeepSeek Harness.' }],
+    };
+
+    expect(rewriteHarnessIdentity(body).messages[0]).toEqual({
+      role: 'developer',
+      content: `You are ${HARNESS_IDENTITY_PLACEHOLDER}.`,
+    });
+  });
+
   it('leaves assistant and tool messages untouched', () => {
     const body = {
       messages: [

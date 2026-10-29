@@ -73,6 +73,25 @@ describe('demoteSystemPrompt', () => {
     });
   });
 
+  it('treats a developer message as the same slot as system', () => {
+    // OpenAI's `developer` role is the other spelling of `system`. A harness
+    // using it must not be able to keep its prompt in that slot, or the
+    // demotion and the identity rewrite both stop applying to it.
+    const body = {
+      messages: [
+        { role: 'developer', content: 'You are an agent.' },
+        { role: 'user', content: 'hi' },
+      ],
+    };
+
+    expect(demoteSystemPrompt(body, true)).toEqual({
+      messages: [
+        { role: 'system', content: DEFAULT_CHANNEL_SYSTEM_PROMPT },
+        { role: 'user', content: 'You are an agent.\n\nhi' },
+      ],
+    });
+  });
+
   it('adds the official preamble to a body that had no system message', () => {
     const body = { messages: [{ role: 'user', content: 'hi' }] };
 
