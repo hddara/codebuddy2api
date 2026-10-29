@@ -23,7 +23,7 @@ services:
     # Keep this in step with what is actually running. On 2026-10-23 the stack
     # defined 20261021.T01 while the service ran 20261023.T01, so a redeploy
     # would silently have rolled the fix back to an older build.
-    image: registry.cn-hangzhou.aliyuncs.com/hucx/codebuddy2api:20261028.T14
+    image: registry.cn-hangzhou.aliyuncs.com/hucx/codebuddy2api:20261029.T01
     ports:
       - '8001:8001'
     environment:
